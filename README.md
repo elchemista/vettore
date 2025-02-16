@@ -9,10 +9,18 @@
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.1.1", github: "elchemista/vettore"}
+    {:vettore, "~> 0.1.2", github: "elchemista/vettore"}
   ]
 end
 ```
+
+## Compile
+
+```bash
+RUSTFLAGS="-C target-cpu=native" mix compile
+```
+
+This sets the Rust compiler’s “target-cpu” to native, instructing it to generate code optimized for your machine’s CPU features (SSE, AVX, etc.).
 
 ---
 
