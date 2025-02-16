@@ -9,7 +9,7 @@
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.1.0", github: "elchemista/vettore"}
+    {:vettore, "~> 0.1.1", github: "elchemista/vettore"}
   ]
 end
 ```
