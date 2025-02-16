@@ -20,7 +20,7 @@ end
 
 The Vettore library is designed for fast, in-memory operations on vector data. All vectors (embeddings) are stored in a Rust data structure (a HashMap) and accessed via a shared resource (using Rustler’s `ResourceArc` with a Mutex). The core operations include:
 
-- **Creating a collection** – A collection is a set of embeddings with a fixed dimension and a chosen similarity metric.
+- **Creating a collection** – A collection is a set of embeddings with a fixed dimension and a chosen similarity metric from euclidean, cosine, dot.
 - **Inserting an embedding** – Add a new vector with an identifier and optional metadata to a specific collection.
 - **Retrieving embeddings** – Fetch all embeddings from a collection or look up a single embedding by its unique ID.
 - **Similarity search** – Given a query vector, calculate a “score” (distance or similarity) for every embedding in the collection and return the top‑k results.
@@ -95,6 +95,15 @@ The `similarity_search` function works as follows:
    - For **Cosine/DotProduct**, higher scores are considered more similar.
 6. Finally, the top‑k results are returned as a list of tuples `(embedding_id, score)`.
 
+
+| Distance Metric    | Measures                       | Magnitude Sensitive? | Scale Invariant? | Best Use Cases                                                                 | Pros                                                                       | Cons                                                                               |
+| ------------------ | ----------------------------- | -------------------- | ---------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Euclidean**      | Straight-line distance        | Yes                  | No               | Magnitude & direction important, dense data, similar scales                  | Intuitive, widely used, magnitudes matter                                    | Magnitude sensitive, curse of dimensionality, not scale-invariant               |
+| **Cosine Similarity** | Directional similarity (angle) | No                   | Yes              | Directional similarity, text, varying magnitudes, scale invariance needed  | Magnitude-insensitive, high-dimensional data, text similarity                | Ignores magnitude differences, less intuitive for some magnitude-dependent apps |
+| **Dot Product**    | Direction & Magnitude combined | Yes                  | No               | Both direction & magnitude matter, ranking, pre-normalized vectors          | Computationally efficient, captures direction & magnitude                   | Magnitude dependent, less intuitive distance, problematic with unmeaningful magnitudes |
+
+
+
 ---
 
 ## Exposed NIF Functions
@@ -105,7 +114,7 @@ All functions are exposed to Elixir using Rustler’s attribute-based NIFs. Here
   Returns a new DB resource (wrapped in `ResourceArc`).
 
 - `create_collection/4`  
-  Creates a new collection in the database with a specified name, vector dimension, and distance metric (e.g., `"euclidean"`).
+  Creates a new collection in the database with a specified name, vector dimension, and distance metric (e.g., `"euclidean"`, `"cosine"`, `"dot"`).
 
 - `delete_collection/2`  
   Deletes a collection by its name.
