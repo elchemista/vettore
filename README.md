@@ -1,6 +1,6 @@
 # Vettore: In-Memory Vector Database with Elixir & Rustler
 
-**Vettore** is an in-memory vector database implemented in Rust and exposed to Elixir via [Rustler](https://github.com/rusterlium/rustler). It allows you to create collections of vectors (embeddings), insert new embeddings (with optional metadata), retrieve all embeddings or a specific embedding by its ID, and perform similarity searches using common metrics (Euclidean, Cosine, or Dot Product).
+**Vettore** is an in-memory vector database implemented in Rust and exposed to Elixir via [Rustler](https://github.com/rusterlium/rustler). It allows you to create collections of vectors (embeddings), insert new embeddings (with optional metadata), retrieve all embeddings or a specific embedding by its ID, and perform similarity searches using common metrics (HNSW, Euclidean, Cosine, or Dot Product) with CPU-specific instructions for maximum performance.
 
 ---
 
