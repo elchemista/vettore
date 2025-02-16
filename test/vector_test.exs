@@ -53,4 +53,26 @@ defmodule VettoreTest do
     assert "emb1" == "emb1"
     assert "emb2" == "emb2"
   end
+
+  test "HNSW operations" do
+    # Create a new in-memory DB
+
+    db = Vettore.new_db()
+
+    # Create a HNSW-based collection
+    assert {:ok, {}} = Vettore.create_collection(db, "mycoll", 3, "hnsw")
+
+    assert {:ok, {}} =
+             Vettore.insert_embedding(db, "mycoll", "vec1", [1.0, 2.0, 3.0], %{"meta" => "test"})
+
+    assert {:ok, {}} = Vettore.insert_embedding(db, "mycoll", "vec2", [2.0, 3.0, 4.0], nil)
+    assert {:ok, {}} = Vettore.insert_embedding(db, "mycoll", "vec3", [3.0, 4.0, 5.0], nil)
+
+    assert {:ok, top_results} = Vettore.similarity_search(db, "mycoll", [1.0, 2.0, 3.0], 2)
+
+    [{"vec1", score1}, {"vec2", score2}] = top_results
+
+    assert length(top_results) == 2
+    assert score1 <= score2
+  end
 end
