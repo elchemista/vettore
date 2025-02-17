@@ -16,7 +16,7 @@ The supported distance metrics are:
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.1.2", github: "elchemista/vettore"}
+    {:vettore, "~> 0.1.3", github: "elchemista/vettore"}
   ]
 end
 ```
