@@ -14,6 +14,7 @@ pub enum Distance {
     Cosine,
     DotProduct,
     Hnsw,
+    Binary,
 }
 
 #[derive(Clone)]
@@ -21,6 +22,7 @@ pub struct Embedding {
     pub id: String,
     pub vector: Vec<f32>,
     pub metadata: Option<HashMap<String, String>>,
+    pub binary: Option<Vec<u64>>,
 }
 
 pub struct Collection {
@@ -119,6 +121,40 @@ fn simd_dot_product(a: &[f32], b: &[f32]) -> f32 {
         i += 1;
     }
     accum
+}
+
+// Compress a vector by encoding each element’s sign as one bit.
+// (For each 64 values, we pack them into one u64.)
+fn compress_vector(vector: &[f32]) -> Vec<u64> {
+    let mut result = Vec::new();
+    let mut current: u64 = 0;
+    let mut bits_filled = 0;
+    for &val in vector {
+        current <<= 1;
+        if val >= 0.0 {
+            current |= 1;
+        }
+        bits_filled += 1;
+        if bits_filled == 64 {
+            result.push(current);
+            current = 0;
+            bits_filled = 0;
+        }
+    }
+    if bits_filled > 0 {
+        // Shift remaining bits into position (optional)
+        current <<= 64 - bits_filled;
+        result.push(current);
+    }
+    result
+}
+
+// Compute the Hamming distance between two compressed vectors.
+fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x ^ y).count_ones())
+        .sum()
 }
 
 // For Cosine, we store normalized vectors
@@ -435,11 +471,12 @@ impl HnswIndexWrapper {
 
 impl Collection {
     pub fn create_with_distance(dimension: usize, dist_str: &str) -> Result<Self, String> {
-        let distance = match dist_str {
+        let distance = match dist_str.to_lowercase().as_str() {
             "euclidean" => Distance::Euclidean,
             "cosine" => Distance::Cosine,
             "dot" => Distance::DotProduct,
             "hnsw" => Distance::Hnsw,
+            "binary" => Distance::Binary, // New: support binary index
             other => return Err(format!("Unknown distance '{}'", other)),
         };
 
@@ -473,10 +510,14 @@ impl Collection {
         if self.distance == Distance::Cosine {
             new_emb.vector = normalize_vec(&new_emb.vector);
         }
+        // NEW: If Binary, precompute and store the compressed signature.
+        if self.distance == Distance::Binary {
+            new_emb.binary = Some(compress_vector(&new_emb.vector));
+        }
 
         self.embeddings.push(new_emb.clone());
 
-        // If HNSW => insert also
+        // If HNSW => insert also into the index.
         if self.distance == Distance::Hnsw {
             if let Some(ref mut w) = self.hnsw_index {
                 w.insert_embedding(&new_emb)?;
@@ -502,8 +543,7 @@ impl Collection {
                         (emb.id.clone(), dist)
                     })
                     .collect();
-                // smaller => more similar
-                scored.sort_by(|a,b| a.1.partial_cmp(&b.1).unwrap());
+                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
                 scored.truncate(k);
                 Ok(scored)
             }
@@ -511,12 +551,11 @@ impl Collection {
                 let mut scored: Vec<_> = self.embeddings
                     .iter()
                     .map(|emb| {
-                        // bigger => more similar
                         let dp = simd_dot_product(query, &emb.vector);
                         (emb.id.clone(), dp)
                     })
                     .collect();
-                scored.sort_by(|a,b| b.1.partial_cmp(&a.1).unwrap());
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
                 scored.truncate(k);
                 Ok(scored)
             }
@@ -528,7 +567,29 @@ impl Collection {
                         (emb.id.clone(), dp)
                     })
                     .collect();
-                scored.sort_by(|a,b| b.1.partial_cmp(&a.1).unwrap());
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                scored.truncate(k);
+                Ok(scored)
+            }
+            Distance::Binary => {
+                // Compress the query vector into its binary signature.
+                let query_binary = compress_vector(query);
+                let mut scored: Vec<_> = self.embeddings
+                    .iter()
+                    .map(|emb| {
+                        // If a binary signature is already stored, use it.
+                        // Otherwise, compute it on the fly.
+                        let d = if let Some(ref emb_bin) = emb.binary {
+                            hamming_distance(&query_binary, emb_bin)
+                        } else {
+                            let computed = compress_vector(&emb.vector);
+                            hamming_distance(&query_binary, &computed)
+                        };
+                        // Lower Hamming distance means more similar.
+                        (emb.id.clone(), d as f32)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
                 scored.truncate(k);
                 Ok(scored)
             }
@@ -574,6 +635,7 @@ fn insert_embedding(
         id,
         vector,
         metadata,
+        binary: None, // Initialize the new field
     };
     coll.insert_embedding(emb)
 }
