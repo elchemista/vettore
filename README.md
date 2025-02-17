@@ -3,6 +3,7 @@
 **Vettore** is an in-memory vector database implemented in Rust and exposed to Elixir via [Rustler](https://github.com/rusterlium/rustler). It allows you to create collections of vectors (embeddings), insert new embeddings (with optional metadata), retrieve all embeddings or a specific embedding by its ID, and perform similarity searches using common metrics with CPU-specific instructions for maximum performance.
 
 The supported distance metrics are:
+
 - **Euclidean**
 - **Cosine**
 - **Dot Product**
@@ -16,7 +17,7 @@ The supported distance metrics are:
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.1.2", github: "elchemista/vettore"}
+    {:vettore, "~> 0.1.3", github: "elchemista/vettore"}
   ]
 end
 ```
@@ -51,16 +52,18 @@ The Vettore library is designed for fast, in-memory operations on vector data. A
 
 2. **Collection**  
    Each collection is a struct with the following fields:
+
    - `dimension: usize` – The fixed length of every vector in this collection.
    - `distance: Distance` – The similarity metric used (e.g., Euclidean, Cosine, DotProduct, HNSW, Binary).
    - `embeddings: Vec<Embedding>` – A vector containing all embeddings in the collection.
 
 3. **Embedding**  
    An embedding is represented by:
+
    - `id: String` – A unique identifier.
    - `vector: Vec<f32>` – The actual vector values.
    - `metadata: Option<HashMap<String, String>>` – Optional additional information.
-   - `binary: Option<Vec<u64>>` – *New:* A compressed binary signature (used with the **binary** distance metric).
+   - `binary: Option<Vec<u64>>` – _New:_ A compressed binary signature (used with the **binary** distance metric).
 
 4. **DBResource**  
    The `CacheDB` is wrapped in a `DBResource` which is stored inside a Rustler `ResourceArc`. This allows the Elixir side to hold a reference to the in‑memory database across NIF calls. The database is guarded by a `Mutex` to ensure safe concurrent access.
@@ -79,6 +82,7 @@ The Vettore library is designed for fast, in-memory operations on vector data. A
 #### Inserting Vectors
 
 When you call the `insert_embedding` function:
+
 1. The collection is retrieved from the database.
 2. The function checks that the vector’s dimension matches the collection’s defined dimension.
 3. It verifies that there isn’t already an embedding with the same ID in the collection.
@@ -97,6 +101,7 @@ When you call the `insert_embedding` function:
 #### Similarity Search
 
 The `similarity_search` function works as follows:
+
 1. It retrieves the target collection and verifies that the query vector’s dimension matches.
 2. Depending on the chosen distance metric, it selects an appropriate function:
    - **Euclidean:** Computes the standard Euclidean distance.
@@ -110,13 +115,13 @@ The `similarity_search` function works as follows:
    - For **Binary**, a lower Hamming distance means the vectors are more similar.
 5. Finally, the top‑k results are returned as a list of tuples `(embedding_id, score)`.
 
-| Technique/Algorithm    | Measures                                   | Magnitude Sensitive?¹ | Scale Invariant?¹ | Best Use Cases                                                                       | Pros                                                                                                | Cons                                                                                                                 |
-| ---------------------- | ------------------------------------------ | ---------------------- | ----------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **Euclidean Distance** | Straight-line distance                     | Yes                    | No                | Dense data where both magnitude & direction are important                         | Intuitive, widely used, captures magnitude differences                                               | Sensitive to scale differences, high dimensionality issues                                                           |
-| **Cosine Similarity**  | Directional similarity (angle)             | No                     | Yes               | Text or high-dimensional data where scale invariance is desired                     | Insensitive to magnitude, works well with normalized vectors                                         | Ignores magnitude differences                                                                                        |
-| **Dot Product**        | Combination of direction & magnitude       | Yes                    | No                | Applications where both direction & magnitude matter                                | Computationally efficient, captures both aspects                                                     | Sensitive to vector magnitudes                                                                                       |
-| **HNSW Indexing**      | Graph-based Approximate Nearest Neighbor Search | Dependent on Metric   | Dependent on Metric | Large datasets, real-time search when approximate results are acceptable             | **Sublinear search time**, good speed-accuracy trade-off, scalable                                    | Approximate results, index build time and memory overhead                                                             |
-| **Binary (Hamming)**   | Fast binary signature comparison using Hamming distance | No                     | Yes               | Applications requiring ultra‑fast approximate searches on large-scale data           | Extremely fast comparison via bit-level operations, low memory footprint                             | Loses precision due to compression, less suited when exact distances are needed                                        |
+| Technique/Algorithm    | Measures                                                | Magnitude Sensitive?¹ | Scale Invariant?¹   | Best Use Cases                                                             | Pros                                                                     | Cons                                                                            |
+| ---------------------- | ------------------------------------------------------- | --------------------- | ------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| **Euclidean Distance** | Straight-line distance                                  | Yes                   | No                  | Dense data where both magnitude & direction are important                  | Intuitive, widely used, captures magnitude differences                   | Sensitive to scale differences, high dimensionality issues                      |
+| **Cosine Similarity**  | Directional similarity (angle)                          | No                    | Yes                 | Text or high-dimensional data where scale invariance is desired            | Insensitive to magnitude, works well with normalized vectors             | Ignores magnitude differences                                                   |
+| **Dot Product**        | Combination of direction & magnitude                    | Yes                   | No                  | Applications where both direction & magnitude matter                       | Computationally efficient, captures both aspects                         | Sensitive to vector magnitudes                                                  |
+| **HNSW Indexing**      | Graph-based Approximate Nearest Neighbor Search         | Dependent on Metric   | Dependent on Metric | Large datasets, real-time search when approximate results are acceptable   | **Sublinear search time**, good speed-accuracy trade-off, scalable       | Approximate results, index build time and memory overhead                       |
+| **Binary (Hamming)**   | Fast binary signature comparison using Hamming distance | No                    | Yes                 | Applications requiring ultra‑fast approximate searches on large-scale data | Extremely fast comparison via bit-level operations, low memory footprint | Loses precision due to compression, less suited when exact distances are needed |
 
 ---
 
@@ -214,6 +219,7 @@ For collections using the **binary** distance metric, the similarity search comp
 
 3. **Distance Metrics and Similarity**  
    The library supports several distance metrics:
+
    - **Euclidean:** Calculates the standard Euclidean distance between two vectors.
    - **Cosine:** Vectors are normalized before insertion; similarity is computed via the dot product.
    - **Dot Product:** Uses the dot product directly.
