@@ -4,10 +4,20 @@ defmodule Vettore.MixProject do
   def project do
     [
       app: :vettore,
+      name: "Vettore - In-Memory Vector Database",
       version: "0.1.3",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      description: description(),
+      package: package(),
+      docs: [
+        main: "Vettore",
+        extras: [
+          "README.md",
+          "LICENSE"
+        ]
+      ]
     ]
   end
 
@@ -18,11 +28,28 @@ defmodule Vettore.MixProject do
     ]
   end
 
+  defp description() do
+    "Vettore: In-Memory Vector Database with Elixir & Rustler"
+  end
+
+  defp package() do
+    [
+      licenses: ["MIT"],
+      links: %{
+        project: "https://github.com/elchemista/vettore",
+        developer_github: "https://github.com/elchemista"
+      }
+    ]
+  end
+
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
       {:rustler, "~> 0.36.1"},
-      {:credo, "~> 1.6", only: [:dev, :test], runtime: false}
+      {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
+      # Documentation Provider
+      {:ex_doc, "~> 0.28.3", only: [:dev, :test], optional: true, runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 end
