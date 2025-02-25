@@ -36,8 +36,9 @@ This sets the Rust compiler’s “target-cpu” to native, instructing it to ge
 
 The Vettore library is designed for fast, in-memory operations on vector data. All vectors (embeddings) are stored in a Rust data structure (a HashMap) and accessed via a shared resource (using Rustler’s `ResourceArc` with a Mutex). The core operations include:
 
-- **Creating a collection** – A collection is a set of embeddings with a fixed dimension and a chosen similarity metric from **hnsw**, **binary** (Hamming distance), **euclidean**, **cosine**, or **dot**.
+- **Creating a collection** – A collection is a set of embeddings with a fixed dimension and a chosen similarity metric: **hnsw**, **binary**, **euclidean**, **cosine**, or **dot**.
 - **Inserting an embedding** – Add a new vector with an identifier and optional metadata to a specific collection.
+- **Batch Inserting embeddings** – Insert a list of embeddings (batch) into a collection in one call.
 - **Retrieving embeddings** – Fetch all embeddings from a collection or look up a single embedding by its unique ID.
 - **Similarity search** – Given a query vector, calculate a “score” (distance or similarity) for every embedding in the collection and return the top‑k results.
 
@@ -51,11 +52,12 @@ The Vettore library is designed for fast, in-memory operations on vector data. A
    The main in‑memory database is defined as a `CacheDB` struct. Internally, it stores collections in a Rust [`HashMap<String, Collection>`](https://doc.rust-lang.org/std/collections/struct.HashMap.html), mapping collection names to a `Collection` struct.
 
 2. **Collection**  
-   Each collection is a struct with the following fields:
+   Each collection is a struct with:
 
    - `dimension: usize` – The fixed length of every vector in this collection.
    - `distance: Distance` – The similarity metric used (e.g., Euclidean, Cosine, DotProduct, HNSW, Binary).
-   - `embeddings: Vec<Embedding>` – A vector containing all embeddings in the collection.
+   - `embeddings: Vec<Embedding>` – A vector containing all embeddings.
+   - `hnsw_index: Option<HnswIndexWrapper>` – An optional HNSW index for approximate nearest neighbor search.
 
 3. **Embedding**  
    An embedding is represented by:
@@ -63,10 +65,55 @@ The Vettore library is designed for fast, in-memory operations on vector data. A
    - `id: String` – A unique identifier.
    - `vector: Vec<f32>` – The actual vector values.
    - `metadata: Option<HashMap<String, String>>` – Optional additional information.
-   - `binary: Option<Vec<u64>>` – _New:_ A compressed binary signature (used with the **binary** distance metric).
+   - `binary: Option<Vec<u64>>` – _For the **binary** distance metric_, a compressed signature.
 
 4. **DBResource**  
-   The `CacheDB` is wrapped in a `DBResource` which is stored inside a Rustler `ResourceArc`. This allows the Elixir side to hold a reference to the in‑memory database across NIF calls. The database is guarded by a `Mutex` to ensure safe concurrent access.
+   The `CacheDB` is wrapped in a `DBResource` (and stored as a Rustler `ResourceArc`). This allows Elixir to hold a reference to the database across NIF calls, and it is guarded by a `Mutex` to ensure thread safety.
+
+---
+
+## Public API / NIF Functions
+
+All core functions are accessible in Elixir via `Vettore.*` calls. Their **return values** (on success) now include more information:
+
+1. **`create_collection(db, name, dimension, distance)`**  
+   Returns `{:ok, collection_name}` or `{:error, reason}`.
+
+   - Creates a new collection in the database with a specified dimension and distance metric.
+
+2. **`delete_collection(db, name)`**  
+   Returns `{:ok, collection_name}` or `{:error, reason}`.
+
+   - Deletes an existing collection (by name).
+
+3. **`insert_embedding(db, collection_name, embedding_struct)`**  
+   Returns `{:ok, embedding_id}` or `{:error, reason}`.
+
+   - Inserts a single embedding (with an ID, vector, and optional metadata).
+
+4. **`insert_embeddings(db, collection_name, [embedding_structs])`**  
+   Returns `{:ok, list_of_inserted_ids}` or `{:error, reason}`.
+
+   - **Batch insertion**: Insert a list of embeddings in one call.
+   - If any embedding fails (dimension mismatch, duplicate ID, etc.), an error is returned immediately and the rest are not inserted.
+
+5. **`get_embeddings(db, collection_name)`**  
+   Returns `{:ok, list_of({id, vector, metadata})}` or `{:error, reason}`.
+
+   - Retrieves all embeddings from the specified collection.
+
+6. **`get_embedding_by_id(db, collection_name, id)`**  
+   Returns `{:ok, %Vettore.Embedding{}}` or `{:error, reason}`.
+
+   - Looks up a single embedding by its ID.
+
+7. **`similarity_search(db, collection_name, query_vector, k)`**  
+   Returns `{:ok, list_of({id, score})}` or `{:error, reason}`.
+
+   - Performs a similarity or distance search with the given query vector, returning the top‑k results.
+
+8. **`new_db()`**  
+   Returns a **DB resource** (reference to the underlying Rust `CacheDB`).
 
 ---
 
@@ -81,22 +128,14 @@ The Vettore library is designed for fast, in-memory operations on vector data. A
 
 #### Inserting Vectors
 
-When you call the `insert_embedding` function:
+When you call the `insert_embedding`, `insert_embeddings` functions:
 
 1. The collection is retrieved from the database.
 2. The function checks that the vector’s dimension matches the collection’s defined dimension.
 3. It verifies that there isn’t already an embedding with the same ID in the collection.
 4. For **Cosine** distance collections, the vector is normalized before insertion.
 5. For **Binary** distance collections, a binary signature is precomputed and stored (using the sign of each float to produce a bit-packed representation).
-6. The new embedding is then pushed into the collection’s vector of embeddings.
-
-#### Retrieving Vectors
-
-- **Get All Embeddings:**  
-  The `get_embeddings` NIF returns all embeddings from a collection as a list of triples: `(id, vector, metadata)`.
-
-- **Get Embedding by ID:**  
-  The `get_embedding_by_id` function searches the collection’s embeddings (using an iterator) for a matching ID and returns the complete embedding (including metadata).
+6. The new embeddings is then pushed into the collection’s vector of embeddings.
 
 #### Similarity Search
 
@@ -125,117 +164,100 @@ The `similarity_search` function works as follows:
 
 ---
 
-## Exposed NIF Functions
+## Batch Insert Example
 
-All functions are exposed to Elixir using Rustler’s attribute-based NIFs. Here’s a summary:
+Because `insert_embeddings/3` now accepts a **list** of `%Vettore.Embedding{}` structs and returns a list of IDs, you can do the following:
 
-- `new_db/0`  
-  Returns a new DB resource (wrapped in `ResourceArc`).
+```elixir
+db = Vettore.new_db()
+{:ok, "my_coll"} = Vettore.create_collection(db, "my_coll", 3, "cosine")
 
-- `create_collection/4`  
-  Creates a new collection in the database with a specified name, vector dimension, and distance metric (e.g., `"euclidean"`, `"cosine"`, `"dot"`, `"hnsw"`, or `"binary"`).
+# Define a list of embeddings
+batch = [
+  %Vettore.Embedding{id: "a", vector: [1.0, 2.0, 3.0], metadata: %{"tag" => "alpha"}},
+  %Vettore.Embedding{id: "b", vector: [2.0, 2.5, 3.5], metadata: nil}
+]
 
-- `delete_collection/2`  
-  Deletes a collection by its name.
+# Insert them all in one call
+case Vettore.insert_embeddings(db, "my_coll", batch) do
+  {:ok, inserted_ids} ->
+    IO.inspect(inserted_ids, label: "Batch inserted IDs")
 
-- `insert_embedding/5`  
-  Inserts an embedding into a collection. Parameters include the collection name, embedding ID, vector (as a list of floats), and optional metadata (a map). For **binary** collections, the embedding’s binary signature is automatically computed.
+  {:error, reason} ->
+    IO.puts("Failed to insert batch: #{reason}")
+end
+```
 
-- `get_embeddings/2`  
-  Returns all embeddings from a given collection, each with their ID, vector, and metadata.
+On success, you might see something like:
 
-- `get_embedding_by_id/3`  
-  Returns a single embedding (with full metadata) for a given collection and embedding ID.
-
-- `similarity_search/4`  
-  Given a collection name, a query vector, and a number `k`, it returns the top‑k embeddings as a list of `(id, score)` tuples.
+```
+Batch inserted IDs: ["a", "b"]
+```
 
 ---
 
-## Example Usage
-
-### Elixir Code
-
-Below is an example of how you might use the Vettore library from Elixir:
+## Example Usage for Single Insert & Retrieval
 
 ```elixir
 defmodule VettoreExample do
+  alias Vettore.Embedding
+
   def demo do
-    # Create a new in-memory DB resource
+    # 1) Create a new in-memory DB resource
     db = Vettore.new_db()
 
-    # Create a new collection called "my_collection" with vectors of dimension 3,
-    # using Euclidean distance.
-    {:ok, {}} = Vettore.create_collection(db, "my_collection", 3, "euclidean")
+    # 2) Create a new collection named "my_collection"
+    {:ok, "my_collection"} = Vettore.create_collection(db, "my_collection", 3, "euclidean")
 
-    # Insert two embeddings into the collection.
-    {:ok, {}} =
-      Vettore.insert_embedding(db, "my_collection", "emb1", [1.0, 2.0, 3.0], %{"info" => "test"})
+    # 3) Insert a single embedding
+    embed = %Embedding{id: "emb1", vector: [1.0, 2.0, 3.0], metadata: %{"info" => "test"}}
+    {:ok, "emb1"} = Vettore.insert_embedding(db, "my_collection", embed)
 
-    {:ok, {}} = Vettore.insert_embedding(db, "my_collection", "emb2", [2.0, 3.0, 4.0], nil)
+    # 4) Retrieve all embeddings
+    {:ok, all_embs} = Vettore.get_embeddings(db, "my_collection")
+    IO.inspect(all_embs, label: "All embeddings in my_collection")
 
-    # Retrieve all embeddings from the collection.
-    {:ok, embeddings} = Vettore.get_embeddings(db, "my_collection")
-    IO.inspect(embeddings, label: "All embeddings:")
+    # 5) Retrieve specific embedding by ID
+    {:ok, %Embedding{id: e_id, vector: e_vec, metadata: e_meta}} =
+      Vettore.get_embedding_by_id(db, "my_collection", "emb1")
 
-    # Retrieve a specific embedding by ID.
-    {:ok, {id, vector, metadata}} = Vettore.get_embedding_by_id(db, "my_collection", "emb1")
-    IO.inspect(id, label: "Embedding ID")
-    IO.inspect(vector, label: "Embedding vector")
-    IO.inspect(metadata, label: "Embedding metadata")
+    IO.inspect(e_id, label: "Single embedding ID")
+    IO.inspect(e_vec, label: "Single embedding vector")
+    IO.inspect(e_meta, label: "Single embedding metadata")
 
-    # Perform a similarity search with the query vector [1.0, 2.0, 3.0] and return top 2 matches.
+    # 6) Similarity search
     {:ok, top_results} = Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0], 2)
-    IO.inspect(top_results, label: "Similarity results (id, score):")
+    IO.inspect(top_results, label: "Similarity search results")
   end
 end
 ```
 
-### Expected Output
+---
 
-Running the above code (for example, in an IEx session) might produce:
+## Performance Notes
+
+- **HNSW** can speed up searches significantly for large datasets but comes with higher memory usage for the index.
+- **Binary** distance uses bit-level compression and Hamming distance for extremely fast approximate similarity checks (especially beneficial for large or high-dimensional vectors, though it trades off some precision).
+- **Cosine** normalizes vectors once on insertion, so queries and stored embeddings use a straightforward dot product.
+- **Dot Product** directly multiplies corresponding elements.
+- **Euclidean** uses a SIMD approach (`wide::f32x4`) for partial vectorization.
+
+You can further optimize by compiling with:
 
 ```
-All embeddings: [{"emb1", [1.0, 2.0, 3.0], %{"info" => "test"}}, {"emb2", [2.0, 3.0, 4.0], nil}]
-Embedding ID: "emb1"
-Embedding vector: [1.0, 2.0, 3.0]
-Embedding metadata: %{"info" => "test"}
-Similarity results (id, score): [{"emb1", 0.0}, {"emb2", 1.7320507764816284}]
+RUSTFLAGS="-C target-cpu=native -C opt-level=3" mix compile
 ```
-
-For collections using the **binary** distance metric, the similarity search compresses the vectors into binary signatures and computes the Hamming distance. This yields extremely fast similarity comparisons, especially useful for large-scale datasets, albeit with a trade-off in precision.
 
 ---
 
-## Detailed Explanation: How It Works Under the Hood
+## Contributing
 
-1. **Resource Management**  
-   The in-memory database is created using `CacheDB::new` and then wrapped in a `DBResource`, which is stored as a Rustler `ResourceArc`. This allows the Elixir process to hold a reference to the DB, and all operations (create, insert, search) lock the underlying Mutex to ensure thread safety.
+Contributions are welcome! Feel free to open issues or submit pull requests on GitHub.
 
-2. **Collections & Embeddings**
+---
 
-   - **Collections:** Each collection is a separate entry in the `CacheDB.collections` HashMap, identified by its name. A collection stores the expected vector dimension, the similarity metric, and a vector of embeddings.
-   - **Embeddings:** An embedding holds an ID, the vector data, optional metadata, and (if applicable) a precomputed binary signature for fast Hamming comparisons.
+## License
 
-3. **Distance Metrics and Similarity**  
-   The library supports several distance metrics:
-
-   - **Euclidean:** Calculates the standard Euclidean distance between two vectors.
-   - **Cosine:** Vectors are normalized before insertion; similarity is computed via the dot product.
-   - **Dot Product:** Uses the dot product directly.
-   - **HNSW:** Leverages a graph-based approach for approximate nearest neighbor search.
-   - **Binary:** Compresses each vector into a binary signature (using the sign of each component) and computes similarity via Hamming distance. This provides very fast approximate search by using bit-level operations.
-
-4. **Search Algorithm**
-
-   - For each embedding in the target collection, the library calculates a score (distance or similarity) between the stored vector (or its binary signature) and the query vector.
-   - The resulting list of scores is sorted:
-     - **Euclidean:** Sorted in ascending order.
-     - **Cosine/Dot Product:** Sorted in descending order.
-     - **Binary:** Sorted in ascending order of Hamming distance.
-   - The top‑k entries are returned to the caller.
-
-5. **NIF Integration**  
-   Each core operation is exposed as a NIF function (annotated with `#[rustler::nif]`), so that they can be called directly from Elixir. The Rustler macro `rustler::init!` (with the `on_load` callback) ensures that the NIF is properly loaded and that the resource type is registered.
+This project is licensed under the MIT License.
 
 ---
