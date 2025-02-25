@@ -47,6 +47,7 @@ defmodule Vettore.MixProject do
     [
       {:rustler, "~> 0.36.1"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
+      {:benchee, "~> 1.0", only: :dev},
       # Documentation Provider
       {:ex_doc, "~> 0.28.3", only: [:dev, :test], optional: true, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
