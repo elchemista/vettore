@@ -17,7 +17,7 @@ The supported distance metrics are:
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.1.3", github: "elchemista/vettore"}
+    {:vettore, "~> 0.1.5", github: "elchemista/vettore"}
   ]
 end
 ```
@@ -107,7 +107,7 @@ All core functions are accessible in Elixir via `Vettore.*` calls. Their **retur
 
    - Looks up a single embedding by its ID.
 
-7. **`similarity_search(db, collection_name, query_vector, k)`**  
+7. **`similarity_search(db, collection_name, query_vector, [limit: k, filter: map()])`**
    Returns `{:ok, list_of({id, score})}` or `{:error, reason}`.
 
    - Performs a similarity or distance search with the given query vector, returning the top‑k results.
@@ -226,7 +226,7 @@ defmodule VettoreExample do
     IO.inspect(e_meta, label: "Single embedding metadata")
 
     # 6) Similarity search
-    {:ok, top_results} = Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0], 2)
+    {:ok, top_results} = Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0], limit: 2, filter: %{"info" => "test"})
     IO.inspect(top_results, label: "Similarity search results")
   end
 end

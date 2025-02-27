@@ -57,7 +57,7 @@ benchmarks =
     search_key = "similarity_search_#{dist}"
     search_fun = fn ->
       # We'll search top_k with the 'query'
-      Vettore.similarity_search(db, coll_name, query, top_k)
+      Vettore.similarity_search(db, coll_name, query, limit: top_k)
     end
 
     acc
