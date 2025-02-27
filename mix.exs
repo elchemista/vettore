@@ -5,7 +5,7 @@ defmodule Vettore.MixProject do
     [
       app: :vettore,
       name: "Vettore - In-Memory Vector Database",
-      version: "0.1.4",
+      version: "0.1.5",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

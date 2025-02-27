@@ -200,7 +200,9 @@ defmodule Vettore do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Performs a similarity (or distance) search in the given `collection` using the provided `query` vector, returning
+  Similarity search with optional `limit` (defaults to 10) and optional `filter` map.
+
+  performs a similarity (or distance) search in the given `collection` using the provided `query` vector, returning
   the **top-k** results as a list of `{embedding_id, score}` tuples.
 
   - For `"euclidean"`, lower scores are better (distance).
@@ -209,23 +211,36 @@ defmodule Vettore do
   - For `"binary"`, the score is the Hamming distance—lower is more similar.
   - For `"hnsw"`, an approximate nearest neighbors is used.
 
-  Returns `{:ok, list_of_tuples}` or `{:error, reason}`.
+  Examples:
+      Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0], limit: 2, filter: %{"category" => "test"})
+      Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0], limit: 2)
+      Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0])
 
-  ## Examples
-
-      {:ok, results} = Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0], 2)
-      # => {:ok, [{"emb1", 0.0}, {"emb2", 1.23}]}
+       # => {:ok, [{"emb1", 0.0}, {"emb2", 1.23}]}
   """
-  @spec similarity_search(any(), String.t(), [float()], integer()) ::
+  @spec similarity_search(any(), String.t(), [float()], keyword()) ::
           {:ok, [{String.t(), float()}]} | {:error, String.t()}
-  def similarity_search(_db, _collection, _query, _k),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def similarity_search(db, collection, query, opts \\ []) do
+    k = Keyword.get(opts, :limit, 10)
+    filter = Keyword.get(opts, :filter, nil)
+
+    if is_nil(filter) do
+      nif_similarity_search(db, collection, query, k)
+    else
+      nif_similarity_search_with_filter(db, collection, query, k, filter)
+    end
+  end
 
   #
   # Internal (NIF) function signatures:
   #  - These do the direct Rust calls using the "raw" data form (id, vector, metadata).
   #  - The "public" functions above wrap them in your Elixir API.
   #
+
+  @doc false
+  @spec nif_similarity_search(any(), any(), any(), any()) :: any()
+  def nif_similarity_search(_db, _collection, _query, _k),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec nif_insert_embedding(any(), String.t(), String.t(), [float()], map() | nil) ::
@@ -246,5 +261,17 @@ defmodule Vettore do
   @spec nif_get_embedding_by_id(any(), String.t(), String.t()) ::
           {:ok, {String.t(), [float()], map() | nil}} | {:error, String.t()}
   def nif_get_embedding_by_id(_db, _collection, _id),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec nif_similarity_search_with_filter(
+          any(),
+          String.t(),
+          [float()],
+          non_neg_integer(),
+          map() | nil
+        ) ::
+          {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def nif_similarity_search_with_filter(_db, _collection, _query, _k, _filter),
     do: :erlang.nif_error(:nif_not_loaded)
 end

@@ -1,7 +1,5 @@
 defmodule VettoreTest do
   use ExUnit.Case, async: true
-  # doctest Vettore   # <-- remove or comment out if you don't want actual doctests
-
   alias Vettore.Embedding
 
   @moduletag :vettore
@@ -9,11 +7,9 @@ defmodule VettoreTest do
   test "CRUD operations with Euclidean" do
     db = Vettore.new_db()
 
-    # Create a Euclidean-based collection
     assert {:ok, "euclidean_coll"} =
              Vettore.create_collection(db, "euclidean_coll", 3, "euclidean")
 
-    # Insert embeddings into the collection
     assert {:ok, "emb1"} =
              Vettore.insert_embedding(db, "euclidean_coll", %Embedding{
                id: "emb1",
@@ -46,18 +42,128 @@ defmodule VettoreTest do
     assert vec == [1.0, 2.0, 3.0]
     assert meta == %{"info" => "test"}
 
-    # Similarity search (for Euclidean, smaller distance = better)
-    assert {:ok, top2} = Vettore.similarity_search(db, "euclidean_coll", [1.0, 2.0, 3.0], 2)
-    assert length(top2) == 2
+    # Similarity search (Euclidean => smaller is better)
+    assert {:ok, top2} =
+             Vettore.similarity_search(db, "euclidean_coll", [1.0, 2.0, 3.0], limit: 2)
 
-    # top2 should be [{"emb1", dist1}, {"emb2", dist2}] with dist1 <= dist2
+    assert length(top2) == 2
     [{"emb1", score1}, {"emb2", score2}] = top2
     assert score1 <= score2
   end
 
+  test "metadata filtering (Euclidean example)" do
+    db = Vettore.new_db()
+
+    assert {:ok, "filter_coll"} =
+             Vettore.create_collection(db, "filter_coll", 2, "euclidean")
+
+    # Insert 2 embeddings, only one has category="special"
+    assert {:ok, "f1"} =
+             Vettore.insert_embedding(db, "filter_coll", %Embedding{
+               id: "f1",
+               vector: [0.1, 0.1],
+               metadata: %{"category" => "special"}
+             })
+
+    assert {:ok, "f2"} =
+             Vettore.insert_embedding(db, "filter_coll", %Embedding{
+               id: "f2",
+               vector: [5.0, 5.0],
+               metadata: %{"category" => "other"}
+             })
+
+    # Normal search (limit=2)
+    assert {:ok, overall} =
+             Vettore.similarity_search(db, "filter_coll", [0.0, 0.0], limit: 2)
+
+    # Expect 2 results
+    assert length(overall) == 2
+
+    # Filter => only the "special" one
+    assert {:ok, only_special} =
+             Vettore.similarity_search(
+               db,
+               "filter_coll",
+               [0.0, 0.0],
+               limit: 2,
+               filter: %{"category" => "special"}
+             )
+
+    assert [{"f1", _score}] = only_special
+
+    # Filter => "missing" key => expect empty
+    assert {:ok, []} =
+             Vettore.similarity_search(
+               db,
+               "filter_coll",
+               [0.0, 0.0],
+               limit: 2,
+               filter: %{"unknown" => "does_not_exist"}
+             )
+  end
+
+  test "all embeddings without metadata" do
+    db = Vettore.new_db()
+
+    assert {:ok, "no_meta_coll"} =
+             Vettore.create_collection(db, "no_meta_coll", 2, "euclidean")
+
+    # Insert embeddings that have no metadata
+    for i <- 1..3 do
+      id = "nm#{i}"
+
+      assert {:ok, ^id} =
+               Vettore.insert_embedding(db, "no_meta_coll", %Embedding{
+                 id: id,
+                 vector: [i * 1.0, i * 2.0],
+                 metadata: nil
+               })
+    end
+
+    # Try to filter => should be empty since none has metadata
+    assert {:ok, []} =
+             Vettore.similarity_search(
+               db,
+               "no_meta_coll",
+               [1.0, 1.0],
+               filter: %{"irrelevant" => "something"}
+             )
+  end
+
+  test "checking limit is respected" do
+    db = Vettore.new_db()
+
+    assert {:ok, "many_coll"} =
+             Vettore.create_collection(db, "many_coll", 2, "euclidean")
+
+    # Insert 5 embeddings
+    for i <- 1..5 do
+      id = "m#{i}"
+
+      assert {:ok, ^id} =
+               Vettore.insert_embedding(db, "many_coll", %Embedding{
+                 id: id,
+                 vector: [i * 1.0, i * 1.0],
+                 metadata: %{"kind" => "test"}
+               })
+    end
+
+    # Request limit=3
+    assert {:ok, top3} =
+             Vettore.similarity_search(
+               db,
+               "many_coll",
+               [0.0, 0.0],
+               limit: 3,
+               filter: %{"kind" => "test"}
+             )
+
+    # Expect exactly 3 results
+    assert length(top3) == 3
+  end
+
   test "HNSW operations" do
     db = Vettore.new_db()
-    # Create an HNSW-based collection
     assert {:ok, "hnsw_coll"} = Vettore.create_collection(db, "hnsw_coll", 3, "hnsw")
 
     assert {:ok, "vec1"} =
@@ -81,18 +187,28 @@ defmodule VettoreTest do
                metadata: nil
              })
 
-    # Perform a similarity search
-    assert {:ok, top2} = Vettore.similarity_search(db, "hnsw_coll", [1.0, 2.0, 3.0], 2)
+    # Normal HNSW search
+    assert {:ok, top2} =
+             Vettore.similarity_search(db, "hnsw_coll", [1.0, 2.0, 3.0], limit: 2)
+
     assert length(top2) == 2
 
     [{"vec1", score1}, {"vec2", score2}] = top2
-    # Usually vec1 is closer
     assert score1 <= score2
+
+    # Attempt filter => error
+    assert {:error, _} =
+             Vettore.similarity_search(
+               db,
+               "hnsw_coll",
+               [1.0, 2.0, 3.0],
+               limit: 2,
+               filter: %{"meta" => "test"}
+             )
   end
 
   test "Binary operations" do
     db = Vettore.new_db()
-    # Create a collection with "binary" distance
     assert {:ok, "binary_coll"} = Vettore.create_collection(db, "binary_coll", 3, "binary")
 
     assert {:ok, "vec1"} =
@@ -116,18 +232,16 @@ defmodule VettoreTest do
                metadata: nil
              })
 
-    # Hamming distance search (lower = more similar)
-    assert {:ok, top2} = Vettore.similarity_search(db, "binary_coll", [1.0, 2.0, 3.0], 2)
+    # Hamming distance => lower is better
+    assert {:ok, top2} = Vettore.similarity_search(db, "binary_coll", [1.0, 2.0, 3.0], limit: 2)
     assert length(top2) == 2
 
     [{"vec1", score1}, {"vec2", score2}] = top2
-    # Typically, (1.0,2.0,3.0) will have distance 0 or lower to itself
     assert score1 <= score2
   end
 
   test "Cosine operations" do
     db = Vettore.new_db()
-    # Create a collection with "cosine" distance
     assert {:ok, "cosine_coll"} = Vettore.create_collection(db, "cosine_coll", 3, "cosine")
 
     assert {:ok, "cos1"} =
@@ -144,16 +258,16 @@ defmodule VettoreTest do
                metadata: nil
              })
 
-    # Cosine similarity => bigger dot product is better
-    assert {:ok, results} = Vettore.similarity_search(db, "cosine_coll", [1.0, 2.0, 3.0], 2)
-    # results might be [{"cos1", dp1}, {"cos2", dp2}] with dp1 >= dp2
+    # Cosine => bigger dot product is better
+    assert {:ok, results} =
+             Vettore.similarity_search(db, "cosine_coll", [1.0, 2.0, 3.0], limit: 2)
+
     [{"cos1", dp1}, {"cos2", dp2}] = results
     assert dp1 >= dp2
   end
 
   test "Dot operations" do
     db = Vettore.new_db()
-    # Create a collection with "dot" distance
     assert {:ok, "dot_coll"} = Vettore.create_collection(db, "dot_coll", 3, "dot")
 
     assert {:ok, "dot1"} =
@@ -170,11 +284,9 @@ defmodule VettoreTest do
                metadata: nil
              })
 
-    # Dot product => bigger is better
-    assert {:ok, top2} = Vettore.similarity_search(db, "dot_coll", [1.0, 2.0, 3.0], 2)
+    # Dot => bigger is better
+    assert {:ok, top2} = Vettore.similarity_search(db, "dot_coll", [1.0, 2.0, 3.0], limit: 2)
     [{"dot2", score1}, {"dot1", score2}] = top2
-
-    # Typically, "dot1" with itself is largest
     assert score1 >= score2
   end
 end
