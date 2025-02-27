@@ -17,7 +17,7 @@ The supported distance metrics are:
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.1.5", github: "elchemista/vettore"}
+    {:vettore, "~> 0.1.6", github: "elchemista/vettore"}
   ]
 end
 ```
@@ -74,46 +74,212 @@ The Vettore library is designed for fast, in-memory operations on vector data. A
 
 ## Public API / NIF Functions
 
-All core functions are accessible in Elixir via `Vettore.*` calls. Their **return values** (on success) now include more information:
+All core functions are accessible in Elixir via `Vettore.*` calls. Their **return values** (on success) now include more information.
 
-1. **`create_collection(db, name, dimension, distance)`**  
-   Returns `{:ok, collection_name}` or `{:error, reason}`.
+### 1. `new_db/0`
+**Return:** a **DB resource** (a reference to the underlying Rust `CacheDB`).
 
-   - Creates a new collection in the database with a specified dimension and distance metric.
+Creates a new database resource to be passed to all subsequent calls.
 
-2. **`delete_collection(db, name)`**  
-   Returns `{:ok, collection_name}` or `{:error, reason}`.
+**Example:**
+```elixir
+db = Vettore.new_db()
+```
 
-   - Deletes an existing collection (by name).
+---
 
-3. **`insert_embedding(db, collection_name, embedding_struct)`**  
-   Returns `{:ok, embedding_id}` or `{:error, reason}`.
+### 2. `create_collection/5`
+**Signature:**
+```elixir
+create_collection(db, name, dimension, distance, opts \\ [])
+```
+**Return:** `{:ok, collection_name}` or `{:error, reason}`
 
-   - Inserts a single embedding (with an ID, vector, and optional metadata).
+Creates a new collection in the database with a specified dimension and distance metric.  
+The optional `opts` keyword list may include:
+- `keep_embeddings: false` — For collections using `"binary"` distance, this option instructs the NIF to discard the original float vector after compressing it.
 
-4. **`insert_embeddings(db, collection_name, [embedding_structs])`**  
-   Returns `{:ok, list_of_inserted_ids}` or `{:error, reason}`.
+**Examples:**
+```elixir
+# Create a Euclidean collection (default: keep embeddings)
+{:ok, "euclidean_coll"} = Vettore.create_collection(db, "euclidean_coll", 3, "euclidean")
 
-   - **Batch insertion**: Insert a list of embeddings in one call.
-   - If any embedding fails (dimension mismatch, duplicate ID, etc.), an error is returned immediately and the rest are not inserted.
+# Create a binary collection that does NOT keep the original float vectors:
+{:ok, "bin_no_keep"} = Vettore.create_collection(db, "bin_no_keep", 3, "binary", keep_embeddings: false)
 
-5. **`get_embeddings(db, collection_name)`**  
-   Returns `{:ok, list_of({id, vector, metadata})}` or `{:error, reason}`.
+# Create a binary collection that DOES keep the original float vectors:
+{:ok, "bin_keep"} = Vettore.create_collection(db, "bin_keep", 3, "binary", keep_embeddings: true)
+```
 
-   - Retrieves all embeddings from the specified collection.
+---
 
-6. **`get_embedding_by_id(db, collection_name, id)`**  
-   Returns `{:ok, %Vettore.Embedding{}}` or `{:error, reason}`.
+### 3. `delete_collection/2`
+**Signature:**
+```elixir
+delete_collection(db, name)
+```
+**Return:** `{:ok, collection_name}` or `{:error, reason}`
 
-   - Looks up a single embedding by its ID.
+Deletes an existing collection (by name).
 
-7. **`similarity_search(db, collection_name, query_vector, [limit: k, filter: map()])`**
-   Returns `{:ok, list_of({id, score})}` or `{:error, reason}`.
+**Example:**
+```elixir
+{:ok, "euclidean_coll"} = Vettore.delete_collection(db, "euclidean_coll")
+```
 
-   - Performs a similarity or distance search with the given query vector, returning the top‑k results.
+---
 
-8. **`new_db()`**  
-   Returns a **DB resource** (reference to the underlying Rust `CacheDB`).
+### 4. `insert_embedding/3`
+**Signature:**
+```elixir
+insert_embedding(db, collection_name, embedding_struct)
+```
+**Return:** `{:ok, embedding_id}` or `{:error, reason}`
+
+Inserts a single embedding into a collection. The `embedding_struct` must be a `%Vettore.Embedding{}` struct that includes an `id`, a vector (list of floats), and optional metadata.
+
+**Example:**
+```elixir
+embedding = %Vettore.Embedding{
+  id: "emb1",
+  vector: [1.0, 2.0, 3.0],
+  metadata: %{"note" => "example"}
+}
+{:ok, "emb1"} = Vettore.insert_embedding(db, "euclidean_coll", embedding)
+```
+
+---
+
+### 5. `insert_embeddings/3`
+**Signature:**
+```elixir
+insert_embeddings(db, collection_name, [embedding_structs])
+```
+**Return:** `{:ok, list_of_inserted_ids}` or `{:error, reason}`
+
+Batch-inserts a list of embeddings in one call.  
+If any embedding fails (e.g. due to a dimension mismatch or duplicate ID), the function returns an error immediately and does not insert the remaining embeddings.
+
+**Example:**
+```elixir
+embeddings = [
+  %Vettore.Embedding{id: "emb1", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "first"}},
+  %Vettore.Embedding{id: "emb2", vector: [2.0, 3.0, 4.0], metadata: nil}
+]
+{:ok, ["emb1", "emb2"]} = Vettore.insert_embeddings(db, "euclidean_coll", embeddings)
+```
+
+---
+
+### 6. `get_embeddings/2`
+**Signature:**
+```elixir
+get_embeddings(db, collection_name)
+```
+**Return:** `{:ok, list_of({id, vector, metadata})}` or `{:error, reason}`
+
+Retrieves all embeddings from the specified collection.  
+Each embedding is returned as a tuple: `{id, vector, metadata}`.
+
+**Example:**
+```elixir
+{:ok, embeddings} = Vettore.get_embeddings(db, "euclidean_coll")
+# Example output: [{"emb1", [1.0, 2.0, 3.0], %{"note" => "example"}}, ...]
+```
+
+---
+
+### 7. `get_embedding_by_id/3`
+**Signature:**
+```elixir
+get_embedding_by_id(db, collection_name, id)
+```
+**Return:** `{:ok, %Vettore.Embedding{}}` or `{:error, reason}`
+
+Looks up a single embedding by its unique ID within a collection.
+
+**Example:**
+```elixir
+{:ok, embedding} = Vettore.get_embedding_by_id(db, "euclidean_coll", "emb1")
+# embedding is %Vettore.Embedding{id: "emb1", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "example"}}
+```
+
+---
+
+### 8. `similarity_search/4`
+**Signature:**
+```elixir
+similarity_search(db, collection_name, query_vector, opts \\ [])
+```
+**Return:** `{:ok, list_of({id, score})}` or `{:error, reason}`
+
+Performs a similarity or distance search using the given query vector, returning the top‑k results.  
+Optional parameters:
+- `limit: k` — The number of top results to return (default is 10).
+- `filter: %{}` — A metadata filter map (only supported for non‑HNSW collections).
+
+**Examples:**
+```elixir
+# Basic similarity search (Euclidean: lower distances are better)
+{:ok, results} = Vettore.similarity_search(db, "euclidean_coll", [1.0, 2.0, 3.0], limit: 2)
+
+# Similarity search with metadata filtering
+{:ok, filtered_results} =
+  Vettore.similarity_search(db, "euclidean_coll", [1.0, 2.0, 3.0],
+    limit: 2,
+    filter: %{"category" => "special"}
+  )
+```
+
+---
+
+## Complete Usage Example
+
+Below is an example demonstrating the entire workflow:
+```elixir
+# Create a new DB resource
+db = Vettore.new_db()
+
+# Create a Euclidean collection
+{:ok, "euclidean_coll"} = Vettore.create_collection(db, "euclidean_coll", 3, "euclidean")
+
+# Insert an embedding into the Euclidean collection
+embedding = %Vettore.Embedding{
+  id: "emb1",
+  vector: [1.0, 2.0, 3.0],
+  metadata: %{"note" => "example"}
+}
+{:ok, "emb1"} = Vettore.insert_embedding(db, "euclidean_coll", embedding)
+
+# Retrieve the embedding by its ID
+{:ok, emb} = Vettore.get_embedding_by_id(db, "euclidean_coll", "emb1")
+IO.inspect(emb, label: "Retrieved Embedding")
+
+# Perform a similarity search
+{:ok, results} = Vettore.similarity_search(db, "euclidean_coll", [1.0, 2.0, 3.0], limit: 1)
+IO.inspect(results, label: "Search Results")
+
+# Create a binary collection without keeping the raw embeddings
+{:ok, "bin_no_keep"} = Vettore.create_collection(db, "bin_no_keep", 3, "binary", keep_embeddings: false)
+# Insert an embedding into the binary collection; raw vector will be cleared.
+{:ok, "nokey1"} = Vettore.insert_embedding(db, "bin_no_keep", %Vettore.Embedding{
+  id: "nokey1",
+  vector: [1.0, 2.0, 3.0],
+  metadata: nil
+})
+{:ok, no_keep_embs} = Vettore.get_embeddings(db, "bin_no_keep")
+IO.inspect(no_keep_embs, label: "Binary Collection (no keep)")
+
+# Create a binary collection that keeps the raw vectors
+{:ok, "bin_keep"} = Vettore.create_collection(db, "bin_keep", 3, "binary", keep_embeddings: true)
+{:ok, "key1"} = Vettore.insert_embedding(db, "bin_keep", %Vettore.Embedding{
+  id: "key1",
+  vector: [9.9, 8.8, 7.7],
+  metadata: %{"foo" => "bar"}
+})
+{:ok, keep_embs} = Vettore.get_embeddings(db, "bin_keep")
+IO.inspect(keep_embs, label: "Binary Collection (keep)")
+```
 
 ---
 

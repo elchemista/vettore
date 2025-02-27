@@ -85,6 +85,9 @@ defmodule Vettore do
   @doc """
   Creates a new collection in the database with the given `name`, `dimension`, and `distance` metric.
 
+  * `db` is the database resource (created with `new_db/0`).
+  * `name` is the name of the collection.
+  * `dimension` is the number of dimensions in the vector.
   * `distance` can be one of: `"euclidean"`, `"cosine"`, `"dot"`, `"hnsw"`, or `"binary"`.
 
   Returns `{:ok, name}` on success, or `{:error, reason}` if the collection already exists or if the distance is invalid.
@@ -95,11 +98,15 @@ defmodule Vettore do
   """
   @spec create_collection(any(), String.t(), integer(), String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def create_collection(_db, _name, _dim, _distance),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def create_collection(db, name, dim, distance, opts \\ []) do
+    nif_create_collection(db, name, dim, distance, Keyword.get(opts, :keep_embeddings, true))
+  end
 
   @doc """
   Deletes a collection by its `name`.
+
+  * `db` is the database resource (created with `new_db/0`).
+  * `name` is the name of the collection.
 
   Returns `{:ok, name}` if the collection was found and deleted, or `{:error, reason}` otherwise.
 
@@ -236,6 +243,11 @@ defmodule Vettore do
   #  - These do the direct Rust calls using the "raw" data form (id, vector, metadata).
   #  - The "public" functions above wrap them in your Elixir API.
   #
+  @doc false
+  @spec nif_create_collection(any(), String.t(), integer(), String.t(), boolean()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def nif_create_collection(_db, _name, _dim, _distance, _keep_embeddings),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec nif_similarity_search(any(), any(), any(), any()) :: any()

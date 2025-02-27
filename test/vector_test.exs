@@ -289,4 +289,56 @@ defmodule VettoreTest do
     [{"dot2", score1}, {"dot1", score2}] = top2
     assert score1 >= score2
   end
+
+  test "Binary with keep_embeddings option" do
+    db = Vettore.new_db()
+
+    # A "binary" collection that does NOT keep float vectors
+    assert {:ok, "bin_no_keep"} =
+             Vettore.create_collection(
+               db,
+               "bin_no_keep",
+               3,
+               "binary",
+               keep_embeddings: false
+             )
+
+    assert {:ok, "nokey1"} =
+             Vettore.insert_embedding(db, "bin_no_keep", %Embedding{
+               id: "nokey1",
+               vector: [1.0, 2.0, 3.0],
+               metadata: nil
+             })
+
+    # If keep_embeddings is false (and distance="binary"), we expect the float vector is cleared
+    assert {:ok, no_keep_embs} = Vettore.get_embeddings(db, "bin_no_keep")
+    # There's only one embedding. The float vector should be empty.
+    assert [{"nokey1", [], nil}] = no_keep_embs
+
+    # "binary" collection that DOES keep float vectors
+    assert {:ok, "bin_keep"} =
+             Vettore.create_collection(
+               db,
+               "bin_keep",
+               3,
+               "binary",
+               keep_embeddings: true
+             )
+
+    assert {:ok, "key1"} =
+             Vettore.insert_embedding(db, "bin_keep", %Embedding{
+               id: "key1",
+               vector: [9.9, 8.8, 7.7],
+               metadata: %{"foo" => "bar"}
+             })
+
+    assert {:ok, keep_embs} = Vettore.get_embeddings(db, "bin_keep")
+    assert [{"key1", vec, %{"foo" => "bar"}}] = keep_embs
+
+    expected = [9.9, 8.8, 7.7]
+
+    for {exp, act} <- Enum.zip(expected, vec) do
+      assert_in_delta(exp, act, 1.0e-4)
+    end
+  end
 end
