@@ -32,6 +32,7 @@ pub struct Embedding {
 ///  - a dimension (vector length)
 ///  - a distance metric
 ///  - a list of stored embeddings
+///  - whether to keep the original float vectors in memory
 ///  - an optional HNSW index for "hnsw" distance
 pub struct Collection {
     pub dimension: usize,

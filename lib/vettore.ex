@@ -99,11 +99,7 @@ defmodule Vettore do
   @spec create_collection(any(), String.t(), integer(), String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
   def create_collection(db, name, dim, distance, opts \\ []) do
-    if Keyword.get(opts, :keep_embeddings, false) && distance == "binary" do
-      nif_create_collection(db, name, dim, distance, false)
-    else
-      nif_create_collection(db, name, dim, distance, true)
-    end
+    nif_create_collection(db, name, dim, distance, Keyword.get(opts, :keep_embeddings, true))
   end
 
   @doc """
