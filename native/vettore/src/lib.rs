@@ -35,6 +35,7 @@ pub struct Embedding {
 ///  - an optional HNSW index for "hnsw" distance
 pub struct Collection {
     pub dimension: usize,
+    pub keep_embeddings: bool,
     pub distance: Distance,
     pub embeddings: Vec<Embedding>,
     pub hnsw_index: Option<HnswIndexWrapper>,
@@ -511,16 +512,19 @@ impl Collection {
             "dot" => Distance::DotProduct,
             "hnsw" => Distance::Hnsw,
             "binary" => Distance::Binary,
-            other => return Err(format!(
+            other => {
+                return Err(format!(
                 "Unknown distance '{}'. Must be one of: euclidean, cosine, dot, hnsw, or binary.",
                 other
-            )),
+            ))
+            }
         };
 
         let mut col = Self {
             dimension,
             distance,
             embeddings: Vec::new(),
+            keep_embeddings: true, // default
             hnsw_index: None,
         };
 
@@ -547,11 +551,17 @@ impl Collection {
         }
 
         let mut new_emb = emb;
+
         if self.distance == Distance::Cosine {
             new_emb.vector = normalize_vec(&new_emb.vector);
         }
         if self.distance == Distance::Binary {
             new_emb.binary = Some(compress_vector(&new_emb.vector));
+
+            // If we're NOT keeping raw embeddings, clear out the float vector:
+            if !self.keep_embeddings {
+                new_emb.vector.clear();
+            }
         }
 
         self.embeddings.push(new_emb.clone());
@@ -561,6 +571,7 @@ impl Collection {
                 w.insert_embedding(&new_emb)?;
             }
         }
+
         Ok(())
     }
 
@@ -642,19 +653,26 @@ fn new_db() -> ResourceArc<DBResource> {
 }
 
 #[rustler::nif]
-fn create_collection(
+fn nif_create_collection(
     db_res: ResourceArc<DBResource>,
     name: String,
     dimension: usize,
     distance: String,
+    keep_embeddings: bool,
 ) -> Result<String, String> {
     let mut db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
+
     if db.collections.contains_key(&name) {
         return Err(format!("Collection '{}' already exists", name));
     }
-    let c = Collection::create_with_distance(dimension, &distance)?;
-    db.collections.insert(name.clone(), c);
 
+    // Create collection with the chosen distance
+    let mut col = Collection::create_with_distance(dimension, &distance)?;
+
+    // Set keep_embeddings
+    col.keep_embeddings = keep_embeddings;
+
+    db.collections.insert(name.clone(), col);
     Ok(name)
 }
 
