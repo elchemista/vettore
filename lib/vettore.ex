@@ -58,9 +58,7 @@ defmodule Vettore do
   """
 
   use Rustler,
-    # Name of your OTP app (replace :vettore if different)
     otp_app: :vettore,
-    # This matches the "name" field in your Cargo.toml
     crate: "vettore"
 
   alias Vettore.Embedding
