@@ -647,13 +647,13 @@ impl Collection {
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn new_db() -> ResourceArc<DBResource> {
     let db = CacheDB::new();
     ResourceArc::new(DBResource(Mutex::new(db)))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn nif_create_collection(
     db_res: ResourceArc<DBResource>,
     name: String,
@@ -677,7 +677,7 @@ fn nif_create_collection(
     Ok(name)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn delete_collection(db_res: ResourceArc<DBResource>, name: String) -> Result<String, String> {
     let mut db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
     if db.collections.remove(&name).is_none() {
@@ -686,7 +686,7 @@ fn delete_collection(db_res: ResourceArc<DBResource>, name: String) -> Result<St
     Ok(name)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn nif_insert_embedding(
     db_res: ResourceArc<DBResource>,
     collection_name: String,
@@ -852,7 +852,7 @@ fn nif_similarity_search(
     coll.get_similarity(&query, k)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn get_embeddings(
     db_res: ResourceArc<DBResource>,
     collection_name: String,
@@ -870,7 +870,7 @@ fn get_embeddings(
     Ok(out)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn nif_get_embedding_by_id(
     db_res: ResourceArc<DBResource>,
     collection_name: String,
