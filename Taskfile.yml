@@ -1,0 +1,84 @@
+version: '3'
+
+vars:
+  PROJECT_NAME: Vettore
+  PROJECT_DIR_NAME: vettore
+
+tasks:
+  compile:
+    desc: Compile sources (with Rust)
+    env:
+      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+      RUSTFLAGS: "-C target-cpu=native -C opt-level=3"
+    cmds:
+      -  mix compile
+
+  compile-using-precompiled-binaries:
+    desc: Compile sources (without Rust)
+    cmds:
+      - mix compile
+
+  console:
+    desc: Open console
+    env:
+      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+    cmds:
+      - cmd: iex -S mix
+        ignore_error: true
+
+  test:
+    desc: Run tests (with Rust)
+    env:
+      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+    cmds:
+      - mix test --trace
+
+  test-using-precompiled-binaries:
+    desc: Run tests (without Rust)
+    cmds:
+      - mix test --trace
+
+  check:
+    desc: Check codes
+    cmds:
+      - task: dialyzer
+      - task: clippy
+
+  dialyzer:
+    desc: Run dialyzer
+    cmd: mix dialyzer
+
+  clippy:
+    desc: Run clippy
+    dir: "native/{{.PROJECT_DIR_NAME}}"
+    cmd: cargo clippy
+
+  clean:
+    desc: Clean up
+    cmds:
+      - mix clean
+      - rm -f priv/native/*.so
+      - "rm -rf native/{{.PROJECT_DIR_NAME}}/target/*/build"
+
+  benchmark:
+    desc: Run benchmark
+    cmd: mix run bench/vettore_bench.exs
+
+  rustler-precompiled-download:
+    desc: Download precompiled files info
+    env:
+      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+    cmds:
+      - "mix rustler_precompiled.download {{.PROJECT_NAME}} --all --print"
+
+  publish:
+    desc: Publish to hex.pm
+    prompt: Are you sure to publish?
+    cmds:
+      - "rm -rf native/{{.PROJECT_DIR_NAME}}/target"
+      - mix hex.publish
+
+  default:
+    cmds:
+      - task -l --sort=none
+    silent: true

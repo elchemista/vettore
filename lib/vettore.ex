@@ -57,9 +57,14 @@ defmodule Vettore do
       IO.inspect(top_results, label: "Top K search results")
   """
 
-  use Rustler,
+  version = Mix.Project.config()[:version]
+
+  use RustlerPrecompiled,
     otp_app: :vettore,
-    crate: "vettore"
+    crate: "vettore",
+    base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
+    force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
+    version: version
 
   alias Vettore.Embedding
 

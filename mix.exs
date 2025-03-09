@@ -1,30 +1,36 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
+  @version "0.1.7"
+
   def project do
     [
       app: :vettore,
-      name: "Vettore - In-Memory Vector Database",
-      version: "0.1.6",
+      name: "Vettore",
+      version: @version,
       elixir: "~> 1.18",
+      build_embedded: Mix.env() == :prod,
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description: description(),
       package: package(),
       docs: [
-        main: "Vettore",
+        main: "readme",
         extras: [
           "README.md",
-          "LICENSE"
+          "LICENSE",
+          "bench/performance.md"
         ]
-      ]
+      ],
+      source_url: "https://github.com/elchemista/vettore",
+      homepage_url: "https://github.com/elchemista/vettore"
     ]
   end
 
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: []
     ]
   end
 
@@ -34,10 +40,12 @@ defmodule Vettore.MixProject do
 
   defp package() do
     [
-      licenses: ["MIT"],
+      name: "vettore",
+      maintainers: ["Yuriy Zhar"],
+      files: ~w(mix.exs README.md lib native test LICENSE checksum-*.exs .formatter.exs),
+      licenses: ["Apache-2.0"],
       links: %{
-        project: "https://github.com/elchemista/vettore",
-        developer_github: "https://github.com/elchemista"
+        "GitHub" => "https://github.com/elchemista/vettore"
       }
     ]
   end
@@ -45,7 +53,8 @@ defmodule Vettore.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.36.1"},
+      {:rustler, ">= 0.0.0", optional: true},
+      {:rustler_precompiled, "~> 0.8"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.0", only: :dev},
       # Documentation Provider

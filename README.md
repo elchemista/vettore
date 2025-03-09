@@ -17,7 +17,7 @@ The supported distance metrics are:
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.1.6", github: "elchemista/vettore"}
+    {:vettore, "~> 0.1.7"}
   ]
 end
 ```
@@ -25,7 +25,7 @@ end
 ## Compile
 
 ```bash
-RUSTFLAGS="-C target-cpu=native" mix compile
+mix compile
 ```
 
 This sets the Rust compiler’s “target-cpu” to native, instructing it to generate code optimized for your machine’s CPU features (SSE, AVX, etc.).
