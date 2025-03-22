@@ -57,14 +57,18 @@ defmodule Vettore do
       IO.inspect(top_results, label: "Top K search results")
   """
 
-  version = Mix.Project.config()[:version]
+  # version = Mix.Project.config()[:version]
 
-  use RustlerPrecompiled,
+  # use RustlerPrecompiled,
+  #   otp_app: :vettore,
+  #   crate: "vettore",
+  #   base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
+  #   force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
+  #   version: version
+
+  use Rustler,
     otp_app: :vettore,
-    crate: "vettore",
-    base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
-    force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
-    version: version
+    crate: "vettore"
 
   alias Vettore.Embedding
 
@@ -241,6 +245,64 @@ defmodule Vettore do
     end
   end
 
+  @doc """
+  Re-rank a list of `{id, score}` results using **Maximal Marginal Relevance** (MMR).
+
+  Given a database resource `db`, a `collection` name, and an `initial_results` list of
+  `{id, score}` tuples (usually obtained from `similarity_search/4`), this function applies
+  an MMR formula to select up to `:limit` items that maximize both relevance (the `score`)
+  and diversity among the selected items.
+
+  The `alpha` parameter (0.0 to 1.0) balances relevance vs. redundancy:
+    - `alpha` close to `1.0` → prioritizes the raw score (similarity to query).
+    - `alpha` close to `0.0` → heavily penalizes items similar to already-selected ones,
+      thus promoting diversity.
+
+  We automatically convert Euclidean or Binary `distance` into a “higher is better” similarity
+  by negating the distance (i.e. `similarity = -distance`). For Cosine, Dot Product, or HNSW
+  approaches, the `score` is already in a higher-is-better format.
+
+  Returns `{:ok, [{id, mmr_score}, ...]}` on success or `{:error, reason}` if the collection
+  is not found.
+
+  ## Examples
+
+  After calling `similarity_search/4`:
+
+      {:ok, initial_results} = Vettore.similarity_search(db, "my_collection", query_vec, limit: 50)
+
+  You can re-rank:
+
+      {:ok, mmr_list} =
+        Vettore.mmr_rerank(db, "my_collection", initial_results,
+          limit: 10,
+          alpha: 0.7
+        )
+
+  `mmr_list` then gives a smaller set (up to 10 items) in MMR order, each with a new score
+  (`mmr_score`) that reflects their final MMR weighting.
+
+  """
+  @spec mmr_rerank(
+          db :: any(),
+          collection_name :: String.t(),
+          initial_results :: [{String.t(), float()}],
+          opts :: keyword()
+        ) :: {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def mmr_rerank(db, collection, initial_results, opts \\ []) do
+    unless is_list(initial_results) and
+             Enum.all?(initial_results, fn
+               {id, score} when is_binary(id) and is_float(score) -> true
+               _ -> false
+             end) do
+      {:error, "initial_results must be a list of {String.t(), float()} tuples"}
+    else
+      final_k = Keyword.get(opts, :limit, 10)
+      alpha = Keyword.get(opts, :alpha, 0.5)
+      nif_mmr_rerank(db, collection, initial_results, alpha, final_k)
+    end
+  end
+
   #
   # Internal (NIF) function signatures:
   #  - These do the direct Rust calls using the "raw" data form (id, vector, metadata).
@@ -253,7 +315,7 @@ defmodule Vettore do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  @spec nif_similarity_search(any(), any(), any(), any()) :: any()
+  @spec nif_similarity_search(any(), String.t(), any(), integer()) :: any()
   def nif_similarity_search(_db, _collection, _query, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -261,6 +323,11 @@ defmodule Vettore do
   @spec nif_insert_embedding(any(), String.t(), String.t(), [float()], map() | nil) ::
           :ok | {:error, String.t()}
   def nif_insert_embedding(_db, _collection, _id, _vector, _metadata \\ nil),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec nif_mmr_rerank(any(), String.t(), list(), float(), integer()) :: any()
+  def nif_mmr_rerank(_db, _collection, _initial_results, _alpha, _final_k),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
