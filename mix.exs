@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.1.7"
+  @version "0.1.8"
 
   def project do
     [
@@ -53,8 +53,9 @@ defmodule Vettore.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, ">= 0.0.0", optional: true},
-      {:rustler_precompiled, "~> 0.8"},
+      {:rustler, "~> 0.36.1"},
+      # {:rustler, ">= 0.0.0", optional: true},
+      # {:rustler_precompiled, "~> 0.8"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.0", only: :dev},
       # Documentation Provider

@@ -44,4 +44,14 @@ All core functions are accessible in Elixir via `Vettore.*` calls. Their **retur
 9. **`new_db()`**  
    Returns a **DB resource** (reference to the underlying Rust `CacheDB`).
 
+10. **`mmr_rerank(db, collection_name, initial_results, opts)`**  
+    Returns `{:ok, [{id, mmr_score}, ...]}` or `{:error, reason}`.
+    
+    - Re-ranks a list of `{id, score}` pairs (e.g., from a previous `similarity_search/4` call) using **Maximal Marginal Relevance (MMR)**.  
+    This helps select up to `:limit` items that are both highly relevant (based on their initial score) and also sufficiently distinct from each other.
+    
+    Optional parameters:
+    - `limit: k` — How many items to keep in the final MMR‑ranked list (default 10).
+    - `alpha: float` — MMR balancing factor in `[0..1]`. Closer to `1.0` places more emphasis on each candidate’s original score; closer to `0.0` emphasizes diversity.
+
 ---
