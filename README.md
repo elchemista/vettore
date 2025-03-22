@@ -233,6 +233,40 @@ Optional parameters:
 
 ---
 
+### 9. `mmr_rerank/4`
+
+**Signature:**
+```elixir
+mmr_rerank(db, collection_name, initial_results, opts \\ [])
+```
+
+**Return:** `{:ok, list_of({id, mmr_score})}` or `{:error, reason}`
+
+Re-ranks a list of `{id, score}` pairs (e.g., from a previous `similarity_search/4` call) using **Maximal Marginal Relevance (MMR)**.  
+This helps select up to `:limit` items that are both highly relevant (based on their initial score) and also sufficiently distinct from each other.
+
+Optional parameters:
+- `limit: k` — How many items to keep in the final MMR‑ranked list (default 10).
+- `alpha: float` — MMR balancing factor in `[0..1]`. Closer to `1.0` places more emphasis on each candidate’s original score; closer to `0.0` emphasizes diversity.
+
+**Examples:**
+```elixir
+# 1) Perform a similarity search first.
+{:ok, initial} = Vettore.similarity_search(db, "my_collection", [1.0, 2.0, 3.0], limit: 50)
+# 'initial' is a list of {id, score} tuples.
+
+# 2) Apply MMR re‑ranking on those results:
+{:ok, mmr_list} =
+  Vettore.mmr_rerank(db, "my_collection", initial,
+    limit: 10,
+    alpha: 0.7
+  )
+
+# 'mmr_list' is now a top-10 list of {id, mmr_score} tuples.
+```
+
+---
+
 ## Complete Usage Example
 
 Below is an example demonstrating the entire workflow:

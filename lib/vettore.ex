@@ -66,6 +66,10 @@ defmodule Vettore do
     force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
     version: version
 
+  # use Rustler,
+  #   otp_app: :vettore,
+  #   crate: "vettore"
+
   alias Vettore.Embedding
 
   #
@@ -99,10 +103,22 @@ defmodule Vettore do
 
     {:ok, "my_collection"} = Vettore.create_collection(db, "my_collection", 3, "euclidean")
   """
-  @spec create_collection(any(), String.t(), integer(), String.t()) ::
+  @spec create_collection(
+          db :: any(),
+          collection_name :: String.t(),
+          dimension :: integer(),
+          distance :: String.t(),
+          opts :: keyword()
+        ) ::
           {:ok, String.t()} | {:error, String.t()}
-  def create_collection(db, name, dim, distance, opts \\ []) do
-    nif_create_collection(db, name, dim, distance, Keyword.get(opts, :keep_embeddings, true))
+  def create_collection(db, collection_name, dimension, distance, opts \\ []) do
+    nif_create_collection(
+      db,
+      collection_name,
+      dimension,
+      distance,
+      Keyword.get(opts, :keep_embeddings, true)
+    )
   end
 
   @doc """
@@ -117,7 +133,8 @@ defmodule Vettore do
 
       {:ok, "my_collection"} = Vettore.delete_collection(db, "my_collection")
   """
-  @spec delete_collection(any(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  @spec delete_collection(db :: any(), collection_name :: String.t()) ::
+          {:ok, String.t()} | {:error, String.t()}
   def delete_collection(_db, _name),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -134,10 +151,10 @@ defmodule Vettore do
       embedding = %Vettore.Embedding{id: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{foo: "bar"}}
       {:ok, "my_id"} = Vettore.insert_embedding(db, "my_collection", embedding)
   """
-  @spec insert_embedding(any(), String.t(), Embedding.t()) ::
+  @spec insert_embedding(db :: any(), collection_name :: String.t(), embedding :: Embedding.t()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def insert_embedding(db, collection, %Embedding{id: id, vector: vec, metadata: meta}) do
-    nif_insert_embedding(db, collection, id, vec, meta)
+  def insert_embedding(db, collection_name, %Embedding{id: id, vector: vec, metadata: meta}) do
+    nif_insert_embedding(db, collection_name, id, vec, meta)
   end
 
   @doc """
@@ -155,16 +172,20 @@ defmodule Vettore do
       ]
       {:ok, ["e1", "e2"]} = Vettore.insert_embeddings(db, "my_collection", embs)
   """
-  @spec insert_embeddings(any(), String.t(), [Embedding.t()]) ::
+  @spec insert_embeddings(
+          db :: any(),
+          collection_name :: String.t(),
+          embeddings :: [Embedding.t()]
+        ) ::
           {:ok, [String.t()]} | {:error, String.t()}
-  def insert_embeddings(db, collection, embeddings) when is_list(embeddings) do
+  def insert_embeddings(db, collection_name, embeddings) when is_list(embeddings) do
     # Convert each %Embedding{} into the tuple form the Rust NIF expects
     native_list =
       Enum.map(embeddings, fn %Embedding{id: i, vector: v, metadata: m} ->
         {i, v, m}
       end)
 
-    nif_insert_embeddings(db, collection, native_list)
+    nif_insert_embeddings(db, collection_name, native_list)
   end
 
   @doc """
@@ -178,9 +199,9 @@ defmodule Vettore do
       Vettore.get_embedding_by_id(db, "my_collection", "my_id")
       # => {:ok, %Vettore.Embedding{id: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{foo: "bar"}}}
   """
-  @spec get_embedding_by_id(any(), String.t(), String.t()) ::
+  @spec get_embedding_by_id(db :: any(), collection_name :: String.t(), id :: String.t()) ::
           {:ok, Embedding.t()} | {:error, String.t()}
-  def get_embedding_by_id(db, collection_name, id) do
+  def get_embedding_by_id(db, collection_name, id) when is_bitstring(id) do
     case nif_get_embedding_by_id(db, collection_name, id) do
       {:ok, {raw_id, raw_vector, raw_meta}} ->
         {:ok, %Embedding{id: raw_id, vector: raw_vector, metadata: raw_meta}}
@@ -204,7 +225,7 @@ defmodule Vettore do
       #   {"emb2", [3.14, 2.71, 1.62], nil},
       # ]}
   """
-  @spec get_embeddings(any(), String.t()) ::
+  @spec get_embeddings(db :: any(), collection_name :: String.t()) ::
           {:ok, [{String.t(), [float()], map() | nil}]} | {:error, String.t()}
   def get_embeddings(_db, _collection),
     do: :erlang.nif_error(:nif_not_loaded)
@@ -228,16 +249,79 @@ defmodule Vettore do
 
        # => {:ok, [{"emb1", 0.0}, {"emb2", 1.23}]}
   """
-  @spec similarity_search(any(), String.t(), [float()], keyword()) ::
+  @spec similarity_search(
+          db :: any(),
+          collection_name :: String.t(),
+          query :: [float()],
+          opts :: keyword()
+        ) ::
           {:ok, [{String.t(), float()}]} | {:error, String.t()}
-  def similarity_search(db, collection, query, opts \\ []) do
+  def similarity_search(db, collection_name, query, opts \\ []) when is_list(query) do
     k = Keyword.get(opts, :limit, 10)
     filter = Keyword.get(opts, :filter, nil)
 
     if is_nil(filter) do
-      nif_similarity_search(db, collection, query, k)
+      nif_similarity_search(db, collection_name, query, k)
     else
-      nif_similarity_search_with_filter(db, collection, query, k, filter)
+      nif_similarity_search_with_filter(db, collection_name, query, k, filter)
+    end
+  end
+
+  @doc """
+  Re-rank a list of `{id, score}` results using **Maximal Marginal Relevance** (MMR).
+
+  Given a database resource `db`, a `collection` name, and an `initial_results` list of
+  `{id, score}` tuples (usually obtained from `similarity_search/4`), this function applies
+  an MMR formula to select up to `:limit` items that maximize both relevance (the `score`)
+  and diversity among the selected items.
+
+  The `alpha` parameter (0.0 to 1.0) balances relevance vs. redundancy:
+    - `alpha` close to `1.0` → prioritizes the raw score (similarity to query).
+    - `alpha` close to `0.0` → heavily penalizes items similar to already-selected ones,
+      thus promoting diversity.
+
+  We automatically convert Euclidean or Binary `distance` into a “higher is better” similarity
+  by negating the distance (i.e. `similarity = -distance`). For Cosine, Dot Product, or HNSW
+  approaches, the `score` is already in a higher-is-better format.
+
+  Returns `{:ok, [{id, mmr_score}, ...]}` on success or `{:error, reason}` if the collection
+  is not found.
+
+  ## Examples
+
+  After calling `similarity_search/4`:
+
+      {:ok, initial_results} = Vettore.similarity_search(db, "my_collection", query_vec, limit: 50)
+
+  You can re-rank:
+
+      {:ok, mmr_list} =
+        Vettore.mmr_rerank(db, "my_collection", initial_results,
+          limit: 10,
+          alpha: 0.7
+        )
+
+  `mmr_list` then gives a smaller set (up to 10 items) in MMR order, each with a new score
+  (`mmr_score`) that reflects their final MMR weighting.
+
+  """
+  @spec mmr_rerank(
+          db :: any(),
+          collection_name :: String.t(),
+          initial_results :: [{String.t(), number()}],
+          opts :: keyword()
+        ) :: {:ok, [{String.t(), number()}]} | {:error, String.t()}
+  def mmr_rerank(db, collection_name, initial_results, opts \\ [])
+      when is_list(initial_results) do
+    if Enum.all?(initial_results, fn
+         {id, score} when is_bitstring(id) and is_number(score) -> true
+         _ -> false
+       end) do
+      final_k = Keyword.get(opts, :limit, 10)
+      alpha = Keyword.get(opts, :alpha, 0.5)
+      nif_mmr_rerank(db, collection_name, initial_results, alpha, final_k)
+    else
+      {:error, "initial_results must be a list of {String.t(), number()} tuples"}
     end
   end
 
@@ -253,7 +337,7 @@ defmodule Vettore do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  @spec nif_similarity_search(any(), any(), any(), any()) :: any()
+  @spec nif_similarity_search(any(), String.t(), any(), integer()) :: any()
   def nif_similarity_search(_db, _collection, _query, _k),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -261,6 +345,11 @@ defmodule Vettore do
   @spec nif_insert_embedding(any(), String.t(), String.t(), [float()], map() | nil) ::
           :ok | {:error, String.t()}
   def nif_insert_embedding(_db, _collection, _id, _vector, _metadata \\ nil),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec nif_mmr_rerank(any(), String.t(), list(), float(), integer()) :: any()
+  def nif_mmr_rerank(_db, _collection, _initial_results, _alpha, _final_k),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
