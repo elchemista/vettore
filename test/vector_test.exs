@@ -341,4 +341,46 @@ defmodule VettoreTest do
       assert_in_delta(exp, act, 1.0e-4)
     end
   end
+
+  test "MMR re-rank with Euclidean" do
+    db = Vettore.new_db()
+    assert {:ok, "mmr_coll"} = Vettore.create_collection(db, "mmr_coll", 3, "euclidean")
+
+    assert {:ok, "m1"} =
+             Vettore.insert_embedding(db, "mmr_coll", %Vettore.Embedding{
+               id: "m1",
+               vector: [1.0, 2.0, 3.0],
+               metadata: %{"tag" => "A"}
+             })
+
+    assert {:ok, "m2"} =
+             Vettore.insert_embedding(db, "mmr_coll", %Vettore.Embedding{
+               id: "m2",
+               vector: [2.0, 3.0, 4.0],
+               metadata: %{"tag" => "B"}
+             })
+
+    assert {:ok, "m3"} =
+             Vettore.insert_embedding(db, "mmr_coll", %Vettore.Embedding{
+               id: "m3",
+               vector: [3.0, 2.0, 1.0],
+               metadata: nil
+             })
+
+    assert {:ok, top3} = Vettore.similarity_search(db, "mmr_coll", [2.1, 2.1, 2.1], limit: 3)
+
+    assert {:ok, mmr_list} =
+             Vettore.mmr_rerank(db, "mmr_coll", top3,
+               limit: 2,
+               alpha: 0.5
+             )
+
+    assert length(mmr_list) == 2
+    [{id1, mmr_score1}, {id2, mmr_score2}] = mmr_list
+
+    assert Enum.all?([id1, id2], &(&1 in ["m1", "m2", "m3"]))
+
+    assert is_float(mmr_score1)
+    assert is_float(mmr_score2)
+  end
 end
