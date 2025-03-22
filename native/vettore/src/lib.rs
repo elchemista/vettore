@@ -647,6 +647,69 @@ impl Collection {
     }
 }
 
+fn mmr_rerank_internal(
+    initial_results: &[(String, f32)],
+    all_embeddings: &HashMap<String, Vec<f32>>,
+    distance: Distance,
+    alpha: f32,
+    final_k: usize,
+) -> Vec<(String, f32)> {
+    let mut candidates: Vec<(String, f32)> = match distance {
+        Distance::Euclidean | Distance::Binary => {
+            // invert distance => similarity
+            initial_results
+                .iter()
+                .map(|(id, dist)| (id.clone(), -dist))
+                .collect()
+        }
+        Distance::Cosine | Distance::DotProduct | Distance::Hnsw => initial_results.to_vec(),
+    };
+
+    let mut selected = Vec::<(String, f32)>::new();
+    let mut selected_ids = Vec::<String>::new();
+
+    while selected.len() < final_k && !candidates.is_empty() {
+        let mut best_idx: Option<usize> = None;
+        let mut best_score = f32::MIN;
+
+        for (idx, (cand_id, cand_sim)) in candidates.iter().enumerate() {
+            let mut max_sim_cand_sel = 0.0;
+            if !selected_ids.is_empty() {
+                let cand_vec = all_embeddings.get(cand_id).unwrap();
+                for sel_id in &selected_ids {
+                    let sel_vec = all_embeddings.get(sel_id).unwrap();
+                    let sim_cs = match distance {
+                        Distance::Euclidean | Distance::Binary => {
+                            -simd_euclidean_distance(cand_vec, sel_vec)
+                        }
+                        Distance::Cosine | Distance::DotProduct | Distance::Hnsw => {
+                            simd_dot_product(cand_vec, sel_vec)
+                        }
+                    };
+                    if sim_cs > max_sim_cand_sel {
+                        max_sim_cand_sel = sim_cs;
+                    }
+                }
+            }
+            let mmr_score = alpha * cand_sim - (1.0 - alpha) * max_sim_cand_sel;
+            if mmr_score > best_score {
+                best_score = mmr_score;
+                best_idx = Some(idx);
+            }
+        }
+
+        if let Some(bi) = best_idx {
+            let chosen = candidates.remove(bi);
+            selected_ids.push(chosen.0.clone());
+            selected.push(chosen);
+        } else {
+            break;
+        }
+    }
+
+    selected
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn new_db() -> ResourceArc<DBResource> {
     let db = CacheDB::new();
@@ -739,6 +802,33 @@ fn nif_insert_embeddings(
 
     // Return {:ok, ["id1", "id2", ...]}
     Ok(inserted_ids)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn nif_mmr_rerank(
+    db_res: ResourceArc<DBResource>,
+    collection_name: String,
+    initial_results: Vec<(String, f32)>,
+    alpha: f32,
+    final_k: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    let db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
+
+    let coll = db
+        .collections
+        .get(&collection_name)
+        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
+
+    let embeddings_map = coll
+        .embeddings
+        .iter()
+        .map(|e| (e.id.clone(), e.vector.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let distance = coll.distance;
+    let reranked = mmr_rerank_internal(&initial_results, &embeddings_map, distance, alpha, final_k);
+
+    Ok(reranked)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
