@@ -8,7 +8,6 @@ use rand::rng;
 use rand::Rng;
 use wide::f32x4;
 
-/// Distance metric enum.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Distance {
     Euclidean,
@@ -18,22 +17,14 @@ pub enum Distance {
     Binary,
 }
 
-/// In-memory representation of a single embedding.
 #[derive(Clone)]
 pub struct Embedding {
     pub id: String,
     pub vector: Vec<f32>,
     pub metadata: Option<HashMap<String, String>>,
-    /// For "binary" mode: precomputed bit-signature for Hamming distance.
-    pub binary: Option<Vec<u64>>,
+    pub binary: Option<Vec<u64>>, // for "binary" distance only
 }
 
-/// A collection has:
-///  - a dimension (vector length)
-///  - a distance metric
-///  - a list of stored embeddings
-///  - whether to keep the original float vectors in memory
-///  - an optional HNSW index for "hnsw" distance
 pub struct Collection {
     pub dimension: usize,
     pub keep_embeddings: bool,
@@ -42,58 +33,48 @@ pub struct Collection {
     pub hnsw_index: Option<HnswIndexWrapper>,
 }
 
-/// The main DB holds multiple named Collections.
 pub struct CacheDB {
     pub collections: HashMap<String, Collection>,
 }
 
-impl CacheDB {
-    pub fn new() -> Self {
-        Self {
-            collections: HashMap::new(),
-        }
-    }
-
-    /// Retrieve a single embedding by ID from a named collection.
-    /// Returns an error if the collection or embedding is not found.
-    pub fn get_embedding_by_id(
-        &self,
-        collection_name: &str,
-        id: &str,
-    ) -> Result<Embedding, String> {
-        let coll = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
-
-        coll.embeddings
-            .iter()
-            .find(|emb| emb.id == id)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Embedding '{}' not found in collection '{}'",
-                    id, collection_name
-                )
-            })
-    }
-}
-
-/// A Rustler Resource to wrap our `CacheDB` with a Mutex for concurrency safety.
 pub struct DBResource(pub Mutex<CacheDB>);
-
 impl rustler::Resource for DBResource {}
 
-//
-// Helper functions for computing distances (SIMD for performance).
-//
+/// Ensure vector is not empty and matches the collection's dimension.
+fn check_vector_dimension(vec: &[f32], expected_dim: usize) -> Result<(), String> {
+    if expected_dim == 0 {
+        return Err("Collection dimension cannot be 0.".to_string());
+    }
+    if vec.is_empty() {
+        return Err("Cannot insert an empty embedding vector.".to_string());
+    }
+    if vec.len() != expected_dim {
+        return Err(format!(
+            "Dimension mismatch: expected {}, got {}",
+            expected_dim,
+            vec.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Generic clamp helper, ensures val is in [0..1].
+fn clamp_0_1(val: f32) -> f32 {
+    if val < 0.0 {
+        0.0
+    } else if val > 1.0 {
+        1.0
+    } else {
+        val
+    }
+}
 
 #[inline]
 fn load_f32x4(slice: &[f32], i: usize) -> f32x4 {
     f32x4::from([slice[i], slice[i + 1], slice[i + 2], slice[i + 3]])
 }
 
-/// SIMD Euclidean distance between two vectors.
+/// SIMD Euclidean distance
 fn simd_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let mut i = 0;
@@ -108,16 +89,16 @@ fn simd_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
         i += 4;
     }
 
-    // leftover
     while i < len {
         let d = a[i] - b[i];
         sum_squares += d * d;
         i += 1;
     }
+
     sum_squares.sqrt()
 }
 
-/// SIMD dot product of two vectors.
+/// SIMD dot product
 fn simd_dot_product(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let mut i = 0;
@@ -131,7 +112,6 @@ fn simd_dot_product(a: &[f32], b: &[f32]) -> f32 {
         i += 4;
     }
 
-    // leftover
     while i < len {
         accum += a[i] * b[i];
         i += 1;
@@ -139,42 +119,7 @@ fn simd_dot_product(a: &[f32], b: &[f32]) -> f32 {
     accum
 }
 
-/// Compress a vector of floats by encoding the sign bit of each value into one bit of a `u64`.
-/// (Used for "binary" distance.)
-fn compress_vector(vector: &[f32]) -> Vec<u64> {
-    let mut result = Vec::new();
-    let mut current: u64 = 0;
-    let mut bits_filled = 0;
-    for &val in vector {
-        current <<= 1;
-        // If val >= 0.0, we set bit to 1, otherwise 0
-        if val >= 0.0 {
-            current |= 1;
-        }
-        bits_filled += 1;
-        if bits_filled == 64 {
-            result.push(current);
-            current = 0;
-            bits_filled = 0;
-        }
-    }
-    if bits_filled > 0 {
-        // Shift the remaining bits
-        current <<= 64 - bits_filled;
-        result.push(current);
-    }
-    result
-}
-
-/// Hamming distance between two compressed (binary) vectors.
-fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x ^ y).count_ones()) // XOR and count bits
-        .sum()
-}
-
-/// Normalize a vector for "cosine" distance, so the magnitude is ~1.0
+/// Normalizing for Cosine distance (so the vector has length ~1)
 fn normalize_vec(v: &[f32]) -> Vec<f32> {
     let len = v.len();
     let mut i = 0;
@@ -195,14 +140,130 @@ fn normalize_vec(v: &[f32]) -> Vec<f32> {
     if norm > std::f32::EPSILON {
         v.iter().map(|x| x / norm).collect()
     } else {
-        // If norm is extremely small, just return the original vector
+        // if extremely small norm, just return original
         v.to_vec()
     }
 }
 
-//
-// HNSW data structures
-//
+fn compress_vector(vector: &[f32]) -> Vec<u64> {
+    let mut result = Vec::new();
+    let mut current: u64 = 0;
+    let mut bits_filled = 0;
+    for &val in vector {
+        current <<= 1;
+        if val >= 0.0 {
+            current |= 1;
+        }
+        bits_filled += 1;
+        if bits_filled == 64 {
+            result.push(current);
+            current = 0;
+            bits_filled = 0;
+        }
+    }
+    if bits_filled > 0 {
+        current <<= 64 - bits_filled;
+        result.push(current);
+    }
+    result
+}
+
+fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x ^ y).count_ones())
+        .sum()
+}
+
+/// Convert raw distance / dot product → a 0..1 "score".
+fn compute_0_1_score(query: &[f32], emb: &Embedding, dist_type: Distance) -> f32 {
+    match dist_type {
+        Distance::Euclidean => {
+            let d = simd_euclidean_distance(query, &emb.vector);
+            let score = 1.0 / (1.0 + d);
+            clamp_0_1(score)
+        }
+        Distance::Cosine => {
+            let cos = simd_dot_product(query, &emb.vector);
+            clamp_0_1((cos + 1.0) / 2.0)
+        }
+        Distance::DotProduct => {
+            let dp = simd_dot_product(query, &emb.vector);
+            let score = 1.0 / (1.0 + f32::exp(-dp));
+            clamp_0_1(score)
+        }
+        Distance::Hnsw => {
+            // internally Euclidean
+            let d = simd_euclidean_distance(query, &emb.vector);
+            let score = 1.0 / (1.0 + d);
+            clamp_0_1(score)
+        }
+        Distance::Binary => {
+            let qbits = compress_vector(query);
+            if let Some(b) = &emb.binary {
+                let d_bits = hamming_distance(&qbits, b) as f32;
+                let fraction = clamp_0_1(d_bits / query.len() as f32);
+                1.0 - fraction
+            } else {
+                let temp = compress_vector(&emb.vector);
+                let d_bits = hamming_distance(&qbits, &temp) as f32;
+                let fraction = clamp_0_1(d_bits / query.len() as f32);
+                1.0 - fraction
+            }
+        }
+    }
+}
+
+/// Compare two embeddings → a 0..1 similarity, used in MMR.
+fn compute_0_1_similarity_between(emb1: &Embedding, emb2: &Embedding, dist_type: Distance) -> f32 {
+    let v1 = &emb1.vector;
+    let v2 = &emb2.vector;
+
+    match dist_type {
+        Distance::Euclidean => {
+            let d = simd_euclidean_distance(v1, v2);
+            clamp_0_1(1.0 / (1.0 + d))
+        }
+        Distance::Cosine => {
+            let cos = simd_dot_product(v1, v2);
+            clamp_0_1((cos + 1.0) / 2.0)
+        }
+        Distance::DotProduct => {
+            let dp = simd_dot_product(v1, v2);
+            clamp_0_1(1.0 / (1.0 + f32::exp(-dp)))
+        }
+        Distance::Hnsw => {
+            let d = simd_euclidean_distance(v1, v2);
+            clamp_0_1(1.0 / (1.0 + d))
+        }
+        Distance::Binary => match (emb1.binary.as_ref(), emb2.binary.as_ref()) {
+            (Some(b1), Some(b2)) => {
+                let d_bits = hamming_distance(b1, b2) as f32;
+                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
+                1.0 - frac
+            }
+            (Some(b1), None) => {
+                let temp2 = compress_vector(&emb2.vector);
+                let d_bits = hamming_distance(b1, &temp2) as f32;
+                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
+                1.0 - frac
+            }
+            (None, Some(b2)) => {
+                let temp1 = compress_vector(&emb1.vector);
+                let d_bits = hamming_distance(&temp1, b2) as f32;
+                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
+                1.0 - frac
+            }
+            (None, None) => {
+                let temp1 = compress_vector(&emb1.vector);
+                let temp2 = compress_vector(&emb2.vector);
+                let d_bits = hamming_distance(&temp1, &temp2) as f32;
+                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
+                1.0 - frac
+            }
+        },
+    }
+}
 
 const M: usize = 16;
 const M_MAX0: usize = 32;
@@ -210,14 +271,12 @@ const EF_CONSTRUCTION: usize = 100;
 const EF_SEARCH: usize = 64;
 const MAX_LEVEL: usize = 12;
 
-/// A minimal struct to store a vector in the HNSW graph.
 #[derive(Clone)]
 pub struct VectorItem {
     pub id: usize,
     pub vector: Vec<f32>,
 }
 
-/// A neighbor in the graph search.
 #[derive(Clone)]
 struct Neighbor {
     pub id: usize,
@@ -226,7 +285,7 @@ struct Neighbor {
 
 impl Ord for Neighbor {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering: smaller distance => higher priority
+        // reverse order: smaller distance => higher priority
         self.distance
             .partial_cmp(&other.distance)
             .unwrap_or(Ordering::Equal)
@@ -249,12 +308,11 @@ impl Eq for Neighbor {}
 
 pub struct Node {
     id: usize,
-    connections: Vec<Vec<usize>>, // connections per level
+    connections: Vec<Vec<usize>>,
     item: VectorItem,
     layer: usize,
 }
 
-/// The main HNSW index for approximate nearest neighbors.
 pub struct HnswIndex {
     pub(crate) nodes: HashMap<usize, Node>,
     pub entry_point: Option<usize>,
@@ -273,10 +331,9 @@ impl HnswIndex {
     }
 
     pub fn add(&mut self, item: VectorItem) -> Result<(), String> {
-        let node_level = self.random_level();
-
         if self.nodes.is_empty() {
             // first node
+            let node_level = self.random_level();
             let node = Node {
                 id: item.id,
                 connections: vec![Vec::new(); node_level + 1],
@@ -289,12 +346,13 @@ impl HnswIndex {
             return Ok(());
         }
 
-        // search from top
+        let node_level = self.random_level();
         let mut curr_ep = self.entry_point.unwrap();
         let mut curr_dist =
             simd_euclidean_distance(&self.nodes[&curr_ep].item.vector, &item.vector);
         let top_l = self.nodes[&curr_ep].layer;
 
+        // search from top
         for level in (0..=top_l).rev() {
             let improved = self.search_layer(curr_ep, &item.vector, level, 1)?;
             if !improved.is_empty() {
@@ -306,11 +364,12 @@ impl HnswIndex {
             }
         }
 
-        // Link
+        // link
         let mut new_conn = vec![Vec::new(); node_level + 1];
         for level in 0..=node_level {
             let neighbors = self.search_layer(curr_ep, &item.vector, level, EF_CONSTRUCTION)?;
-            let final_neighbors = self.select_neighbors(&neighbors, &item.vector, level);
+
+            let final_neighbors = self.select_neighbors(&neighbors, level);
             new_conn[level] = final_neighbors.iter().map(|n| n.id).collect();
 
             for neigh in final_neighbors {
@@ -337,6 +396,15 @@ impl HnswIndex {
         }
 
         Ok(())
+    }
+
+    fn random_level(&self) -> usize {
+        let mut r = rng();
+        let mut lvl = 0usize;
+        while r.random::<f32>() < self.level_lambda && lvl < self.max_level {
+            lvl += 1;
+        }
+        lvl
     }
 
     fn search_layer(
@@ -400,12 +468,7 @@ impl HnswIndex {
         Ok(results.into_sorted_vec())
     }
 
-    fn select_neighbors(
-        &self,
-        neighbors: &[Neighbor],
-        _query: &[f32],
-        level: usize,
-    ) -> Vec<Neighbor> {
+    fn select_neighbors(&self, neighbors: &[Neighbor], level: usize) -> Vec<Neighbor> {
         let max_conn = if level == 0 { M_MAX0 } else { M };
         let mut sorted = neighbors.to_vec();
         sorted.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
@@ -415,19 +478,11 @@ impl HnswIndex {
         sorted
     }
 
-    fn random_level(&self) -> usize {
-        let mut r = rng();
-        let mut lvl = 0usize;
-        while r.random::<f32>() < self.level_lambda && lvl < self.max_level {
-            lvl += 1;
-        }
-        lvl
-    }
-
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(usize, f32)>, String> {
         if self.nodes.is_empty() {
             return Ok(Vec::new());
         }
+
         let ep = self.entry_point.unwrap();
         let mut curr_ep = ep;
         let mut curr_dist = simd_euclidean_distance(&self.nodes[&ep].item.vector, query);
@@ -493,20 +548,58 @@ impl HnswIndexWrapper {
         self.index.add(item)
     }
 
+    /// Perform the HNSW search. This returns raw Euclidean distances,
+    /// which we must convert to 0..1 scores.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, String> {
         let results = self.index.search(query, k)?;
         let mut out = Vec::new();
         for (nid, dist) in results {
             if let Some(str_id) = self.id_map.get(&nid) {
-                out.push((str_id.clone(), dist));
+                let score = clamp_0_1(1.0 / (1.0 + dist));
+                out.push((str_id.clone(), score));
             }
         }
+        // sort by descending score
+        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         Ok(out)
+    }
+}
+
+impl CacheDB {
+    pub fn new() -> Self {
+        Self {
+            collections: HashMap::new(),
+        }
+    }
+
+    pub fn get_embedding_by_id(
+        &self,
+        collection_name: &str,
+        id: &str,
+    ) -> Result<Embedding, String> {
+        let coll = self
+            .collections
+            .get(collection_name)
+            .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
+
+        coll.embeddings
+            .iter()
+            .find(|emb| emb.id == id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Embedding '{}' not found in collection '{}'.",
+                    id, collection_name
+                )
+            })
     }
 }
 
 impl Collection {
     pub fn create_with_distance(dimension: usize, dist_str: &str) -> Result<Self, String> {
+        if dimension == 0 {
+            return Err("Collection dimension cannot be 0.".to_string());
+        }
         let distance = match dist_str.to_lowercase().as_str() {
             "euclidean" => Distance::Euclidean,
             "cosine" => Distance::Cosine,
@@ -525,7 +618,7 @@ impl Collection {
             dimension,
             distance,
             embeddings: Vec::new(),
-            keep_embeddings: true, // default
+            keep_embeddings: true,
             hnsw_index: None,
         };
 
@@ -536,37 +629,28 @@ impl Collection {
     }
 
     pub fn insert_embedding(&mut self, emb: Embedding) -> Result<(), String> {
-        if emb.vector.len() != self.dimension {
-            return Err(format!(
-                "Dimension mismatch: expected {}, got {}",
-                self.dimension,
-                emb.vector.len()
-            ));
-        }
+        check_vector_dimension(&emb.vector, self.dimension)?;
 
+        // ID uniqueness check
         if self.embeddings.iter().any(|e| e.id == emb.id) {
             return Err(format!(
-                "Embedding ID '{}' already exists in this collection",
+                "Embedding ID '{}' already exists in this collection.",
                 emb.id
             ));
         }
 
         let mut new_emb = emb;
-
         if self.distance == Distance::Cosine {
             new_emb.vector = normalize_vec(&new_emb.vector);
         }
         if self.distance == Distance::Binary {
             new_emb.binary = Some(compress_vector(&new_emb.vector));
-
-            // If we're NOT keeping raw embeddings, clear out the float vector:
             if !self.keep_embeddings {
                 new_emb.vector.clear();
             }
         }
 
         self.embeddings.push(new_emb.clone());
-
         if self.distance == Distance::Hnsw {
             if let Some(ref mut w) = self.hnsw_index {
                 w.insert_embedding(&new_emb)?;
@@ -577,69 +661,26 @@ impl Collection {
     }
 
     pub fn get_similarity(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, String> {
+        check_vector_dimension(query, self.dimension)?;
+
         match self.distance {
             Distance::Hnsw => {
-                if let Some(ref w) = self.hnsw_index {
-                    w.search(query, k)
+                if let Some(ref wrapper) = self.hnsw_index {
+                    wrapper.search(query, k)
                 } else {
-                    Err("No HNSW index found in this collection".to_string())
+                    Err("No HNSW index found in this collection.".to_string())
                 }
             }
-            Distance::Euclidean => {
+            _ => {
                 let mut scored: Vec<_> = self
                     .embeddings
                     .iter()
                     .map(|emb| {
-                        let dist = simd_euclidean_distance(query, &emb.vector);
-                        (emb.id.clone(), dist)
-                    })
-                    .collect();
-                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                scored.truncate(k);
-                Ok(scored)
-            }
-            Distance::Cosine => {
-                let mut scored: Vec<_> = self
-                    .embeddings
-                    .iter()
-                    .map(|emb| {
-                        let dp = simd_dot_product(query, &emb.vector);
-                        (emb.id.clone(), dp)
+                        let s = compute_0_1_score(query, emb, self.distance);
+                        (emb.id.clone(), s)
                     })
                     .collect();
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                scored.truncate(k);
-                Ok(scored)
-            }
-            Distance::DotProduct => {
-                let mut scored: Vec<_> = self
-                    .embeddings
-                    .iter()
-                    .map(|emb| {
-                        let dp = simd_dot_product(query, &emb.vector);
-                        (emb.id.clone(), dp)
-                    })
-                    .collect();
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                scored.truncate(k);
-                Ok(scored)
-            }
-            Distance::Binary => {
-                let query_binary = compress_vector(query);
-                let mut scored: Vec<_> = self
-                    .embeddings
-                    .iter()
-                    .map(|emb| {
-                        let d = if let Some(ref emb_bin) = emb.binary {
-                            hamming_distance(&query_binary, emb_bin)
-                        } else {
-                            let computed = compress_vector(&emb.vector);
-                            hamming_distance(&query_binary, &computed)
-                        };
-                        (emb.id.clone(), d as f32)
-                    })
-                    .collect();
-                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
                 scored.truncate(k);
                 Ok(scored)
             }
@@ -648,22 +689,35 @@ impl Collection {
 }
 
 fn mmr_rerank_internal(
-    initial_results: &[(String, f32)],
-    all_embeddings: &HashMap<String, Vec<f32>>,
-    distance: Distance,
+    collection: &Collection,
+    query: &[f32],
+    initial_ids: &[String],
     alpha: f32,
     final_k: usize,
-) -> Vec<(String, f32)> {
-    let mut candidates: Vec<(String, f32)> = match distance {
-        Distance::Euclidean | Distance::Binary => {
-            // invert distance => similarity
-            initial_results
-                .iter()
-                .map(|(id, dist)| (id.clone(), -dist))
-                .collect()
+) -> Result<Vec<(String, f32)>, String> {
+    // Build a map from ID -> embedding for quick lookup
+    let mut emb_map = HashMap::new();
+    for e in &collection.embeddings {
+        emb_map.insert(e.id.clone(), e);
+    }
+
+    // gather candidates by re-computing sim to query
+    let mut candidates = Vec::new();
+    for id in initial_ids {
+        if let Some(emb) = emb_map.get(id) {
+            let sim_q = compute_0_1_similarity_between(
+                emb,
+                &Embedding {
+                    id: "QUERY".to_string(),
+                    vector: query.to_vec(),
+                    metadata: None,
+                    binary: None,
+                },
+                collection.distance,
+            );
+            candidates.push((id.clone(), sim_q));
         }
-        Distance::Cosine | Distance::DotProduct | Distance::Hnsw => initial_results.to_vec(),
-    };
+    }
 
     let mut selected = Vec::<(String, f32)>::new();
     let mut selected_ids = Vec::<String>::new();
@@ -672,26 +726,21 @@ fn mmr_rerank_internal(
         let mut best_idx: Option<usize> = None;
         let mut best_score = f32::MIN;
 
-        for (idx, (cand_id, cand_sim)) in candidates.iter().enumerate() {
+        for (idx, (cand_id, cand_sim_to_query)) in candidates.iter().enumerate() {
+            // max sim to any selected so far
             let mut max_sim_cand_sel = 0.0;
             if !selected_ids.is_empty() {
-                let cand_vec = all_embeddings.get(cand_id).unwrap();
+                let cand_emb = emb_map.get(cand_id).unwrap();
                 for sel_id in &selected_ids {
-                    let sel_vec = all_embeddings.get(sel_id).unwrap();
-                    let sim_cs = match distance {
-                        Distance::Euclidean | Distance::Binary => {
-                            -simd_euclidean_distance(cand_vec, sel_vec)
-                        }
-                        Distance::Cosine | Distance::DotProduct | Distance::Hnsw => {
-                            simd_dot_product(cand_vec, sel_vec)
-                        }
-                    };
+                    let sel_emb = emb_map.get(sel_id).unwrap();
+                    let sim_cs =
+                        compute_0_1_similarity_between(cand_emb, sel_emb, collection.distance);
                     if sim_cs > max_sim_cand_sel {
                         max_sim_cand_sel = sim_cs;
                     }
                 }
             }
-            let mmr_score = alpha * cand_sim - (1.0 - alpha) * max_sim_cand_sel;
+            let mmr_score = alpha * cand_sim_to_query - (1.0 - alpha) * max_sim_cand_sel;
             if mmr_score > best_score {
                 best_score = mmr_score;
                 best_idx = Some(idx);
@@ -707,13 +756,12 @@ fn mmr_rerank_internal(
         }
     }
 
-    selected
+    Ok(selected)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn new_db() -> ResourceArc<DBResource> {
-    let db = CacheDB::new();
-    ResourceArc::new(DBResource(Mutex::new(db)))
+    ResourceArc::new(DBResource(Mutex::new(CacheDB::new())))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -727,13 +775,10 @@ fn nif_create_collection(
     let mut db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
 
     if db.collections.contains_key(&name) {
-        return Err(format!("Collection '{}' already exists", name));
+        return Err(format!("Collection '{}' already exists.", name));
     }
 
-    // Create collection with the chosen distance
     let mut col = Collection::create_with_distance(dimension, &distance)?;
-
-    // Set keep_embeddings
     col.keep_embeddings = keep_embeddings;
 
     db.collections.insert(name.clone(), col);
@@ -744,7 +789,7 @@ fn nif_create_collection(
 fn delete_collection(db_res: ResourceArc<DBResource>, name: String) -> Result<String, String> {
     let mut db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
     if db.collections.remove(&name).is_none() {
-        return Err(format!("Collection '{}' not found; cannot delete", name));
+        return Err(format!("Collection '{}' not found; cannot delete.", name));
     }
     Ok(name)
 }
@@ -758,10 +803,11 @@ fn nif_insert_embedding(
     metadata: Option<HashMap<String, String>>,
 ) -> Result<String, String> {
     let mut db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
+
     let coll = db
         .collections
         .get_mut(&collection_name)
-        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
+        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
 
     let emb = Embedding {
         id: id.clone(),
@@ -770,7 +816,6 @@ fn nif_insert_embedding(
         binary: None,
     };
     coll.insert_embedding(emb)?;
-
     Ok(id)
 }
 
@@ -781,54 +826,41 @@ fn nif_insert_embeddings(
     embeddings: Vec<(String, Vec<f32>, Option<HashMap<String, String>>)>,
 ) -> Result<Vec<String>, String> {
     let mut db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
+
     let coll = db
         .collections
         .get_mut(&collection_name)
-        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
+        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
 
     let mut inserted_ids = Vec::new();
-
-    for (id, vector, metadata) in embeddings {
+    for (id, vec, meta) in embeddings {
         let emb = Embedding {
             id: id.clone(),
-            vector,
-            metadata,
+            vector: vec,
+            metadata: meta,
             binary: None,
         };
-        // If any fails, we stop
         coll.insert_embedding(emb)?;
         inserted_ids.push(id);
     }
-
-    // Return {:ok, ["id1", "id2", ...]}
     Ok(inserted_ids)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_mmr_rerank(
+fn nif_similarity_search(
     db_res: ResourceArc<DBResource>,
     collection_name: String,
-    initial_results: Vec<(String, f32)>,
-    alpha: f32,
-    final_k: usize,
+    query: Vec<f32>,
+    k: usize,
 ) -> Result<Vec<(String, f32)>, String> {
     let db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
-
     let coll = db
         .collections
         .get(&collection_name)
-        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
+        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
 
-    let embeddings_map = coll
-        .embeddings
-        .iter()
-        .map(|e| (e.id.clone(), e.vector.clone()))
-        .collect::<HashMap<_, _>>();
-
-    let distance = coll.distance;
-    let reranked = mmr_rerank_internal(&initial_results, &embeddings_map, distance, alpha, final_k);
-
-    Ok(reranked)
+    let results = coll.get_similarity(&query, k)?;
+    Ok(results)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -843,14 +875,16 @@ fn nif_similarity_search_with_filter(
     let coll = db
         .collections
         .get(&collection_name)
-        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
+        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
 
-    // If the collection uses HNSW, we just return an error:
+    // not supported for HNSW
     if matches!(coll.distance, Distance::Hnsw) {
-        return Err("Filtering by metadata is not supported with HNSW".into());
+        return Err("Filtering by metadata is not supported with HNSW.".into());
     }
 
-    // Otherwise, filter the embeddings by metadata
+    check_vector_dimension(&query, coll.dimension)?;
+
+    // filter first
     let filtered: Vec<&Embedding> = coll
         .embeddings
         .iter()
@@ -863,83 +897,28 @@ fn nif_similarity_search_with_filter(
         })
         .collect();
 
-    if filtered.is_empty() {
-        return Ok(vec![]);
-    }
+    let mut scored: Vec<(String, f32)> = filtered
+        .iter()
+        .map(|emb| {
+            let s = compute_0_1_score(&query, emb, coll.distance);
+            (emb.id.clone(), s)
+        })
+        .collect();
 
-    match coll.distance {
-        Distance::Euclidean => {
-            let mut scored: Vec<(String, f32)> = filtered
-                .iter()
-                .map(|emb| {
-                    let dist = simd_euclidean_distance(&query, &emb.vector);
-                    (emb.id.clone(), dist)
-                })
-                .collect();
-            scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            scored.truncate(k);
-            Ok(scored)
-        }
-        Distance::Cosine => {
-            let mut scored: Vec<(String, f32)> = filtered
-                .iter()
-                .map(|emb| {
-                    let dp = simd_dot_product(&query, &emb.vector);
-                    (emb.id.clone(), dp)
-                })
-                .collect();
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            scored.truncate(k);
-            Ok(scored)
-        }
-        Distance::DotProduct => {
-            let mut scored: Vec<(String, f32)> = filtered
-                .iter()
-                .map(|emb| {
-                    let dp = simd_dot_product(&query, &emb.vector);
-                    (emb.id.clone(), dp)
-                })
-                .collect();
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            scored.truncate(k);
-            Ok(scored)
-        }
-        Distance::Binary => {
-            let query_binary = compress_vector(&query);
-            let mut scored: Vec<(String, f32)> = filtered
-                .iter()
-                .map(|emb| {
-                    let d = if let Some(ref emb_bin) = emb.binary {
-                        hamming_distance(&query_binary, emb_bin)
-                    } else {
-                        let computed = compress_vector(&emb.vector);
-                        hamming_distance(&query_binary, &computed)
-                    };
-                    (emb.id.clone(), d as f32)
-                })
-                .collect();
-            scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            scored.truncate(k);
-            Ok(scored)
-        }
-        // We already returned an Err for HNSW above
-        Distance::Hnsw => unreachable!(),
-    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scored.truncate(k);
+    Ok(scored)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_similarity_search(
+fn nif_get_embedding_by_id(
     db_res: ResourceArc<DBResource>,
     collection_name: String,
-    query: Vec<f32>,
-    k: usize,
-) -> Result<Vec<(String, f32)>, String> {
+    id: String,
+) -> Result<(String, Vec<f32>, Option<HashMap<String, String>>), String> {
     let db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
-    let coll = db
-        .collections
-        .get(&collection_name)
-        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
-    coll.get_similarity(&query, k)
+    let embedding = db.get_embedding_by_id(&collection_name, &id)?;
+    Ok((embedding.id, embedding.vector, embedding.metadata))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -951,8 +930,9 @@ fn get_embeddings(
     let coll = db
         .collections
         .get(&collection_name)
-        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
-    let out: Vec<_> = coll
+        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
+
+    let out = coll
         .embeddings
         .iter()
         .map(|e| (e.id.clone(), e.vector.clone(), e.metadata.clone()))
@@ -960,15 +940,26 @@ fn get_embeddings(
     Ok(out)
 }
 
+/// initial_results is a list of (ID, _score_or_distance)
+/// re-lookup the embeddings to do real MMR in [0..1]
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_get_embedding_by_id(
+fn nif_mmr_rerank(
     db_res: ResourceArc<DBResource>,
     collection_name: String,
-    id: String,
-) -> Result<(String, Vec<f32>, Option<HashMap<String, String>>), String> {
-    let db_lock = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
-    let embedding = db_lock.get_embedding_by_id(&collection_name, &id)?;
-    Ok((embedding.id, embedding.vector, embedding.metadata))
+    initial_results: Vec<(String, f32)>,
+    alpha: f32,
+    final_k: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    let db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
+    let coll = db
+        .collections
+        .get(&collection_name)
+        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
+
+    /// reuse the IDs from initial_results
+    let ids: Vec<String> = initial_results.iter().map(|(id, _)| id.clone()).collect();
+    let reranked = mmr_rerank_internal(coll, &[], &ids, alpha, final_k)?;
+    Ok(reranked)
 }
 
 fn on_load(env: Env, _info: Term) -> bool {

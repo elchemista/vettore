@@ -48,7 +48,7 @@ defmodule VettoreTest do
 
     assert length(top2) == 2
     [{"emb1", score1}, {"emb2", score2}] = top2
-    assert score1 <= score2
+    assert score1 >= score2
   end
 
   test "metadata filtering (Euclidean example)" do
@@ -194,7 +194,7 @@ defmodule VettoreTest do
     assert length(top2) == 2
 
     [{"vec1", score1}, {"vec2", score2}] = top2
-    assert score1 <= score2
+    assert score1 >= score2
 
     # Attempt filter => error
     assert {:error, _} =
