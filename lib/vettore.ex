@@ -70,7 +70,7 @@ defmodule Vettore do
   #   otp_app: :vettore,
   #   crate: "vettore"
 
-  # alias Vettore.Embedding
+  alias Vettore.Embedding
 
   #
   # Public API
