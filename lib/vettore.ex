@@ -70,7 +70,7 @@ defmodule Vettore do
   #   otp_app: :vettore,
   #   crate: "vettore"
 
-  alias Vettore.Embedding
+  # alias Vettore.Embedding
 
   #
   # Public API
@@ -137,6 +137,27 @@ defmodule Vettore do
           {:ok, String.t()} | {:error, String.t()}
   def delete_collection(_db, _name),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Deletes a single embedding by its `id`.
+
+  * `db` is the database resource (created with `new_db/0`).
+  * `collection` is the name of the collection.
+  * `id` is the ID of the embedding.
+
+  Returns `{:ok, id}` if the embedding was found and deleted, or `{:error, reason}` otherwise.
+
+  ## Examples
+
+      Vettore.delete_embedding_by_id(db, "my_collection", "my_id")
+      # => {:ok, "my_id"}
+  """
+
+  @spec delete_embedding_by_id(db :: any(), collection_name :: String.t(), id :: String.t()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def delete_embedding_by_id(db, collection_name, id)
+      when is_bitstring(id) and is_bitstring(collection_name),
+      do: nif_delete_embedding_by_id(db, collection_name, id)
 
   @doc """
   Inserts a **single** embedding (as a `%Vettore.Embedding{}` struct) into a specified `collection`.
@@ -359,6 +380,12 @@ defmodule Vettore do
           [{String.t(), [float()], map() | nil}]
         ) :: :ok | {:error, String.t()}
   def nif_insert_embeddings(_db, _collection, _embeddings),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec nif_delete_embedding_by_id(any(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def nif_delete_embedding_by_id(_db, _collection, _id),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
