@@ -214,57 +214,6 @@ fn compute_0_1_score(query: &[f32], emb: &Embedding, dist_type: Distance) -> f32
     }
 }
 
-// Compare two embeddings → a 0..1 similarity, used in MMR.
-fn compute_0_1_similarity_between(emb1: &Embedding, emb2: &Embedding, dist_type: Distance) -> f32 {
-    let v1 = &emb1.vector;
-    let v2 = &emb2.vector;
-
-    match dist_type {
-        Distance::Euclidean => {
-            let d = simd_euclidean_distance(v1, v2);
-            clamp_0_1(1.0 / (1.0 + d))
-        }
-        Distance::Cosine => {
-            let cos = simd_dot_product(v1, v2);
-            clamp_0_1((cos + 1.0) / 2.0)
-        }
-        Distance::DotProduct => {
-            let dp = simd_dot_product(v1, v2);
-            clamp_0_1(1.0 / (1.0 + f32::exp(-dp)))
-        }
-        Distance::Hnsw => {
-            let d = simd_euclidean_distance(v1, v2);
-            clamp_0_1(1.0 / (1.0 + d))
-        }
-        Distance::Binary => match (emb1.binary.as_ref(), emb2.binary.as_ref()) {
-            (Some(b1), Some(b2)) => {
-                let d_bits = hamming_distance(b1, b2) as f32;
-                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
-                1.0 - frac
-            }
-            (Some(b1), None) => {
-                let temp2 = compress_vector(&emb2.vector);
-                let d_bits = hamming_distance(b1, &temp2) as f32;
-                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
-                1.0 - frac
-            }
-            (None, Some(b2)) => {
-                let temp1 = compress_vector(&emb1.vector);
-                let d_bits = hamming_distance(&temp1, b2) as f32;
-                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
-                1.0 - frac
-            }
-            (None, None) => {
-                let temp1 = compress_vector(&emb1.vector);
-                let temp2 = compress_vector(&emb2.vector);
-                let d_bits = hamming_distance(&temp1, &temp2) as f32;
-                let frac = clamp_0_1(d_bits / emb1.vector.len() as f32);
-                1.0 - frac
-            }
-        },
-    }
-}
-
 const M: usize = 16;
 const M_MAX0: usize = 32;
 const EF_CONSTRUCTION: usize = 100;
@@ -761,35 +710,14 @@ impl Collection {
 }
 
 fn mmr_rerank_internal(
-    collection: &Collection,
-    query: &[f32],
-    initial_ids: &[String],
+    // The `initial_results` are already "similarities" in [0..1]
+    initial_results: &[(String, f32)],
+    all_embeddings: &HashMap<String, Vec<f32>>,
+    distance: Distance,
     alpha: f32,
     final_k: usize,
-) -> Result<Vec<(String, f32)>, String> {
-    // Build a map from ID -> embedding for quick lookup
-    let mut emb_map = HashMap::new();
-    for e in &collection.embeddings {
-        emb_map.insert(e.id.clone(), e);
-    }
-
-    // gather candidates by re-computing sim to query
-    let mut candidates = Vec::new();
-    for id in initial_ids {
-        if let Some(emb) = emb_map.get(id) {
-            let sim_q = compute_0_1_similarity_between(
-                emb,
-                &Embedding {
-                    id: "QUERY".to_string(),
-                    vector: query.to_vec(),
-                    metadata: None,
-                    binary: None,
-                },
-                collection.distance,
-            );
-            candidates.push((id.clone(), sim_q));
-        }
-    }
+) -> Vec<(String, f32)> {
+    let mut candidates: Vec<(String, f32)> = initial_results.to_vec();
 
     let mut selected = Vec::<(String, f32)>::new();
     let mut selected_ids = Vec::<String>::new();
@@ -799,19 +727,39 @@ fn mmr_rerank_internal(
         let mut best_score = f32::MIN;
 
         for (idx, (cand_id, cand_sim_to_query)) in candidates.iter().enumerate() {
-            // max sim to any selected so far
             let mut max_sim_cand_sel = 0.0;
+
             if !selected_ids.is_empty() {
-                let cand_emb = emb_map.get(cand_id).unwrap();
+                // get the candidate's embedding
+                let cand_vec = all_embeddings.get(cand_id).unwrap();
+
                 for sel_id in &selected_ids {
-                    let sel_emb = emb_map.get(sel_id).unwrap();
-                    let sim_cs =
-                        compute_0_1_similarity_between(cand_emb, sel_emb, collection.distance);
+                    let sel_vec = all_embeddings.get(sel_id).unwrap();
+                    let sim_cs = match distance {
+                        Distance::Euclidean | Distance::Hnsw => {
+                            let d = simd_euclidean_distance(cand_vec, sel_vec);
+                            1.0 / (1.0 + d)
+                        }
+                        Distance::Binary => {
+                            // e.g. "1 - (Hamming fraction)"
+                            // or if you precompute sign bits, do that here
+                            let d = simd_euclidean_distance(cand_vec, sel_vec);
+                            // or a real hamming function if needed
+                            1.0 / (1.0 + d)
+                        }
+                        Distance::Cosine | Distance::DotProduct => {
+                            simd_dot_product(cand_vec, sel_vec)
+                        }
+                    };
+
                     if sim_cs > max_sim_cand_sel {
                         max_sim_cand_sel = sim_cs;
                     }
                 }
             }
+
+            // MMR formula: alpha * candidate_similarity_to_query
+            //              - (1-alpha) * max_similarity_to_already_selected
             let mmr_score = alpha * cand_sim_to_query - (1.0 - alpha) * max_sim_cand_sel;
             if mmr_score > best_score {
                 best_score = mmr_score;
@@ -828,7 +776,7 @@ fn mmr_rerank_internal(
         }
     }
 
-    Ok(selected)
+    selected
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -1040,14 +988,21 @@ fn nif_mmr_rerank(
     final_k: usize,
 ) -> Result<Vec<(String, f32)>, String> {
     let db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
+
     let coll = db
         .collections
         .get(&collection_name)
-        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
+        .ok_or_else(|| format!("Collection '{}' not found", collection_name))?;
 
-    // reuse the IDs from initial_results
-    let ids: Vec<String> = initial_results.iter().map(|(id, _)| id.clone()).collect();
-    let reranked = mmr_rerank_internal(coll, &[], &ids, alpha, final_k)?;
+    let embeddings_map = coll
+        .embeddings
+        .iter()
+        .map(|e| (e.id.clone(), e.vector.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let distance = coll.distance;
+    let reranked = mmr_rerank_internal(&initial_results, &embeddings_map, distance, alpha, final_k);
+
     Ok(reranked)
 }
 

@@ -359,7 +359,7 @@ defmodule VettoreTest do
     assert {:ok, "m2"} =
              Vettore.insert_embedding(db, "mmr_coll", %Vettore.Embedding{
                id: "m2",
-               vector: [2.0, 3.0, 4.0],
+               vector: [2.1, 2.5, 3.0],
                metadata: %{"tag" => "B"}
              })
 
@@ -370,7 +370,7 @@ defmodule VettoreTest do
                metadata: nil
              })
 
-    assert {:ok, top3} = Vettore.similarity_search(db, "mmr_coll", [2.1, 2.1, 2.1], limit: 3)
+    assert {:ok, top3} = Vettore.similarity_search(db, "mmr_coll", [2.1, 2.2, 2.3], limit: 3)
 
     assert {:ok, mmr_list} =
              Vettore.mmr_rerank(db, "mmr_coll", top3,
