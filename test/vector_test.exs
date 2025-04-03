@@ -49,6 +49,9 @@ defmodule VettoreTest do
     assert length(top2) == 2
     [{"emb1", score1}, {"emb2", score2}] = top2
     assert score1 >= score2
+
+    assert {:ok, "emb1"} = Vettore.delete_embedding_by_id(db, "euclidean_coll", "emb1")
+    assert {:error, _} = Vettore.get_embedding_by_id(db, "euclidean_coll", "emb1")
   end
 
   test "metadata filtering (Euclidean example)" do

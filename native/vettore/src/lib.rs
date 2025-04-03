@@ -40,7 +40,7 @@ pub struct CacheDB {
 pub struct DBResource(pub Mutex<CacheDB>);
 impl rustler::Resource for DBResource {}
 
-/// Ensure vector is not empty and matches the collection's dimension.
+// Ensure vector is not empty and matches the collection's dimension.
 fn check_vector_dimension(vec: &[f32], expected_dim: usize) -> Result<(), String> {
     if expected_dim == 0 {
         return Err("Collection dimension cannot be 0.".to_string());
@@ -58,7 +58,7 @@ fn check_vector_dimension(vec: &[f32], expected_dim: usize) -> Result<(), String
     Ok(())
 }
 
-/// Generic clamp helper, ensures val is in [0..1].
+// Generic clamp helper, ensures val is in [0..1].
 fn clamp_0_1(val: f32) -> f32 {
     if val < 0.0 {
         0.0
@@ -74,7 +74,7 @@ fn load_f32x4(slice: &[f32], i: usize) -> f32x4 {
     f32x4::from([slice[i], slice[i + 1], slice[i + 2], slice[i + 3]])
 }
 
-/// SIMD Euclidean distance
+// SIMD Euclidean distance
 fn simd_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let mut i = 0;
@@ -98,7 +98,7 @@ fn simd_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     sum_squares.sqrt()
 }
 
-/// SIMD dot product
+// SIMD dot product
 fn simd_dot_product(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let mut i = 0;
@@ -119,7 +119,7 @@ fn simd_dot_product(a: &[f32], b: &[f32]) -> f32 {
     accum
 }
 
-/// Normalizing for Cosine distance (so the vector has length ~1)
+// Normalizing for Cosine distance (so the vector has length ~1)
 fn normalize_vec(v: &[f32]) -> Vec<f32> {
     let len = v.len();
     let mut i = 0;
@@ -175,7 +175,7 @@ fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
         .sum()
 }
 
-/// Convert raw distance / dot product → a 0..1 "score".
+// Convert raw distance / dot product → a 0..1 "score".
 fn compute_0_1_score(query: &[f32], emb: &Embedding, dist_type: Distance) -> f32 {
     match dist_type {
         Distance::Euclidean => {
@@ -214,7 +214,7 @@ fn compute_0_1_score(query: &[f32], emb: &Embedding, dist_type: Distance) -> f32
     }
 }
 
-/// Compare two embeddings → a 0..1 similarity, used in MMR.
+// Compare two embeddings → a 0..1 similarity, used in MMR.
 fn compute_0_1_similarity_between(emb1: &Embedding, emb2: &Embedding, dist_type: Distance) -> f32 {
     let v1 = &emb1.vector;
     let v2 = &emb2.vector;
@@ -398,6 +398,40 @@ impl HnswIndex {
         Ok(())
     }
 
+    pub fn remove(&mut self, node_id: usize) -> Result<(), String> {
+        let connections = {
+            let node = self
+                .nodes
+                .get(&node_id)
+                .ok_or_else(|| format!("Node {} not found in HNSW index", node_id))?;
+            node.connections.clone()
+        };
+
+        for (level, neighbors) in connections.into_iter().enumerate() {
+            for &nbr_id in &neighbors {
+                if let Some(nbr_node) = self.nodes.get_mut(&nbr_id) {
+                    if level < nbr_node.connections.len() {
+                        nbr_node.connections[level].retain(|&x| x != node_id);
+                    }
+                }
+            }
+        }
+
+        // Remove the node itself
+        self.nodes.remove(&node_id);
+
+        if self.entry_point == Some(node_id) {
+            self.entry_point = None;
+        }
+        if self.entry_point.is_none() {
+            if let Some((&some_id, _)) = self.nodes.iter().next() {
+                self.entry_point = Some(some_id);
+            }
+        }
+
+        Ok(())
+    }
+
     fn random_level(&self) -> usize {
         let mut r = rng();
         let mut lvl = 0usize;
@@ -548,8 +582,8 @@ impl HnswIndexWrapper {
         self.index.add(item)
     }
 
-    /// Perform the HNSW search. This returns raw Euclidean distances,
-    /// which we must convert to 0..1 scores.
+    // Perform the HNSW search. This returns raw Euclidean distances,
+    // which we must convert to 0..1 scores.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, String> {
         let results = self.index.search(query, k)?;
         let mut out = Vec::new();
@@ -562,6 +596,27 @@ impl HnswIndexWrapper {
         // sort by descending score
         out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         Ok(out)
+    }
+
+    pub fn remove_by_str_id(&mut self, emb_id: &str) -> Result<(), String> {
+        // Reverse-lookup the numeric ID
+        let mut found_nid = None;
+        for (nid, id_string) in &self.id_map {
+            if id_string == emb_id {
+                found_nid = Some(*nid);
+                break;
+            }
+        }
+        let node_id =
+            found_nid.ok_or_else(|| format!("ID '{}' not found in HNSW index", emb_id))?;
+
+        // Remove from the core index
+        self.index.remove(node_id)?;
+
+        // Remove from id_map
+        self.id_map.remove(&node_id);
+
+        Ok(())
     }
 }
 
@@ -685,6 +740,23 @@ impl Collection {
                 Ok(scored)
             }
         }
+    }
+
+    pub fn remove_embedding_by_id(&mut self, emb_id: &str) -> Result<(), String> {
+        let pos = self
+            .embeddings
+            .iter()
+            .position(|emb| emb.id == emb_id)
+            .ok_or_else(|| format!("Embedding '{}' not found in this collection.", emb_id))?;
+        self.embeddings.remove(pos);
+
+        if self.distance == Distance::Hnsw {
+            if let Some(ref mut w) = self.hnsw_index {
+                w.remove_by_str_id(emb_id)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -940,8 +1012,25 @@ fn get_embeddings(
     Ok(out)
 }
 
-/// initial_results is a list of (ID, _score_or_distance)
-/// re-lookup the embeddings to do real MMR in [0..1]
+#[rustler::nif(schedule = "DirtyCpu")]
+fn nif_delete_embedding_by_id(
+    db_res: ResourceArc<DBResource>,
+    collection_name: String,
+    embedding_id: String,
+) -> Result<String, String> {
+    let mut db = db_res.0.lock().map_err(|_| "Mutex poisoned")?;
+
+    let coll = db
+        .collections
+        .get_mut(&collection_name)
+        .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
+
+    coll.remove_embedding_by_id(&embedding_id)?;
+    Ok(embedding_id)
+}
+
+// initial_results is a list of (ID, _score_or_distance)
+// re-lookup the embeddings to do real MMR in [0..1]
 #[rustler::nif(schedule = "DirtyCpu")]
 fn nif_mmr_rerank(
     db_res: ResourceArc<DBResource>,
@@ -956,7 +1045,7 @@ fn nif_mmr_rerank(
         .get(&collection_name)
         .ok_or_else(|| format!("Collection '{}' not found.", collection_name))?;
 
-    /// reuse the IDs from initial_results
+    // reuse the IDs from initial_results
     let ids: Vec<String> = initial_results.iter().map(|(id, _)| id.clone()).collect();
     let reranked = mmr_rerank_internal(coll, &[], &ids, alpha, final_k)?;
     Ok(reranked)
