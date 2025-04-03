@@ -265,6 +265,21 @@ Optional parameters:
 # 'mmr_list' is now a top-10 list of {id, mmr_score} tuples.
 ```
 
+### 10. `delete_embedding_by_id/3`
+**Signature:**
+```elixir
+delete_embedding_by_id(db, collection_name, id)
+```
+**Return:** `{:ok, id}` or `{:error, reason}`
+
+Deleting an embedding by its `id` is as simple as:
+
+**Examples:**
+```elixir
+{:ok, "my_id"} = Vettore.delete_embedding_by_id(db, "my_collection", "my_id")
+# => {:ok, "my_id"}
+```
+
 ---
 
 ## Complete Usage Example
