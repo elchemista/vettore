@@ -1,6 +1,6 @@
 [package]
 name = "vettore"
-version = "0.1.11"
+version = "0.1.12"
 authors = []
 edition = "2021"
 
@@ -25,5 +25,5 @@ panic = 'abort'
 strip = "debuginfo"
 
 [features]
-default = [] 
+default = ["parallel"]
 parallel = ["rayon"]  # enable with `--features parallel`

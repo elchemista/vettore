@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.1.11"
+  @version "0.1.12"
 
   def project do
     [
@@ -14,13 +14,6 @@ defmodule Vettore.MixProject do
       deps: deps(),
       description: description(),
       package: package(),
-      rustler_crates: %{
-        vettore: [
-          path: "native/vettore",
-          mode: if(Mix.env() == :prod, do: :release, else: :debug),
-          features: ["parallel"]
-        ]
-      },
       docs: [
         main: "readme",
         extras: [
