@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
 #[cfg(feature = "parallel")]
-use rayon::prelude::*;
-
 use crate::distances::{compress_vector, score};
 use crate::hnsw::HnswIndexWrapper;
 use crate::simd_utils::normalize_vec;
@@ -16,6 +14,7 @@ pub struct Collection {
 
     pub(crate) vectors: Vec<f32>,
     pub(crate) id2row: HashMap<String, usize>,
+    pub(crate) row2id: Vec<Option<String>>,
     pub(crate) meta: Vec<Option<Metadata>>, // optional user metadata
     pub(crate) binary: Vec<Option<Vec<u64>>>, // cached sign bits (Binary dist)
 
@@ -39,6 +38,7 @@ impl Collection {
             distance: dist,
             vectors: Vec::new(),
             id2row: HashMap::new(),
+            row2id: Vec::new(),
             meta: Vec::new(),
             binary: Vec::new(),
             free: Vec::new(),
@@ -57,6 +57,7 @@ impl Collection {
             let row = self.row_count();
             self.meta.push(None);
             self.binary.push(None);
+            self.row2id.push(None);
             self.vectors.resize((row + 1) * self.dimension, 0.0);
             row
         }
@@ -96,6 +97,7 @@ impl Collection {
             }
         }
 
+        self.row2id[row] = Some(id.clone());
         self.id2row.insert(id.clone(), row);
         if let Some(h) = &mut self.hnsw {
             h.insert(&id, vec)?;
@@ -104,6 +106,7 @@ impl Collection {
     }
 
     pub fn get_similarity(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, String> {
+        // dimension & HNSW fast-path
         if query.len() != self.dimension {
             return Err("query dim mismatch".into());
         }
@@ -112,43 +115,47 @@ impl Collection {
         }
 
         let rows = self.row_count();
+        let use_parallel = cfg!(feature = "parallel") && rows >= 20_000; // ← threshold
 
-        #[cfg(feature = "parallel")]
-        let mut _scores: Vec<(String, f32)> = (0..rows)
-            .into_par_iter()
-            .filter_map(|row| {
-                let id = self
-                    .id2row
-                    .iter()
-                    .find(|(_, &r)| r == row)
-                    .map(|(k, _)| k.clone())?;
-                let vec_slice = &self.vectors[row * self.dimension..(row + 1) * self.dimension];
-                Some((
-                    id,
-                    score(query, vec_slice, self.binary[row].as_ref(), self.distance),
-                ))
-            })
-            .collect();
+        #[allow(unused_mut)]
+        let mut scores: Vec<(String, f32)> = if !use_parallel {
+            self.row2id
+                .iter()
+                .enumerate()
+                .filter_map(|(row, maybe_id)| {
+                    let id = maybe_id.as_ref()?;
+                    let slice = &self.vectors[row * self.dimension..(row + 1) * self.dimension];
+                    Some((
+                        id.clone(),
+                        score(query, slice, self.binary[row].as_ref(), self.distance),
+                    ))
+                })
+                .collect()
+        } else {
+            // parallel
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                self.row2id
+                    .par_iter()
+                    .enumerate()
+                    .filter_map(|(row, maybe_id)| {
+                        let id = maybe_id.as_ref()?;
+                        let slice = &self.vectors[row * self.dimension..(row + 1) * self.dimension];
+                        Some((
+                            id.clone(),
+                            score(query, slice, self.binary[row].as_ref(), self.distance),
+                        ))
+                    })
+                    .collect()
+            }
+            #[cfg(not(feature = "parallel"))]
+            unreachable!();
+        };
 
-        #[cfg(not(feature = "parallel"))]
-        let mut _scores: Vec<(String, f32)> = (0..rows)
-            .into_iter()
-            .filter_map(|row| {
-                let id = self
-                    .id2row
-                    .iter()
-                    .find(|(_, &r)| r == row)
-                    .map(|(k, _)| k.clone())?;
-                let vec_slice = &self.vectors[row * self.dimension..(row + 1) * self.dimension];
-                Some((
-                    id,
-                    score(query, vec_slice, self.binary[row].as_ref(), self.distance),
-                ))
-            })
-            .collect();
-
-        _scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        Ok(_scores.into_iter().take(k).collect())
+        // rank & truncate
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        Ok(scores.into_iter().take(k).collect())
     }
 
     /// Returns (id, float_vec_or_empty, metadata)
