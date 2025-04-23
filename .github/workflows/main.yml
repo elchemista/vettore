@@ -51,6 +51,7 @@ jobs:
           nif-version: ${{ matrix.nif }}
           use-cross: ${{ matrix.job.use-cross }}
           project-dir: "native/vettore"
+          features:       "parallel"
 
       - name: Artifact upload
         uses: actions/upload-artifact@v4

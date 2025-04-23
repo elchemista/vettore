@@ -9,10 +9,4 @@ pub enum Distance {
     Binary,
 }
 
-#[derive(Clone)]
-pub struct Embedding {
-    pub id: String,
-    pub vector: Vec<f32>,
-    pub metadata: Option<HashMap<String, String>>,
-    pub binary: Option<Vec<u64>>, // sign‑bit compression cache for Binary distance
-}
+pub type Metadata = HashMap<String, String>;

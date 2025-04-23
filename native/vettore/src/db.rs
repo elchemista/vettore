@@ -1,139 +1,179 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 
-use crate::distances::{compress_vector, compute_0_1_score};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+use crate::distances::{compress_vector, score};
 use crate::hnsw::HnswIndexWrapper;
 use crate::simd_utils::normalize_vec;
-use crate::types::{Distance, Embedding};
+use crate::types::{Distance, Metadata};
 
+/// One vector collection inside the DB.
 pub struct Collection {
     pub dimension: usize,
     pub keep_embeddings: bool,
     pub distance: Distance,
-    pub embeddings: Vec<Embedding>,
-    pub hnsw_index: Option<HnswIndexWrapper>,
+
+    pub(crate) vectors: Vec<f32>,
+    pub(crate) id2row: HashMap<String, usize>,
+    pub(crate) meta: Vec<Option<Metadata>>, // optional user metadata
+    pub(crate) binary: Vec<Option<Vec<u64>>>, // cached sign bits (Binary dist)
+
+    free: Vec<usize>,
+    hnsw: Option<HnswIndexWrapper>,
 }
-
-pub struct CacheDB {
-    pub collections: HashMap<String, Collection>,
-}
-
-impl CacheDB {
-    pub fn new() -> Self {
-        Self {
-            collections: HashMap::new(),
-        }
-    }
-
-    pub fn get_embedding_by_id(&self, col: &str, id: &str) -> Result<Embedding, String> {
-        let c = self
-            .collections
-            .get(col)
-            .ok_or_else(|| format!("Collection '{}' not found", col))?;
-        c.embeddings
-            .iter()
-            .find(|e| e.id == id)
-            .cloned()
-            .ok_or_else(|| format!("Embedding '{}' not found in '{}'", id, col))
-    }
-}
-
-// Shareable across NIF boundary.
-pub struct DBResource(pub Mutex<CacheDB>);
-impl rustler::Resource for DBResource {}
 
 impl Collection {
     pub fn create_with_distance(dim: usize, dist_str: &str) -> Result<Self, String> {
-        if dim == 0 {
-            return Err("Dimension cannot be 0".into());
-        }
-        let distance = match dist_str.to_lowercase().as_str() {
+        let dist = match dist_str.to_lowercase().as_str() {
             "euclidean" => Distance::Euclidean,
             "cosine" => Distance::Cosine,
             "dot" => Distance::DotProduct,
             "hnsw" => Distance::Hnsw,
             "binary" => Distance::Binary,
-            other => {
-                return Err(format!(
-                    "Unknown distance '{}'. Expected euclidean | cosine | dot | hnsw | binary",
-                    other
-                ))
-            }
+            _ => return Err("unknown distance".into()),
         };
-        let mut c = Self {
+        Ok(Self {
             dimension: dim,
             keep_embeddings: true,
-            distance,
-            embeddings: Vec::new(),
-            hnsw_index: None,
-        };
-        if distance == Distance::Hnsw {
-            c.hnsw_index = Some(HnswIndexWrapper::new());
-        }
-        Ok(c)
+            distance: dist,
+            vectors: Vec::new(),
+            id2row: HashMap::new(),
+            meta: Vec::new(),
+            binary: Vec::new(),
+            free: Vec::new(),
+            hnsw: if dist == Distance::Hnsw {
+                Some(HnswIndexWrapper::new())
+            } else {
+                None
+            },
+        })
     }
 
-    pub fn insert_embedding(&mut self, mut emb: Embedding) -> Result<(), String> {
-        if emb.vector.len() != self.dimension {
-            return Err(format!(
-                "Dimension mismatch: expected {}, got {}",
-                self.dimension,
-                emb.vector.len()
-            ));
+    fn alloc_row(&mut self) -> usize {
+        if let Some(row) = self.free.pop() {
+            row
+        } else {
+            let row = self.row_count();
+            self.meta.push(None);
+            self.binary.push(None);
+            self.vectors.resize((row + 1) * self.dimension, 0.0);
+            row
         }
-        if self.embeddings.iter().any(|e| e.id == emb.id) {
-            return Err(format!("ID '{}' already exists", emb.id));
+    }
+    fn row_count(&self) -> usize {
+        self.meta.len()
+    }
+
+    pub fn insert(
+        &mut self,
+        id: String,
+        mut vec: Vec<f32>,
+        md: Option<Metadata>,
+    ) -> Result<(), String> {
+        if vec.len() != self.dimension {
+            return Err("dimension mismatch".into());
         }
-        if self.distance == Distance::Cosine {
-            emb.vector = normalize_vec(&emb.vector);
+        if self.id2row.contains_key(&id) {
+            return Err("duplicate id".into());
         }
-        if self.distance == Distance::Binary {
-            emb.binary = Some(compress_vector(&emb.vector));
+        if matches!(self.distance, Distance::Cosine) {
+            vec = normalize_vec(&vec);
+        }
+
+        let row = self.alloc_row();
+        let offset = row * self.dimension;
+
+        if !(matches!(self.distance, Distance::Binary) && !self.keep_embeddings) {
+            self.vectors[offset..offset + self.dimension].copy_from_slice(&vec);
+        }
+        self.meta[row] = md;
+
+        if matches!(self.distance, Distance::Binary) {
+            self.binary[row] = Some(compress_vector(&vec));
             if !self.keep_embeddings {
-                emb.vector.clear();
+                vec.clear(); // vec is only used for HNSW insert below, so clearing is fine
             }
         }
-        if let Some(idx) = &mut self.hnsw_index {
-            idx.insert_embedding(&emb)?;
+
+        self.id2row.insert(id.clone(), row);
+        if let Some(h) = &mut self.hnsw {
+            h.insert(&id, vec)?;
         }
-        self.embeddings.push(emb);
         Ok(())
     }
 
     pub fn get_similarity(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, String> {
         if query.len() != self.dimension {
-            return Err("Query dimension mismatch".into());
+            return Err("query dim mismatch".into());
         }
-        match self.distance {
-            Distance::Hnsw => {
-                if let Some(idx) = &self.hnsw_index {
-                    idx.search(query, k)
-                } else {
-                    Err("No HNSW index present".into())
-                }
-            }
-            _ => {
-                let mut scored: Vec<_> = self
-                    .embeddings
+        if let Some(h) = &self.hnsw {
+            return h.search(query, k, self.distance);
+        }
+
+        let rows = self.row_count();
+
+        #[cfg(feature = "parallel")]
+        let mut _scores: Vec<(String, f32)> = (0..rows)
+            .into_par_iter()
+            .filter_map(|row| {
+                let id = self
+                    .id2row
                     .iter()
-                    .map(|e| (e.id.clone(), compute_0_1_score(query, e, self.distance)))
-                    .collect();
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                scored.truncate(k);
-                Ok(scored)
-            }
-        }
+                    .find(|(_, &r)| r == row)
+                    .map(|(k, _)| k.clone())?;
+                let vec_slice = &self.vectors[row * self.dimension..(row + 1) * self.dimension];
+                Some((
+                    id,
+                    score(query, vec_slice, self.binary[row].as_ref(), self.distance),
+                ))
+            })
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let mut _scores: Vec<(String, f32)> = (0..rows)
+            .into_iter()
+            .filter_map(|row| {
+                let id = self
+                    .id2row
+                    .iter()
+                    .find(|(_, &r)| r == row)
+                    .map(|(k, _)| k.clone())?;
+                let vec_slice = &self.vectors[row * self.dimension..(row + 1) * self.dimension];
+                Some((
+                    id,
+                    score(query, vec_slice, self.binary[row].as_ref(), self.distance),
+                ))
+            })
+            .collect();
+
+        _scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        Ok(_scores.into_iter().take(k).collect())
     }
 
-    pub fn remove_embedding_by_id(&mut self, id: &str) -> Result<(), String> {
-        let idx = self
-            .embeddings
-            .iter()
-            .position(|e| e.id == id)
-            .ok_or_else(|| format!("Embedding '{}' not found", id))?;
-        self.embeddings.remove(idx);
-        if let Some(h) = &mut self.hnsw_index {
-            h.remove_by_str_id(id)?;
+    /// Returns (id, float_vec_or_empty, metadata)
+    pub(crate) fn row_to_tuple(
+        &self,
+        id: &str,
+        row: usize,
+    ) -> (String, Vec<f32>, Option<Metadata>) {
+        let floats = if matches!(self.distance, Distance::Binary) && !self.keep_embeddings {
+            Vec::new() // ── CHANGED: return [] when floats were not stored ──
+        } else {
+            self.vectors[row * self.dimension..(row + 1) * self.dimension].to_vec()
+        };
+        (id.to_owned(), floats, self.meta[row].clone())
+    }
+
+    pub fn remove(&mut self, id: &str) -> Result<(), String> {
+        let row = *self
+            .id2row
+            .get(id)
+            .ok_or_else(|| "id not found".to_string())?;
+        self.id2row.remove(id);
+        self.free.push(row);
+        if let Some(h) = &mut self.hnsw {
+            h.remove(id)?;
         }
         Ok(())
     }

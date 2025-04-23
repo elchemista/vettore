@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.1.10"
+  @version "0.1.11"
 
   def project do
     [
@@ -14,6 +14,13 @@ defmodule Vettore.MixProject do
       deps: deps(),
       description: description(),
       package: package(),
+      rustler_crates: %{
+        vettore: [
+          path: "native/vettore",
+          mode: if(Mix.env() == :prod, do: :release, else: :debug),
+          features: ["parallel"]
+        ]
+      },
       docs: [
         main: "readme",
         extras: [
@@ -53,9 +60,9 @@ defmodule Vettore.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.36.1"},
-      # {:rustler, ">= 0.0.0", optional: true},
-      # {:rustler_precompiled, "~> 0.8"},
+      # {:rustler, "~> 0.36.1"},
+      {:rustler, ">= 0.0.0", optional: true},
+      {:rustler_precompiled, "~> 0.8"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.0", only: :dev},
       # Documentation Provider

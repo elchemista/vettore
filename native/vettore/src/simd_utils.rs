@@ -1,12 +1,29 @@
 use wide::f32x4;
+#[cfg(any(target_feature = "avx2", target_feature = "avx512f"))]
+// import only when AVX is available
+use wide::f32x8;
 
-/// Load four `f32`s starting at index *i* into a SIMD register.
 #[inline]
+#[allow(clippy::needless_range_loop)]
 pub fn load_f32x4(slice: &[f32], i: usize) -> f32x4 {
     f32x4::from([slice[i], slice[i + 1], slice[i + 2], slice[i + 3]])
 }
 
-/// Return a new `Vec<f32>` whose L2‑norm is ~1. Used for cosine similarity.
+#[cfg(any(target_feature = "avx2", target_feature = "avx512f"))]
+#[inline]
+pub fn load_f32x8(slice: &[f32], i: usize) -> f32x8 {
+    f32x8::from([
+        slice[i],
+        slice[i + 1],
+        slice[i + 2],
+        slice[i + 3],
+        slice[i + 4],
+        slice[i + 5],
+        slice[i + 6],
+        slice[i + 7],
+    ])
+}
+
 pub fn normalize_vec(v: &[f32]) -> Vec<f32> {
     let mut sum_sq = 0.0;
     let mut i = 0;

@@ -57,18 +57,18 @@ defmodule Vettore do
       IO.inspect(top_results, label: "Top K search results")
   """
 
-  # version = Mix.Project.config()[:version]
+  version = Mix.Project.config()[:version]
 
-  # use RustlerPrecompiled,
-  #   otp_app: :vettore,
-  #   crate: "vettore",
-  #   base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
-  #   force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
-  #   version: version
-
-  use Rustler,
+  use RustlerPrecompiled,
     otp_app: :vettore,
-    crate: "vettore"
+    crate: "vettore",
+    base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
+    force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
+    version: version
+
+  # use Rustler,
+  #   otp_app: :vettore,
+  #   crate: "vettore"
 
   alias Vettore.Embedding
 
