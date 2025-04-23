@@ -14,6 +14,8 @@
 
 /experimental/
 
+/native/vettore/target/
+
 /.elixir_ls/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
