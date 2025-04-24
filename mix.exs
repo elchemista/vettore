@@ -15,7 +15,7 @@ defmodule Vettore.MixProject do
       description: description(),
       package: package(),
       docs: [
-        main: "readme",
+        master: "readme",
         extras: [
           "README.md",
           "LICENSE",
