@@ -126,6 +126,8 @@ impl Collection {
         if self.value2row.contains_key(&value) {
             return Err("duplicate value".into());
         }
+
+        // normalize if cosine
         if matches!(self.distance, Distance::Cosine) {
             vec = normalize_vec(&vec);
         }
@@ -135,17 +137,21 @@ impl Collection {
             return Err("duplicate vector".into());
         }
 
+        // now safe to allocate a new row
         let row = self.alloc_row();
         let offset = row * self.dimension;
 
+        // store floats (unless binary+drop)
         if self.keep_embeddings || !matches!(self.distance, Distance::Binary) {
             self.vectors[offset..offset + self.dimension].copy_from_slice(&vec);
         }
+
         self.binary[row] = Some(comp.clone());
         self.meta[row] = md;
         self.row2value[row] = Some(value.clone());
         self.comp2row.insert(comp, row);
         self.value2row.insert(value.clone(), row);
+
         if let Some(h) = &mut self.hnsw {
             h.insert(&value, vec)?;
         }
@@ -250,6 +256,18 @@ impl VettoreDB {
             .get_by_vector(v)
             .ok_or_else(|| "vector not found".into())
     }
+    pub fn get_all(&self, col: &str) -> Result<Vec<Record>, String> {
+        let c = self.collection(col)?;
+        let mut out = Vec::with_capacity(c.row_count());
+        for row in 0..c.row_count() {
+            // only rows with a value are “live”
+            if c.value_by_row(row).is_some() {
+                out.push(c.row_to_record(row));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn delete_by_value(&mut self, col: &str, val: &str) -> Result<(), String> {
         self.collection_mut(col)?.remove(val)
     }

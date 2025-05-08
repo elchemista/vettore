@@ -33,7 +33,6 @@ pub fn mmr_rerank(
         let mut best_mmr = f32::MIN;
 
         for (i, (cid, cscore_q)) in cand.iter().enumerate() {
-            // -- redundancy term -----------------------------------------------------------
             let mut max_sim = 0.0;
             if !sel_ids.is_empty() {
                 let cvec = &vectors[cid];
@@ -50,7 +49,6 @@ pub fn mmr_rerank(
                     }
                 }
             }
-            // -- overall MMR ---------------------------------------------------------------
             let mmr = alpha * cscore_q - (1.0 - alpha) * max_sim;
             if mmr > best_mmr {
                 best_mmr = mmr;
@@ -63,7 +61,7 @@ pub fn mmr_rerank(
             sel_ids.push(chosen.0.clone());
             selected.push(chosen);
         } else {
-            break; // defensive – shouldn’t happen
+            break; //  shouldn’t happen
         }
     }
     selected

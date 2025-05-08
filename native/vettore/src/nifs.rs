@@ -59,8 +59,6 @@ fn delete_collection(db: ResourceArc<DBResource>, name: String) -> Result<String
     Ok(name)
 }
 
-/* ───────────────────────────── inserts ───────────────────────────── */
-
 #[rustler::nif(schedule = "DirtyCpu")]
 fn insert_embedding(
     db: ResourceArc<DBResource>,
@@ -88,8 +86,6 @@ fn insert_embeddings(
     Ok(out)
 }
 
-/* ───────────────────────────── look‑ups ───────────────────────────── */
-
 #[rustler::nif(schedule = "DirtyCpu")]
 fn get_embedding_by_value(
     db: ResourceArc<DBResource>,
@@ -108,6 +104,19 @@ fn get_embedding_by_vector(
 ) -> Result<(String, Vec<f32>, Option<Metadata>), String> {
     let rec = db_read!(db).get_by_vector(&col_name, &vector)?;
     Ok((rec.value, rec.vector, rec.metadata))
+}
+
+/// Fetch *all* embeddings from a collection.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn get_all_embeddings(
+    db: ResourceArc<DBResource>,
+    col_name: String,
+) -> Result<Vec<(String, Vec<f32>, Option<Metadata>)>, String> {
+    let recs = db_read!(db).get_all(&col_name)?;
+    Ok(recs
+        .into_iter()
+        .map(|r| (r.value, r.vector, r.metadata))
+        .collect())
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -138,7 +147,6 @@ fn delete_embedding_by_value(
     Ok(value)
 }
 
-/* ─────────────────────────── MMR rerank NIF ─────────────────────────── */
 #[rustler::nif(schedule = "DirtyCpu")]
 fn mmr_rerank(
     db: ResourceArc<DBResource>,

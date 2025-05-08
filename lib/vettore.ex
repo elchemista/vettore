@@ -6,8 +6,8 @@ defmodule Vettore do
     (using Rustler’s `ResourceArc` with a `Mutex`). Core operations include:
 
       - **Creating a collection**:
-        A named set of embeddings with a fixed dimension and a chosen similarity metric (`"hnsw"`, `"binary"`,
-        `"euclidean"`, `"cosine"`, or `"dot"`).
+        A named set of embeddings with a fixed dimension and a chosen similarity metric (:cosine, :euclidean, :dot,
+        :hnsw, :binary).
 
       - **Inserting an embedding**:
         Add a new embedding (with ID, vector, and optional metadata) to a specific collection.
@@ -22,7 +22,7 @@ defmodule Vettore do
     ## Usage Example
 
         db = Vettore.new()
-        :ok = Vettore.create_collection(db, "my_collection", 3, "euclidean")
+        :ok = Vettore.create_collection(db, "my_collection", 3, :euclidean)
 
         # Insert an embedding via struct:
         embedding = %Vettore.Embedding{value: "my_id or text", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}
@@ -50,44 +50,47 @@ defmodule Vettore do
   def new, do: N.new_db()
 
   @doc """
-  Create a *collection* – a named bucket of fixed‑size embeddings –
-  inside the given database.
+  Create a collection.
 
-  * `name`           – non‑empty binary identifier.
-  * `dimension`      – positive integer (size of every vector).
-  * `distance`       – one of: euclidean, cosine, dot, hnsw, binary.
-  * `:keep_embeddings` (optional, default `true`) – if `false`, raw vectors are
-    discarded after binary/HNSW indices are built (memory saver).
+  * `distance` must be one of the atoms: `:euclidean`, `:cosine`, `:dot`,
+    `:hnsw`, or `:binary`.
   """
-  @spec create_collection(reference(), String.t(), pos_integer(), String.t(), keyword()) ::
-          {:ok, String.t()} | {:error, String.t()}
+  @spec create_collection(
+          reference(),
+          String.t(),
+          pos_integer(),
+          atom(),
+          keyword()
+        ) :: {:ok, String.t()} | {:error, String.t()}
   def create_collection(db, name, dim, distance, opts \\ [])
 
   def create_collection(db, name, dim, distance, opts)
-      when is_reference(db) and is_bitstring(name) and byte_size(name) > 0 and dim > 0 and
-             is_bitstring(distance) and is_list(opts) do
-    distance = String.downcase(distance)
-
-    if distance in @allowed_metrics do
-      keep? = Keyword.get(opts, :keep_embeddings, true)
-      N.create_collection(db, name, dim, distance, keep?)
-    else
-      {:error, "distance must be one of #{inspect(@allowed_metrics)}"}
-    end
+      when is_reference(db) and
+             is_bitstring(name) and byte_size(name) > 0 and
+             is_integer(dim) and dim > 0 and
+             is_atom(distance) and distance in @allowed_metrics and
+             is_list(opts) do
+    keep? = Keyword.get(opts, :keep_embeddings, true)
+    N.create_collection(db, name, dim, Atom.to_string(distance), keep?)
   end
 
   def create_collection(_, _, _, _, _),
     do: {:error, "invalid arguments (see @doc for correct types)"}
 
   @doc """
-  Destroy a collection **and all contained embeddings**.
+  Delete a collection.
   """
-  @spec delete_collection(reference(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  @spec delete_collection(reference(), atom()) ::
+          {:ok, String.t()} | {:error, String.t()}
   def delete_collection(db, name)
-      when is_reference(db) and is_bitstring(name) and byte_size(name) > 0,
-      do: N.delete_collection(db, name)
+      when is_reference(db) and
+             is_atom(name) and
+             name in @allowed_metrics do
+    N.delete_collection(db, Atom.to_string(name))
+  end
 
-  def delete_collection(_, _), do: {:error, "invalid db reference or collection name"}
+  def delete_collection(_, _),
+    do: {:error, "invalid db reference or collection name"}
 
   # ────────────────────────────────────────────────────────────────────────────
   #  Embedding CRUD

@@ -15,9 +15,6 @@ use crate::simd_utils::load_f32x4;
 use crate::simd_utils::load_f32x8;
 use crate::types::Distance;
 
-/* ------------------------------------------------------------------ */
-/* A total-order wrapper around f32 (NaN never occurs in our scores)   */
-/* ------------------------------------------------------------------ */
 #[derive(Clone, Copy, Debug)]
 struct F32Ord(f32);
 
@@ -39,9 +36,6 @@ impl Ord for F32Ord {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* SIMD dot product helper                                            */
-/* ------------------------------------------------------------------ */
 #[inline(always)]
 fn dot_simd(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -65,10 +59,6 @@ fn dot_simd(a: &[f32], b: &[f32]) -> f32 {
     }
     acc
 }
-
-/* ------------------------------------------------------------------ */
-/* Public API                                                         */
-/* ------------------------------------------------------------------ */
 
 /// Return the `k` most similar `(value, score)` pairs.
 ///
