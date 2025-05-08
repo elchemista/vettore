@@ -42,7 +42,15 @@ defmodule Vettore.MixProject do
     [
       name: "vettore",
       maintainers: ["Yuriy Zhar"],
-      files: ~w(mix.exs README.md lib native test LICENSE checksum-*.exs .formatter.exs),
+      files: ~w(
+             lib
+             mix.exs
+             README.md
+             LICENSE
+             native/vettore/Cargo.toml
+             native/vettore/src
+             priv/native/*.so
+      ),
       licenses: ["Apache-2.0"],
       links: %{
         "GitHub" => "https://github.com/elchemista/vettore"
