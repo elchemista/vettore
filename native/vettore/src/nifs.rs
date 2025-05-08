@@ -3,7 +3,13 @@ use std::collections::HashMap;
 use rustler::{Env, ResourceArc, Term};
 use std::sync::RwLock;
 
+use crate::distances::{
+    clamp_0_1, compress_vector, hamming_distance, simd_dot_product, simd_euclidean_distance,
+};
+use crate::simd_utils::normalize_vec;
+
 use crate::db::Collection;
+
 use crate::mmr::mmr_rerank_internal;
 use crate::types::{Distance, Metadata};
 
@@ -38,7 +44,7 @@ fn new_db() -> ResourceArc<DBResource> {
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_create_collection(
+fn create_collection(
     db: ResourceArc<DBResource>,
     name: String,
     dimension: usize,
@@ -65,7 +71,7 @@ fn delete_collection(db: ResourceArc<DBResource>, name: String) -> Result<String
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_insert_embedding(
+fn insert_embedding(
     db: ResourceArc<DBResource>,
     col_name: String,
     id: String,
@@ -82,7 +88,7 @@ fn nif_insert_embedding(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_insert_embeddings(
+fn insert_embeddings(
     db: ResourceArc<DBResource>,
     col_name: String,
     embeddings: Vec<(String, Vec<f32>, Option<Metadata>)>,
@@ -101,7 +107,7 @@ fn nif_insert_embeddings(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_similarity_search(
+fn similarity_search(
     db: ResourceArc<DBResource>,
     col_name: String,
     query: Vec<f32>,
@@ -116,7 +122,7 @@ fn nif_similarity_search(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_similarity_search_with_filter(
+fn similarity_search_with_filter(
     db: ResourceArc<DBResource>,
     col_name: String,
     query: Vec<f32>,
@@ -155,7 +161,7 @@ fn nif_similarity_search_with_filter(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_get_embedding_by_id(
+fn get_embedding_by_id(
     db: ResourceArc<DBResource>,
     col_name: String,
     id: String,
@@ -174,7 +180,7 @@ fn nif_get_embedding_by_id(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn get_embeddings(
+fn get_all_embeddings(
     db: ResourceArc<DBResource>,
     col_name: String,
 ) -> Result<Vec<(String, Vec<f32>, Option<Metadata>)>, String> {
@@ -191,7 +197,7 @@ fn get_embeddings(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_delete_embedding_by_id(
+fn delete_embedding_by_id(
     db: ResourceArc<DBResource>,
     col_name: String,
     id: String,
@@ -206,7 +212,7 @@ fn nif_delete_embedding_by_id(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_mmr_rerank(
+fn mmr_rerank(
     db: ResourceArc<DBResource>,
     col_name: String,
     initial: Vec<(String, f32)>,
@@ -235,8 +241,79 @@ fn nif_mmr_rerank(
     ))
 }
 
+// Core standalone distance‑algorithm NIFs
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn euclidean_distance(vec_a: Vec<f32>, vec_b: Vec<f32>) -> Result<f32, String> {
+    if vec_a.len() != vec_b.len() {
+        return badarg!("dimension mismatch");
+    }
+    let d = simd_euclidean_distance(&vec_a, &vec_b);
+    Ok(clamp_0_1(1.0 / (1.0 + d))) // convert to similarity ∈ [0,1]
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn cosine_similarity(vec_a: Vec<f32>, vec_b: Vec<f32>) -> Result<f32, String> {
+    if vec_a.len() != vec_b.len() {
+        return badarg!("dimension mismatch");
+    }
+    let na = normalize_vec(&vec_a);
+    let nb = normalize_vec(&vec_b);
+    let sim = (simd_dot_product(&na, &nb) + 1.0) / 2.0;
+    Ok(clamp_0_1(sim))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn dot_product(vec_a: Vec<f32>, vec_b: Vec<f32>) -> Result<f32, String> {
+    if vec_a.len() != vec_b.len() {
+        return badarg!("dimension mismatch");
+    }
+    Ok(simd_dot_product(&vec_a, &vec_b))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn hamming_distance_bits(bits_a: Vec<u64>, bits_b: Vec<u64>) -> Result<u32, String> {
+    if bits_a.len() != bits_b.len() {
+        return badarg!("length mismatch");
+    }
+    Ok(hamming_distance(&bits_a, &bits_b))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn compress_f32_vector(vec: Vec<f32>) -> Vec<u64> {
+    compress_vector(&vec)
+}
+
+/// Convert a distance string sent from Elixir into the internal `Distance` enum.
+fn distance_from_str(dist: &str) -> Result<Distance, String> {
+    match dist.to_lowercase().as_str() {
+        "euclidean" | "l2" => Ok(Distance::Euclidean),
+        "cosine" => Ok(Distance::Cosine),
+        "dot" | "dotproduct" => Ok(Distance::DotProduct),
+        "binary" | "hamming" => Ok(Distance::Binary),
+        "hnsw" => Ok(Distance::Hnsw),
+        _ => badarg!("unknown distance"),
+    }
+}
+
+/// MMR reranking directly on the initial and embedding vectors.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mmr_rerank_embeddings(
+    initial: Vec<(String, f32)>,
+    embeddings: Vec<(String, Vec<f32>)>,
+    distance: String,
+    alpha: f32,
+    final_k: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    let dist = distance_from_str(&distance)?;
+    let embed_map: HashMap<_, _> = embeddings.into_iter().collect();
+    Ok(mmr_rerank_internal(
+        &initial, &embed_map, dist, alpha, final_k,
+    ))
+}
+
 fn on_load(env: Env, _info: Term) -> bool {
     env.register::<DBResource>().is_ok()
 }
 
-rustler::init!("Elixir.Vettore", load = on_load);
+rustler::init!("Elixir.Vettore.Nifs", load = on_load);
