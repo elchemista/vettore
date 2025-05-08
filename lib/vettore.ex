@@ -130,16 +130,32 @@ defmodule Vettore do
   @doc """
   Fetch a single embedding by *value (ID)* and return it as `%Vettore.Embedding{}`.
   """
-  @spec get(reference(), String.t(), String.t()) :: {:ok, Embedding.t()} | {:error, String.t()}
-  def get(db, collection, value)
+  @spec get_by_value(reference(), String.t(), String.t()) ::
+          {:ok, Embedding.t()} | {:error, String.t()}
+  def get_by_value(db, collection, value)
       when is_reference(db) and is_bitstring(collection) and byte_size(collection) > 0 and
              is_bitstring(value) do
-    with {:ok, {value, vec, meta}} <- N.get_embedding_by_id(db, collection, value) do
+    with {:ok, {value, vec, meta}} <- N.get_embedding_by_value(db, collection, value) do
       {:ok, %Embedding{value: value, vector: vec, metadata: meta}}
     end
   end
 
-  def get(_, _, _), do: {:error, "invalid arguments to get/3"}
+  def get_by_value(_, _, _), do: {:error, "invalid arguments to get_by_value/3"}
+
+  @doc """
+  Fetch a single embedding by *vector* and return it as `%Vettore.Embedding{}`.
+  """
+  @spec get_by_vector(reference(), String.t(), [number()]) ::
+          {:ok, Embedding.t()} | {:error, String.t()}
+  def get_by_vector(db, collection, vector)
+      when is_reference(db) and is_bitstring(collection) and byte_size(collection) > 0 and
+             is_list(vector) do
+    with {:ok, {value, vec, meta}} <- N.get_embedding_by_vector(db, collection, vector) do
+      {:ok, %Embedding{value: value, vector: vec, metadata: meta}}
+    end
+  end
+
+  def get_by_vector(_, _, _), do: {:error, "invalid arguments to get_by_vector/3"}
 
   @doc """
   Delete a single embedding.
@@ -147,7 +163,7 @@ defmodule Vettore do
   @spec delete(reference(), String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def delete(db, collection, id)
       when is_reference(db) and is_bitstring(collection) and is_bitstring(id),
-      do: N.delete_embedding_by_id(db, collection, id)
+      do: N.delete_embedding_by_value(db, collection, id)
 
   def delete(_, _, _), do: {:error, "invalid arguments to delete/3"}
 

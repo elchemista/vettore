@@ -59,13 +59,23 @@ defmodule Vettore.Nifs do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  @spec get_embedding_by_id(
+  @spec get_embedding_by_value(
           reference(),
           String.t(),
           String.t()
         ) ::
           {:ok, {String.t(), [number()], map() | nil}} | {:error, String.t()}
-  def get_embedding_by_id(_db, _col, _id),
+  def get_embedding_by_value(_db, _col, _id),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec get_embedding_by_vector(
+          reference(),
+          String.t(),
+          [number()]
+        ) ::
+          {:ok, {String.t(), [number()], map() | nil}} | {:error, String.t()}
+  def get_embedding_by_vector(_db, _col, _vec),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
@@ -75,9 +85,9 @@ defmodule Vettore.Nifs do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  @spec delete_embedding_by_id(reference(), String.t(), String.t()) ::
+  @spec delete_embedding_by_value(reference(), String.t(), String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def delete_embedding_by_id(_db, _col, _id),
+  def delete_embedding_by_value(_db, _col, _id),
     do: :erlang.nif_error(:nif_not_loaded)
 
   #  Search & filtering
