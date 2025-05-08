@@ -54,6 +54,11 @@ defmodule Vettore do
 
   * `distance` must be one of the atoms: `:euclidean`, `:cosine`, `:dot`,
     `:hnsw`, or `:binary`.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean)
+      {:ok, "my_collection"}
   """
   @spec create_collection(
           reference(),
@@ -62,16 +67,16 @@ defmodule Vettore do
           atom(),
           keyword()
         ) :: {:ok, String.t()} | {:error, String.t()}
-  def create_collection(db, name, dim, distance, opts \\ [])
+  def create_collection(db, name, dimension, distance, opts \\ [])
 
-  def create_collection(db, name, dim, distance, opts)
+  def create_collection(db, name, dimension, distance, opts)
       when is_reference(db) and
              is_bitstring(name) and byte_size(name) > 0 and
-             is_integer(dim) and dim > 0 and
+             is_integer(dimension) and dimension > 0 and
              is_atom(distance) and distance in @allowed_metrics and
              is_list(opts) do
     keep? = Keyword.get(opts, :keep_embeddings, true)
-    N.create_collection(db, name, dim, Atom.to_string(distance), keep?)
+    N.create_collection(db, name, dimension, Atom.to_string(distance), keep?)
   end
 
   def create_collection(_, _, _, _, _),
@@ -79,6 +84,11 @@ defmodule Vettore do
 
   @doc """
   Delete a collection.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.delete_collection("my_collection")
+      {:ok, "my_collection"}
   """
   @spec delete_collection(reference(), String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
@@ -91,12 +101,14 @@ defmodule Vettore do
   def delete_collection(_, _),
     do: {:error, "invalid db reference or collection name"}
 
-  # ────────────────────────────────────────────────────────────────────────────
-  #  Embedding CRUD
-  # ────────────────────────────────────────────────────────────────────────────
   @doc """
   Insert **one** `%Vettore.Embedding{}` into the collection.
   Returns `{:ok, value}` on success or `{:error, reason}`.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}})
+      {:ok, "my_id"}
   """
   @spec insert(reference(), String.t(), Embedding.t()) :: {:ok, String.t()} | {:error, String.t()}
   def insert(db, collection, %Embedding{value: value, vector: vec, metadata: meta})
@@ -113,6 +125,11 @@ defmodule Vettore do
 
   @doc """
   Batch‑insert a list of embeddings. Reject elements that are not `%Vettore.Embedding{}`.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.batch("my_collection", [%Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}])
+      {:ok, ["my_id"]}
   """
   @spec batch(reference(), String.t(), [Embedding.t()]) ::
           {:ok, [String.t()]} | {:error, String.t()}
@@ -131,6 +148,11 @@ defmodule Vettore do
 
   @doc """
   Fetch a single embedding by *value (ID)* and return it as `%Vettore.Embedding{}`.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_by_value("my_collection", "my_id")
+      {:ok, %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}}
   """
   @spec get_by_value(reference(), String.t(), String.t()) ::
           {:ok, Embedding.t()} | {:error, String.t()}
@@ -146,6 +168,11 @@ defmodule Vettore do
 
   @doc """
   Fetch a single embedding by *vector* and return it as `%Vettore.Embedding{}`.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_by_vector("my_collection", [1.0, 2.0, 3.0])
+      {:ok, %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}}
   """
   @spec get_by_vector(reference(), String.t(), [number()]) ::
           {:ok, Embedding.t()} | {:error, String.t()}
@@ -161,6 +188,11 @@ defmodule Vettore do
 
   @doc """
   Delete a single embedding.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.delete("my_collection", "my_id")
+      {:ok, "my_id"}
   """
   @spec delete(reference(), String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def delete(db, collection, id)
@@ -171,6 +203,11 @@ defmodule Vettore do
 
   @doc """
   Return all embeddings in *raw* form (`{value, vector, metadata}` tuples).
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_all("my_collection")
+      {:ok, [{"my_id", [1.0, 2.0, 3.0], %{"note" => "hello"}}]}
   """
   @spec get_all(reference(), String.t()) ::
           {:ok, [{String.t(), [number()], map() | nil}]} | {:error, String.t()}
@@ -187,6 +224,11 @@ defmodule Vettore do
     * `:limit`  – number of results (default **10**)
     * `:filter` – metadata map; only embeddings whose metadata contains all
       key‑value pairs are considered.
+
+  #Examples
+
+      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.similarity_search("my_collection", [1.0, 2.0, 3.0], limit: 1)
+      {:ok, [{"my_id", 0.0}]}
   """
   @spec similarity_search(reference(), String.t(), [number()], keyword()) ::
           {:ok, [{String.t(), float()}]} | {:error, String.t()}
@@ -213,11 +255,16 @@ defmodule Vettore do
     do: {:error, "invalid arguments to similarity_search/4"}
 
   @doc """
-  Re‑rank an existing result list with **Maximal Marginal Relevance**.
+   Re‑rank an existing result list with **Maximal Marginal Relevance**.
 
-  Options:
-    * `:limit` – desired output length (default **10**)
-    * `:alpha` – relevance‑diversity balance **0.0..1.0** (default **0.5**)
+   Options:
+     * `:limit` – desired output length (default **10**)
+     * `:alpha` – relevance‑diversity balance **0.0..1.0** (default **0.5**)
+
+   #Examples
+
+       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id2", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id3", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.rerank("my_collection", [{"my_id", 0.0}, {"my_id2", 0.0}, {"my_id3", 0.0}], limit: 1)
+       {:ok, [{"my_id", 0.0}]}
   """
 
   @spec rerank(reference(), String.t(), [{String.t(), number()}], keyword()) ::

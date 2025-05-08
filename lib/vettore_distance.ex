@@ -2,9 +2,6 @@ defmodule Vettore.Distance do
   @moduledoc """
   Stand-alone distance/similarity helpers and the collection-agnostic **MMR**
   re-ranker exposed by the Rust NIF layer.
-
-  Every function below returns `:erlang.nif_error/1` only while the NIF library
-  is still being compiled/loaded; at runtime they run in native code.
   """
   alias Vettore.Nifs, as: N
 
@@ -21,6 +18,11 @@ defmodule Vettore.Distance do
 
   The result is in **`0.0..1.0`** via the mapping `1 / (1 + d)` so that
   identical vectors yield `1.0`.
+
+  #Examples
+
+      iex> Vettore.Distance.euclidean([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
+      0.0
   """
   @spec euclidean(vector(), vector()) :: float()
   def euclidean(vec_a, vec_b) when is_list(vec_a) and is_list(vec_b),
@@ -28,6 +30,11 @@ defmodule Vettore.Distance do
 
   @doc """
   Cosine similarity in **`0.0..1.0`** (`(dot + 1) / 2` after length-normalisation).
+
+  #Examples
+
+      iex> Vettore.Distance.cosine([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
+      0.0
   """
   @spec cosine(vector(), vector()) :: float()
   def cosine(vec_a, vec_b) when is_list(vec_a) and is_list(vec_b),
@@ -35,6 +42,11 @@ defmodule Vettore.Distance do
 
   @doc """
   Raw dot product (no post-processing).
+
+  #Examples
+
+      iex> Vettore.Distance.dot_product([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
+      1
   """
   @spec dot_product(vector(), vector()) :: float()
   def dot_product(vec_a, vec_b) when is_list(vec_a) and is_list(vec_b),
@@ -43,6 +55,11 @@ defmodule Vettore.Distance do
   @doc """
   Bit-wise Hamming distance between two compressed vectors (see
   `compress_f32_vector/1`).
+
+  #Examples
+
+      iex> Vettore.Distance.hamming([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
+      0
   """
   @spec hamming(vector_bits(), vector_bits()) :: float()
   def hamming(bits_a, bits_b) when is_list(bits_a) and is_list(bits_b),
@@ -51,6 +68,11 @@ defmodule Vettore.Distance do
   @doc """
   Compress a float vector into its sign-bit representation (64 floats → 64 bits →
   one `u64`).  Useful for ultra-fast binary similarity.
+
+  #Examples
+
+      iex> Vettore.Distance.compress_f32_vector([1.0, 2.0, 3.0])
+      [1, 0, 0,..... 1, 0, 0]
   """
   @spec compress_f32_vector(vector()) :: vector_bits()
   def compress_f32_vector(vec) when is_list(vec), do: N.compress_f32_vector(vec)
@@ -64,6 +86,11 @@ defmodule Vettore.Distance do
   * `distance`  – `"euclidean" | "cosine" | "dot" | "binary"`
   * `alpha`     – 0 ⇢ only diversity, 1 ⇢ only query-relevance
   * `final_k`   – length of the wanted output list
+
+  #Examples
+
+      iex> Vettore.Distance.mmr_rerank([{"my_id", 0.0}], [{"my_id", [1.0, 2.0, 3.0]}], "euclidean", 0.5, 1)
+      [{"my_id", 0.0}]
   """
 
   @spec mmr_rerank(
