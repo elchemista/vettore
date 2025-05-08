@@ -1,18 +1,19 @@
-//! db.rs – storage only (no algorithms)
+//! db.rs  –  storage layer (no algorithms)
 //! ======================================
-//! * Provides fast CRUD on embeddings.
-//! * Exposes **public getters** so search / rerank algorithms can live elsewhere.
-//! * No similarity/MRR code remains inside this file.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use crate::distances::compress_vector;
 use crate::hnsw::HnswIndexWrapper;
 use crate::simd_utils::normalize_vec;
 use crate::types::{Distance, Metadata};
 
-type CompKey = Vec<u64>; // sign‑bit compression
+/* ───────────── helper aliases ───────────── */
+type CompKey = Vec<u64>; // sign-bit compression
 
+/* ───────────── public record ───────────── */
 #[derive(Debug, Clone)]
 pub struct Record {
     pub vector: Vec<f32>,
@@ -20,15 +21,16 @@ pub struct Record {
     pub metadata: Option<Metadata>,
 }
 
+/* ───────────── one collection ───────────── */
 pub struct Collection {
-    /* config */
+    /* static config */
     pub dimension: usize,
     pub keep_embeddings: bool,
     pub distance: Distance,
 
-    /* tables */
+    /* storage tables */
     vectors: Vec<f32>,
-    row2value: Vec<Option<String>>, // row → value
+    row2value: Vec<Option<String>>,
     meta: Vec<Option<Metadata>>,
     binary: Vec<Option<CompKey>>,
 
@@ -36,10 +38,12 @@ pub struct Collection {
     comp2row: HashMap<CompKey, usize>,
     value2row: HashMap<String, usize>,
 
+    /* housekeeping */
     free: Vec<usize>,
     hnsw: Option<HnswIndexWrapper>,
 }
 
+/* ---------- ctor ------------------------------------------------ */
 impl Collection {
     pub fn create_with_distance(dim: usize, dist: &str) -> Result<Self, String> {
         let distance = match dist.to_lowercase().as_str() {
@@ -69,24 +73,29 @@ impl Collection {
         })
     }
 
-    /* ---------- public lightweight accessors for algorithms ---------- */
+    /* ---------- lightweight getters ------------------------------ */
+    #[inline]
     pub fn row_count(&self) -> usize {
         self.row2value.len()
     }
+    #[inline]
     pub fn value_by_row(&self, r: usize) -> Option<&String> {
         self.row2value[r].as_ref()
     }
+    #[inline]
     pub fn vector_slice(&self, r: usize) -> &[f32] {
         &self.vectors[r * self.dimension..(r + 1) * self.dimension]
     }
+    #[inline]
     pub fn compressed_by_row(&self, r: usize) -> Option<&CompKey> {
         self.binary[r].as_ref()
     }
+    #[inline]
     pub fn hnsw(&self) -> Option<&HnswIndexWrapper> {
         self.hnsw.as_ref()
     }
 
-    /* ---------- internal helpers ---------- */
+    /* ---------- row allocator ------------------------------------ */
     fn alloc_row(&mut self) -> usize {
         if let Some(r) = self.free.pop() {
             r
@@ -99,6 +108,7 @@ impl Collection {
             r
         }
     }
+
     fn row_to_record(&self, row: usize) -> Record {
         let value = self.row2value[row].as_ref().unwrap().clone();
         let vector = if !self.keep_embeddings && matches!(self.distance, Distance::Binary) {
@@ -113,7 +123,7 @@ impl Collection {
         }
     }
 
-    /* -------------------- INSERT / DELETE / GET -------------------- */
+    /* ---------- CRUD --------------------------------------------- */
     pub fn insert(
         &mut self,
         value: String,
@@ -127,21 +137,17 @@ impl Collection {
             return Err("duplicate value".into());
         }
 
-        // normalize if cosine
         if matches!(self.distance, Distance::Cosine) {
             vec = normalize_vec(&vec);
         }
-
         let comp = compress_vector(&vec);
         if self.comp2row.contains_key(&comp) {
             return Err("duplicate vector".into());
         }
 
-        // now safe to allocate a new row
+        /* allocate row & copy -------------------------------------- */
         let row = self.alloc_row();
         let offset = row * self.dimension;
-
-        // store floats (unless binary+drop)
         if self.keep_embeddings || !matches!(self.distance, Distance::Binary) {
             self.vectors[offset..offset + self.dimension].copy_from_slice(&vec);
         }
@@ -158,11 +164,11 @@ impl Collection {
         Ok(())
     }
 
+    /* read helpers */
     pub fn get_by_value(&self, value: &str) -> Option<Record> {
         let &row = self.value2row.get(value)?;
         Some(self.row_to_record(row))
     }
-
     pub fn get_by_vector(&self, vec: &[f32]) -> Option<Record> {
         if vec.len() != self.dimension {
             return None;
@@ -171,11 +177,12 @@ impl Collection {
         Some(self.row_to_record(row))
     }
 
+    /* delete */
     pub fn remove(&mut self, value: &str) -> Result<(), String> {
         let row = *self
             .value2row
             .get(value)
-            .ok_or_else(|| "value not found".to_string())?;
+            .ok_or("value not found".to_string())?;
         self.value2row.remove(value);
         if let Some(comp) = &self.binary[row] {
             self.comp2row.remove(comp);
@@ -189,33 +196,39 @@ impl Collection {
     }
 }
 
+/* ───────────── global DB  (sharded) ───────────── */
 pub struct VettoreDB {
-    cols: HashMap<String, Collection>,
+    cols: DashMap<String, Arc<RwLock<Collection>>>,
 }
+
 impl Default for VettoreDB {
     fn default() -> Self {
         Self {
-            cols: HashMap::new(),
+            cols: DashMap::new(),
         }
     }
 }
+use std::panic::{RefUnwindSafe, UnwindSafe};
+
+impl RefUnwindSafe for VettoreDB {}
+impl UnwindSafe for VettoreDB {}
 
 impl VettoreDB {
-    /* public collection accessors for external algorithms */
-    pub fn collection(&self, name: &str) -> Result<&Collection, String> {
+    #[inline]
+    pub fn collection(&self, name: &str) -> Result<Arc<RwLock<Collection>>, String> {
         self.cols
             .get(name)
+            .map(|e| e.clone())
             .ok_or_else(|| "collection not found".into())
     }
-    pub fn collection_mut(&mut self, name: &str) -> Result<&mut Collection, String> {
-        self.cols
-            .get_mut(name)
-            .ok_or_else(|| "collection not found".into())
+    #[inline]
+    fn collection_mut(&self, name: &str) -> Result<Arc<RwLock<Collection>>, String> {
+        self.collection(name)
     }
 
-    /* management */
+    /* management --------------------------------------------------- */
     pub fn create_collection(
-        &mut self,
+        &self,
         name: String,
         dim: usize,
         dist: &str,
@@ -226,49 +239,74 @@ impl VettoreDB {
         }
         let mut c = Collection::create_with_distance(dim, dist)?;
         c.keep_embeddings = keep;
-        self.cols.insert(name, c);
+        self.cols.insert(name, Arc::new(RwLock::new(c)));
         Ok(())
     }
-    pub fn delete_collection(&mut self, name: &str) -> Result<(), String> {
+
+    pub fn delete_collection(&self, name: &str) -> Result<(), String> {
         self.cols
             .remove(name)
             .map(|_| ())
             .ok_or_else(|| "collection not found".into())
     }
 
-    /* thin data ops wrappers for NIFs */
+    /* CRUD wrappers ------------------------------------------------ */
     pub fn insert(
-        &mut self,
+        &self,
         col: &str,
-        value: String,
+        v: String,
         vec: Vec<f32>,
         md: Option<Metadata>,
     ) -> Result<(), String> {
-        self.collection_mut(col)?.insert(value, vec, md)
+        let arc = self.collection_mut(col)?;
+        let mut guard = arc
+            .write()
+            .map_err(|_| "collection lock poisoned".to_string())?;
+        guard.insert(v, vec, md)
     }
-    pub fn get_by_value(&self, col: &str, val: &str) -> Result<Record, String> {
-        self.collection(col)?
-            .get_by_value(val)
-            .ok_or_else(|| "value not found".into())
+
+    pub fn get_by_value(&self, col: &str, v: &str) -> Result<Record, String> {
+        let arc = self.collection(col)?;
+        let guard = arc
+            .read()
+            .map_err(|_| "collection lock poisoned".to_string())?;
+        guard
+            .get_by_value(v)
+            .ok_or_else(|| "value not found".to_string())
     }
-    pub fn get_by_vector(&self, col: &str, v: &[f32]) -> Result<Record, String> {
-        self.collection(col)?
-            .get_by_vector(v)
-            .ok_or_else(|| "vector not found".into())
+
+    pub fn get_by_vector(&self, col: &str, vec: &[f32]) -> Result<Record, String> {
+        let arc = self.collection(col)?;
+        let guard = arc
+            .read()
+            .map_err(|_| "collection lock poisoned".to_string())?;
+        guard
+            .get_by_vector(vec)
+            .ok_or_else(|| "vector not found".to_string())
     }
+
     pub fn get_all(&self, col: &str) -> Result<Vec<Record>, String> {
-        let c = self.collection(col)?;
-        let mut out = Vec::with_capacity(c.row_count());
-        for row in 0..c.row_count() {
-            // only rows with a value are “live”
-            if c.value_by_row(row).is_some() {
-                out.push(c.row_to_record(row));
+        let arc = self.collection(col)?;
+        let out = {
+            let guard = arc
+                .read()
+                .map_err(|_| "collection lock poisoned".to_string())?;
+            let mut tmp = Vec::with_capacity(guard.row_count());
+            for row in 0..guard.row_count() {
+                if guard.value_by_row(row).is_some() {
+                    tmp.push(guard.row_to_record(row));
+                }
             }
-        }
+            tmp
+        };
         Ok(out)
     }
 
-    pub fn delete_by_value(&mut self, col: &str, val: &str) -> Result<(), String> {
-        self.collection_mut(col)?.remove(val)
+    pub fn delete_by_value(&self, col: &str, v: &str) -> Result<(), String> {
+        let arc = self.collection_mut(col)?;
+        let mut guard = arc
+            .write()
+            .map_err(|_| "collection lock poisoned".to_string())?;
+        guard.remove(v)
     }
 }

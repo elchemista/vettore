@@ -98,12 +98,16 @@ impl HnswIndex {
 
         /* greedy descent from current entry */
         let mut ep = self.entry.unwrap();
-        // let mut ep_dist = simd_euclidean_distance(&self.nodes[&ep].vector, &vector);
-        let top = self.nodes[&ep].layer;
-        for layer in (0..=top).rev() {
+        let mut ep_dist = simd_euclidean_distance(&self.nodes[&ep].vector, &vector);
+        let top_layer = self.nodes[&ep].layer;
+
+        for layer in (0..=top_layer).rev() {
             if let Some(best) = self.search_layer(ep, &vector, layer, 1)?.first() {
-                ep = best.id;
-                best.dist;
+                // Only jump to `best.id` if it is genuinely closer
+                if best.dist < ep_dist {
+                    ep = best.id;
+                    ep_dist = best.dist;
+                }
             }
         }
 

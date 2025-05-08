@@ -29,7 +29,7 @@ defmodule Vettore do
         :ok = Vettore.insert(db, "my_collection", embedding)
 
         # Retrieve it back:
-        {:ok, returned_emb} = Vettore.get(db, "my_collection", "my_id")
+        {:ok, returned_emb} = Vettore.get_by_value(db, "my_collection", "my_id")
         IO.inspect(returned_emb.vector, label: "Retrieved vector")
 
         # Perform a similarity search:
@@ -80,13 +80,12 @@ defmodule Vettore do
   @doc """
   Delete a collection.
   """
-  @spec delete_collection(reference(), atom()) ::
+  @spec delete_collection(reference(), String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
   def delete_collection(db, name)
       when is_reference(db) and
-             is_atom(name) and
-             name in @allowed_metrics do
-    N.delete_collection(db, Atom.to_string(name))
+             is_bitstring(name) do
+    N.delete_collection(db, name)
   end
 
   def delete_collection(_, _),
@@ -113,14 +112,14 @@ defmodule Vettore do
   def insert(_, _, _), do: {:error, "invalid arguments to insert/3"}
 
   @doc """
-  Batch‑insert a list of embeddings **atomically**.  The whole batch is rejected on the first error.
+  Batch‑insert a list of embeddings. Reject elements that are not `%Vettore.Embedding{}`.
   """
   @spec batch(reference(), String.t(), [Embedding.t()]) ::
           {:ok, [String.t()]} | {:error, String.t()}
   def batch(db, collection, embeddings) when is_list(embeddings) do
     with true <- is_reference(db),
-         true <- is_bitstring(collection) and String.length(collection) > 0,
-         {:ok, tuples} <- embeddings_to_tuples(embeddings) do
+         true <- is_bitstring(collection) and String.length(collection) > 0 do
+      tuples = embeddings_to_tuples(embeddings)
       N.insert_embeddings(db, collection, tuples)
     else
       {:error, _} = err -> err
@@ -179,7 +178,7 @@ defmodule Vettore do
       when is_reference(db) and is_bitstring(collection),
       do: N.get_all_embeddings(db, collection)
 
-  def get_all(_, _), do: {:error, "invalid arguments to get_embeddings/2"}
+  def get_all(_, _), do: {:error, "invalid arguments to get_all/2"}
 
   @doc """
   Similarity / nearest‑neighbour search.
@@ -265,21 +264,14 @@ defmodule Vettore do
 
   #  Helpers (private)
   defp embeddings_to_tuples(list) do
-    try do
-      tuples =
-        Enum.map(list, fn
-          %Embedding{value: v, vector: vec, metadata: m}
-          when is_bitstring(v) and is_list(vec) ->
-            {v, vec, sanitize_meta(m)}
+    Enum.reduce(list, [], fn
+      %Embedding{value: v, vector: vec, metadata: m}, acc
+      when is_bitstring(v) and is_list(vec) ->
+        acc ++ [{v, vec, sanitize_meta(m)}]
 
-          _ ->
-            throw(:bad)
-        end)
-
-      {:ok, tuples}
-    catch
-      :bad -> {:error, "each item must be %Vettore.Embedding{} with valid fields"}
-    end
+      _, acc ->
+        acc
+    end)
   end
 
   defp sanitize_meta(nil), do: nil
