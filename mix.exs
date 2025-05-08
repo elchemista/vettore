@@ -14,6 +14,12 @@ defmodule Vettore.MixProject do
       deps: deps(),
       description: description(),
       package: package(),
+      rustler_precompiled: [
+        provider: :github,
+        owner: "elchemista",
+        repo: "vettore",
+        tag: "v#{@version}"
+      ],
       docs: [
         master: "readme",
         extras: [
