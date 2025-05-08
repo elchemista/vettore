@@ -1,5 +1,4 @@
-//! mmr.rs – algorithm-only module, no DB dependencies
-//! ==================================================
+//! algorithm-only module, no DB dependencies
 //! Implements Maximal-Marginal-Relevance re-ranking over a set of
 //! candidate (value, score) pairs given their embedding vectors.
 

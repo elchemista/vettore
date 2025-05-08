@@ -1,5 +1,3 @@
-//! nifs.rs – Rustler bridge (adapted for DashMap + Arc<RwLock<…>>)
-
 use std::collections::HashMap;
 
 use rustler::{Env, ResourceArc, Term};
@@ -14,7 +12,6 @@ use crate::mmr::mmr_rerank as algo_mmr_rerank;
 use crate::similarity::similarity_search as algo_sim_search;
 use crate::types::{Distance, Metadata};
 
-/* ───────────────────────── resource wrapper ───────────────────────── */
 pub struct DBResource(pub VettoreDB);
 impl rustler::Resource for DBResource {}
 
@@ -32,7 +29,6 @@ macro_rules! badarg {
     };
 }
 
-/* ───────────────────────── NIFs ───────────────────────── */
 #[rustler::nif(schedule = "DirtyCpu")]
 fn new_db() -> ResourceArc<DBResource> {
     ResourceArc::new(DBResource(VettoreDB::default()))
@@ -176,7 +172,6 @@ fn mmr_rerank(
     ))
 }
 
-/* ───────────── pure helpers exposed as NIFs ───────────── */
 #[rustler::nif(schedule = "DirtyCpu")]
 fn euclidean_distance(a: Vec<f32>, b: Vec<f32>) -> Result<f32, String> {
     if a.len() != b.len() {

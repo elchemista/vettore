@@ -1,6 +1,3 @@
-//! db.rs  –  storage layer (no algorithms)
-//! ======================================
-
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -10,10 +7,8 @@ use crate::hnsw::HnswIndexWrapper;
 use crate::simd_utils::normalize_vec;
 use crate::types::{Distance, Metadata};
 
-/* ───────────── helper aliases ───────────── */
 type CompKey = Vec<u64>; // sign-bit compression
 
-/* ───────────── public record ───────────── */
 #[derive(Debug, Clone)]
 pub struct Record {
     pub vector: Vec<f32>,
@@ -21,7 +16,6 @@ pub struct Record {
     pub metadata: Option<Metadata>,
 }
 
-/* ───────────── one collection ───────────── */
 pub struct Collection {
     /* static config */
     pub dimension: usize,
@@ -43,7 +37,6 @@ pub struct Collection {
     hnsw: Option<HnswIndexWrapper>,
 }
 
-/* ---------- ctor ------------------------------------------------ */
 impl Collection {
     pub fn create_with_distance(dim: usize, dist: &str) -> Result<Self, String> {
         let distance = match dist.to_lowercase().as_str() {
@@ -73,7 +66,7 @@ impl Collection {
         })
     }
 
-    /* ---------- lightweight getters ------------------------------ */
+    /*  getters */
     #[inline]
     pub fn row_count(&self) -> usize {
         self.row2value.len()
@@ -95,7 +88,6 @@ impl Collection {
         self.hnsw.as_ref()
     }
 
-    /* ---------- row allocator ------------------------------------ */
     fn alloc_row(&mut self) -> usize {
         if let Some(r) = self.free.pop() {
             r
@@ -123,7 +115,6 @@ impl Collection {
         }
     }
 
-    /* ---------- CRUD --------------------------------------------- */
     pub fn insert(
         &mut self,
         value: String,
@@ -145,7 +136,7 @@ impl Collection {
             return Err("duplicate vector".into());
         }
 
-        /* allocate row & copy -------------------------------------- */
+        /* allocate row & copy */
         let row = self.alloc_row();
         let offset = row * self.dimension;
         if self.keep_embeddings || !matches!(self.distance, Distance::Binary) {
@@ -196,7 +187,7 @@ impl Collection {
     }
 }
 
-/* ───────────── global DB  (sharded) ───────────── */
+/*  global DB  (sharded)  */
 pub struct VettoreDB {
     cols: DashMap<String, Arc<RwLock<Collection>>>,
 }
@@ -226,7 +217,7 @@ impl VettoreDB {
         self.collection(name)
     }
 
-    /* management --------------------------------------------------- */
+    /* management */
     pub fn create_collection(
         &self,
         name: String,
@@ -250,7 +241,7 @@ impl VettoreDB {
             .ok_or_else(|| "collection not found".into())
     }
 
-    /* CRUD wrappers ------------------------------------------------ */
+    /* CRUD wrappers */
     pub fn insert(
         &self,
         col: &str,

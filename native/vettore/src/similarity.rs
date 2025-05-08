@@ -1,10 +1,7 @@
-//! similarity.rs – fast k-NN (top-k) scan without Rayon
-//! ====================================================
+//! fast k-NN (top-k) scan without Rayon
 //! * Uses the collection’s HNSW index when present.
 //! * Otherwise performs a SIMD-accelerated brute-force scan
 //!   and keeps the best *k* hits in a min-heap.
-//
-//! No external dependencies.
 use crate::distances::{
     clamp_0_1, compress_vector, hamming_distance, simd_dot_product, simd_euclidean_distance,
 };
@@ -34,7 +31,7 @@ pub fn similarity_search(
         });
     }
 
-    // ---------- brute-force --------------------------------------
+    /*  brute-force */
     match coll.distance {
         Distance::Binary => brute_binary(coll, query, k),
         Distance::Euclidean | Distance::Cosine | Distance::DotProduct => {
@@ -44,7 +41,6 @@ pub fn similarity_search(
     }
 }
 
-/* ----- SIMD binary --------------------------------------------- */
 fn brute_binary(c: &Collection, q: &[f32], k: usize) -> Result<Vec<(String, f32)>, String> {
     let q_bits = compress_vector(q); // cached once
     let rows = c.row_count();
@@ -67,7 +63,7 @@ fn brute_binary(c: &Collection, q: &[f32], k: usize) -> Result<Vec<(String, f32)
         v
     };
 
-    // keep top-k with a min-heap, convert to similarity
+    /*  keep top-k with a min-heap, convert to similarity */
     pairs.sort_by_key(|&(_, d)| d);
     Ok(pairs
         .into_iter()
@@ -79,10 +75,10 @@ fn brute_binary(c: &Collection, q: &[f32], k: usize) -> Result<Vec<(String, f32)
         .collect())
 }
 
-/* ----- SIMD L2 / cosine / dot ---------------------------------- */
+/*  SIMD L2 / cosine / dot */
 fn brute_l2_dot_cos(c: &Collection, q: &[f32], k: usize) -> Result<Vec<(String, f32)>, String> {
     let rows = c.row_count();
-    // normalize query for cosine once
+    /*  normalize query for cosine once */
     let q_normed = normalize_vec(q);
 
     let mut pairs: Vec<(usize, f32)> = if rows >= PAR_THRESHOLD {
@@ -126,7 +122,7 @@ fn brute_l2_dot_cos(c: &Collection, q: &[f32], k: usize) -> Result<Vec<(String, 
         v
     };
 
-    // keep largest scores
+    /*  keep largest scores */
     pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     Ok(pairs
         .into_iter()

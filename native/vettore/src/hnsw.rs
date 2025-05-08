@@ -1,5 +1,4 @@
 //! HNSW – minimal wrapper used by Vettore
-//! --------------------------------------
 //! • identical public API
 //! • extra “existence” checks when following neighbour ids so that look-ups
 //!   like `self.nodes[&nb]` are never attempted for a removed node.
@@ -13,14 +12,12 @@ use smallvec::SmallVec;
 use crate::distances::{clamp_0_1, simd_euclidean_distance};
 use crate::types::Distance;
 
-/* ───────────────────────── constants ───────────────────────── */
 const M: usize = 16;
 const M0: usize = 32;
 const EF_CONSTRUCTION: usize = 100;
 const EF_SEARCH: usize = 64;
 const MAX_LEVEL: usize = 12;
 
-/* ───────────────────────── helper types ────────────────────── */
 #[derive(Clone)]
 struct Neighbor {
     id: usize,
@@ -49,7 +46,7 @@ struct Node {
     layer: usize,
 }
 
-/* ───────────────────────── HNSW core ───────────────────────── */
+/* HNSW */
 pub struct HnswIndex {
     nodes: HashMap<usize, Node>,
     entry: Option<usize>,
@@ -145,14 +142,12 @@ impl HnswIndex {
         Ok(())
     }
 
-    /* ───────────── remove ───────────── */
     pub fn remove(&mut self, id: usize) -> Result<(), String> {
         let node = self
             .nodes
             .remove(&id)
             .ok_or_else(|| "node not found".to_string())?;
 
-        /* unlink from every neighbour */
         for (layer, neighs) in node.connections.into_iter().enumerate() {
             for nb in neighs {
                 if let Some(n) = self.nodes.get_mut(&nb) {
@@ -173,7 +168,6 @@ impl HnswIndex {
         Ok(())
     }
 
-    /* ───────── internal search steps ───────── */
     fn search_layer(
         &self,
         entry: usize,
@@ -233,7 +227,6 @@ impl HnswIndex {
         Ok(res.into_sorted_vec())
     }
 
-    /* ───────── public top-k search ───────── */
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(usize, f32)>, String> {
         /* early-outs */
         let Some(mut ep) = self.entry else {
@@ -278,7 +271,6 @@ impl HnswIndex {
     }
 }
 
-/* ───────────────────────── external wrapper ───────────────── */
 pub struct HnswIndexWrapper {
     index: HnswIndex,
     id_map: HashMap<usize, String>,
