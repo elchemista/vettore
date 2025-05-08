@@ -1,31 +1,28 @@
 use std::collections::HashMap;
 
 use rustler::{Env, ResourceArc, Term};
-use std::sync::RwLock;
 
-use crate::db::Collection;
-use crate::mmr::mmr_rerank_internal;
+use crate::distances::{
+    clamp_0_1, compress_vector, hamming_distance, simd_dot_product, simd_euclidean_distance,
+};
+use crate::simd_utils::normalize_vec;
+
+use crate::db::VettoreDB;
+use crate::mmr::mmr_rerank as algo_mmr_rerank;
+use crate::similarity::similarity_search as algo_sim_search;
 use crate::types::{Distance, Metadata};
 
-#[derive(Default)]
-pub struct CacheDB {
-    cols: HashMap<String, Collection>,
-}
-
-pub struct DBResource(pub std::sync::RwLock<CacheDB>);
+pub struct DBResource(pub VettoreDB);
 impl rustler::Resource for DBResource {}
 
-macro_rules! db_read {
-    ($res:expr) => {
-        $res.0.read().expect("DB RwLock poisoned")
-    };
-}
-macro_rules! db_write {
-    ($res:expr) => {
-        $res.0.write().expect("DB RwLock poisoned")
+/* handy macro – just give me &VettoreDB */
+macro_rules! db_ref {
+    ($arc:expr) => {
+        &$arc.0
     };
 }
 
+/* tiny helper for uniform error */
 macro_rules! badarg {
     ($msg:expr) => {
         Err(format!("[vettore] {}", $msg))
@@ -34,209 +31,219 @@ macro_rules! badarg {
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn new_db() -> ResourceArc<DBResource> {
-    ResourceArc::new(DBResource(RwLock::new(CacheDB::default())))
+    ResourceArc::new(DBResource(VettoreDB::default()))
 }
 
+/* collection management */
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_create_collection(
+fn create_collection(
     db: ResourceArc<DBResource>,
     name: String,
-    dimension: usize,
+    dim: usize,
     distance: String,
     keep_embeddings: bool,
 ) -> Result<String, String> {
-    let mut guard = db_write!(db);
-    if guard.cols.contains_key(&name) {
-        return badarg!(format!("collection '{}' already exists", name));
-    }
-    let mut col = Collection::create_with_distance(dimension, &distance)?;
-    col.keep_embeddings = keep_embeddings;
-    guard.cols.insert(name.clone(), col);
+    db_ref!(db).create_collection(name.clone(), dim, &distance, keep_embeddings)?;
     Ok(name)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn delete_collection(db: ResourceArc<DBResource>, name: String) -> Result<String, String> {
-    let mut guard = db_write!(db);
-    if guard.cols.remove(&name).is_none() {
-        return badarg!(format!("collection '{}' not found", name));
-    }
+    db_ref!(db).delete_collection(&name)?;
     Ok(name)
 }
 
+/* single insert */
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_insert_embedding(
+fn insert_embedding(
     db: ResourceArc<DBResource>,
     col_name: String,
-    id: String,
+    value: String,
     vector: Vec<f32>,
     metadata: Option<Metadata>,
 ) -> Result<String, String> {
-    let mut guard = db_write!(db);
-    let col = guard
-        .cols
-        .get_mut(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-    col.insert(id.clone(), vector, metadata)?;
-    Ok(id)
+    db_ref!(db).insert(&col_name, value.clone(), vector, metadata)?;
+    Ok(value)
 }
 
+/* batch insert (each insert locks only its own collection) */
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_insert_embeddings(
+fn insert_embeddings(
     db: ResourceArc<DBResource>,
     col_name: String,
     embeddings: Vec<(String, Vec<f32>, Option<Metadata>)>,
 ) -> Result<Vec<String>, String> {
-    let mut guard = db_write!(db);
-    let col = guard
-        .cols
-        .get_mut(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-    let mut inserted = Vec::with_capacity(embeddings.len());
-    for (id, vec, md) in embeddings {
-        col.insert(id.clone(), vec, md)?;
-        inserted.push(id);
-    }
-    Ok(inserted)
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn nif_similarity_search(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    query: Vec<f32>,
-    k: usize,
-) -> Result<Vec<(String, f32)>, String> {
-    let guard = db_read!(db);
-    let col = guard
-        .cols
-        .get(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-    col.get_similarity(&query, k)
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn nif_similarity_search_with_filter(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    query: Vec<f32>,
-    k: usize,
-    filter: Metadata,
-) -> Result<Vec<(String, f32)>, String> {
-    let guard = db_read!(db);
-    let col = guard
-        .cols
-        .get(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-
-    if matches!(col.distance, Distance::Hnsw) {
-        return badarg!("metadata filtering is not supported for HNSW collections");
-    }
-
-    // linear scan with filter first
-    let mut prelim: Vec<(String, f32)> = Vec::new();
-    for (id, &row) in &col.id2row {
-        if let Some(Some(md)) = col.meta.get(row) {
-            if filter.iter().all(|(k, v)| md.get(k) == Some(v)) {
-                let vec_slice = &col.vectors[row * col.dimension..(row + 1) * col.dimension];
-                let score = crate::distances::score(
-                    &query,
-                    vec_slice,
-                    col.binary[row].as_ref(),
-                    col.distance,
-                );
-                prelim.push((id.clone(), score));
-            }
-        }
-    }
-    prelim.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    prelim.truncate(k);
-    Ok(prelim)
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn nif_get_embedding_by_id(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    id: String,
-) -> Result<(String, Vec<f32>, Option<Metadata>), String> {
-    let guard = db_read!(db);
-    let col = guard
-        .cols
-        .get(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-    let row = *col
-        .id2row
-        .get(&id)
-        .ok_or_else(|| format!("[vettore] id '{}' not found", id))?;
-    let vec_slice = &col.vectors[row * col.dimension..(row + 1) * col.dimension];
-    Ok((id, vec_slice.to_vec(), col.meta[row].clone()))
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn get_embeddings(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-) -> Result<Vec<(String, Vec<f32>, Option<Metadata>)>, String> {
-    let guard = db_read!(db);
-    let col = guard
-        .cols
-        .get(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-    let mut out = Vec::with_capacity(col.id2row.len());
-    for (id, &row) in &col.id2row {
-        out.push(col.row_to_tuple(id, row));
+    let db_ref = db_ref!(db);
+    let mut out = Vec::with_capacity(embeddings.len());
+    for (value, vec, md) in embeddings {
+        db_ref.insert(&col_name, value.clone(), vec, md)?;
+        out.push(value);
     }
     Ok(out)
 }
 
+/* look-ups */
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_delete_embedding_by_id(
+fn get_embedding_by_value(
     db: ResourceArc<DBResource>,
     col_name: String,
-    id: String,
-) -> Result<String, String> {
-    let mut guard = db_write!(db);
-    let col = guard
-        .cols
-        .get_mut(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-    col.remove(&id)?;
-    Ok(id)
+    value: String,
+) -> Result<(String, Vec<f32>, Option<Metadata>), String> {
+    let rec = db_ref!(db).get_by_value(&col_name, &value)?;
+    Ok((rec.value, rec.vector, rec.metadata))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn nif_mmr_rerank(
+fn get_embedding_by_vector(
+    db: ResourceArc<DBResource>,
+    col_name: String,
+    vector: Vec<f32>,
+) -> Result<(String, Vec<f32>, Option<Metadata>), String> {
+    let rec = db_ref!(db).get_by_vector(&col_name, &vector)?;
+    Ok((rec.value, rec.vector, rec.metadata))
+}
+
+/* dump */
+#[rustler::nif(schedule = "DirtyCpu")]
+fn get_all_embeddings(
+    db: ResourceArc<DBResource>,
+    col_name: String,
+) -> Result<Vec<(String, Vec<f32>, Option<Metadata>)>, String> {
+    let recs = db_ref!(db).get_all(&col_name)?;
+    Ok(recs
+        .into_iter()
+        .map(|r| (r.value, r.vector, r.metadata))
+        .collect())
+}
+
+/* similarity search – uses read-guard */
+#[rustler::nif(schedule = "DirtyCpu")]
+fn similarity_search(
+    db: ResourceArc<DBResource>,
+    col_name: String,
+    query: Vec<f32>,
+    k: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    let arc = db_ref!(db).collection(&col_name)?;
+    let guard = arc
+        .read()
+        .map_err(|_| "collection lock poisoned".to_string())?;
+    algo_sim_search(&*guard, &query, k)
+}
+
+/* delete one */
+#[rustler::nif(schedule = "DirtyCpu")]
+fn delete_embedding_by_value(
+    db: ResourceArc<DBResource>,
+    col_name: String,
+    value: String,
+) -> Result<String, String> {
+    db_ref!(db).delete_by_value(&col_name, &value)?;
+    Ok(value)
+}
+
+/* MMR rerank (needs vectors of the initial hits) */
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mmr_rerank(
     db: ResourceArc<DBResource>,
     col_name: String,
     initial: Vec<(String, f32)>,
     alpha: f32,
     final_k: usize,
 ) -> Result<Vec<(String, f32)>, String> {
-    let guard = db_read!(db);
-    let col = guard
-        .cols
-        .get(&col_name)
-        .ok_or_else(|| format!("[vettore] collection '{}' not found", col_name))?;
-    let embed_map = col
-        .id2row
-        .iter()
-        .map(|(id, &row)| {
-            let vec_slice = &col.vectors[row * col.dimension..(row + 1) * col.dimension];
-            (id.clone(), vec_slice.to_vec())
-        })
-        .collect::<HashMap<_, _>>();
-    Ok(mmr_rerank_internal(
+    let arc = db_ref!(db).collection(&col_name)?;
+    let guard = arc
+        .read()
+        .map_err(|_| "collection lock poisoned".to_string())?;
+
+    let mut embed_map: HashMap<String, Vec<f32>> = HashMap::with_capacity(initial.len());
+    for (val, _) in &initial {
+        if let Some(rec) = guard.get_by_value(val) {
+            embed_map.insert(val.clone(), rec.vector);
+        }
+    }
+
+    Ok(algo_mmr_rerank(
         &initial,
         &embed_map,
-        col.distance,
+        guard.distance,
         alpha,
         final_k,
     ))
 }
 
+#[rustler::nif(schedule = "DirtyCpu")]
+fn euclidean_distance(a: Vec<f32>, b: Vec<f32>) -> Result<f32, String> {
+    if a.len() != b.len() {
+        return badarg!("dimension mismatch");
+    }
+    Ok(clamp_0_1(1.0 / (1.0 + simd_euclidean_distance(&a, &b))))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn cosine_similarity(a: Vec<f32>, b: Vec<f32>) -> Result<f32, String> {
+    if a.len() != b.len() {
+        return badarg!("dimension mismatch");
+    }
+    let sim = (simd_dot_product(&normalize_vec(&a), &normalize_vec(&b)) + 1.0) / 2.0;
+    Ok(clamp_0_1(sim))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn dot_product(a: Vec<f32>, b: Vec<f32>) -> Result<f32, String> {
+    if a.len() != b.len() {
+        return badarg!("dimension mismatch");
+    }
+    Ok(simd_dot_product(&a, &b))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn hamming_distance_bits(a: Vec<u64>, b: Vec<u64>) -> Result<u32, String> {
+    if a.len() != b.len() {
+        return badarg!("length mismatch");
+    }
+    Ok(hamming_distance(&a, &b))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn compress_f32_vector(v: Vec<f32>) -> Vec<u64> {
+    compress_vector(&v)
+}
+
+/* distance string → enum */
+fn distance_from_str(s: &str) -> Result<Distance, String> {
+    match s.to_lowercase().as_str() {
+        "euclidean" | "l2" => Ok(Distance::Euclidean),
+        "cosine" => Ok(Distance::Cosine),
+        "dot" | "dotproduct" => Ok(Distance::DotProduct),
+        "binary" | "hamming" => Ok(Distance::Binary),
+        "hnsw" => Ok(Distance::Hnsw),
+        _ => badarg!("unknown distance"),
+    }
+}
+
+/* NIF form of standalone MMR (no DB involved) */
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mmr_rerank_embeddings(
+    initial: Vec<(String, f32)>,
+    embeddings: Vec<(String, Vec<f32>)>,
+    distance: String,
+    alpha: f32,
+    final_k: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    let dist = distance_from_str(&distance)?;
+    Ok(algo_mmr_rerank(
+        &initial,
+        &embeddings.into_iter().collect(),
+        dist,
+        alpha,
+        final_k,
+    ))
+}
+
+/* on-load */
 fn on_load(env: Env, _info: Term) -> bool {
     env.register::<DBResource>().is_ok()
 }
 
-rustler::init!("Elixir.Vettore", load = on_load);
+rustler::init!("Elixir.Vettore.Nifs", load = on_load);

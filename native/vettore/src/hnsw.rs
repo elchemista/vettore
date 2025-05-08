@@ -1,14 +1,17 @@
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+//! HNSW – minimal wrapper used by Vettore
+//! • identical public API
+//! • extra “existence” checks when following neighbour ids so that look-ups
+//!   like `self.nodes[&nb]` are never attempted for a removed node.
 
-use bitvec::prelude::*;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+
 use rand::Rng;
 use smallvec::SmallVec;
 
 use crate::distances::{clamp_0_1, simd_euclidean_distance};
 use crate::types::Distance;
 
-// params
 const M: usize = 16;
 const M0: usize = 32;
 const EF_CONSTRUCTION: usize = 100;
@@ -22,7 +25,7 @@ struct Neighbor {
 }
 impl Ord for Neighbor {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dist.partial_cmp(&other.dist).unwrap().reverse()
+        self.dist.partial_cmp(&other.dist).unwrap().reverse() // max-heap
     }
 }
 impl PartialOrd for Neighbor {
@@ -39,10 +42,11 @@ impl Eq for Neighbor {}
 
 struct Node {
     vector: Vec<f32>,
-    connections: Vec<SmallVec<[usize; M0]>>, // per‑layer neighbor ids
+    connections: Vec<SmallVec<[usize; M0]>>,
     layer: usize,
 }
 
+/* HNSW */
 pub struct HnswIndex {
     nodes: HashMap<usize, Node>,
     entry: Option<usize>,
@@ -59,6 +63,8 @@ impl HnswIndex {
             max_level: MAX_LEVEL,
         }
     }
+
+    #[inline]
     fn rand_level(&self) -> usize {
         let mut rng = rand::rng();
         let mut lvl = 0usize;
@@ -68,7 +74,9 @@ impl HnswIndex {
         lvl
     }
 
+    /* ───────────── insert ───────────── */
     pub fn add(&mut self, id: usize, vector: Vec<f32>) -> Result<(), String> {
+        /* first ever node */
         if self.nodes.is_empty() {
             let lvl = self.rand_level();
             self.nodes.insert(
@@ -82,31 +90,44 @@ impl HnswIndex {
             self.entry = Some(id);
             return Ok(());
         }
+
         let node_lvl = self.rand_level();
+
+        /* greedy descent from current entry */
         let mut ep = self.entry.unwrap();
         let mut ep_dist = simd_euclidean_distance(&self.nodes[&ep].vector, &vector);
-        let top = self.nodes[&ep].layer;
-        for l in (0..=top).rev() {
-            if let Some(best) = self.search_layer(ep, &vector, l, 1)?.first() {
+        let top_layer = self.nodes[&ep].layer;
+
+        for layer in (0..=top_layer).rev() {
+            if let Some(best) = self.search_layer(ep, &vector, layer, 1)?.first() {
+                // Only jump to `best.id` if it is genuinely closer
                 if best.dist < ep_dist {
                     ep = best.id;
                     ep_dist = best.dist;
                 }
             }
         }
+
+        /* neighbour selection & linking */
         let mut new_conns = vec![SmallVec::<[usize; M0]>::new(); node_lvl + 1];
-        for l in 0..=node_lvl {
-            let neighs = self.search_layer(ep, &vector, l, EF_CONSTRUCTION)?;
-            let sel = self.select_neighbors(&neighs, l);
-            new_conns[l].extend(sel.iter().map(|n| n.id));
-            for n in sel {
-                if let Some(node) = self.nodes.get_mut(&n.id) {
-                    if l < node.connections.len() {
-                        node.connections[l].push(id);
+        for layer in 0..=node_lvl {
+            let mut cand = self.search_layer(ep, &vector, layer, EF_CONSTRUCTION)?;
+            cand.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+            cand.truncate(if layer == 0 { M0 } else { M });
+
+            for nbr in &cand {
+                new_conns[layer].push(nbr.id);
+            }
+            for nbr in cand {
+                if let Some(n) = self.nodes.get_mut(&nbr.id) {
+                    if layer < n.connections.len() {
+                        n.connections[layer].push(id);
                     }
                 }
             }
         }
+
+        /* actually insert */
         self.nodes.insert(
             id,
             Node {
@@ -126,17 +147,23 @@ impl HnswIndex {
             .nodes
             .remove(&id)
             .ok_or_else(|| "node not found".to_string())?;
-        for (l, neighs) in node.connections.into_iter().enumerate() {
-            for n in neighs {
-                if let Some(node) = self.nodes.get_mut(&n) {
-                    if l < node.connections.len() {
-                        node.connections[l].retain(|x| *x != id);
+
+        for (layer, neighs) in node.connections.into_iter().enumerate() {
+            for nb in neighs {
+                if let Some(n) = self.nodes.get_mut(&nb) {
+                    if layer < n.connections.len() {
+                        n.connections[layer].retain(|x| *x != id);
                     }
                 }
             }
         }
+
+        /* fix entry pointer */
         if self.entry == Some(id) {
             self.entry = self.nodes.keys().next().copied();
+        }
+        if self.nodes.is_empty() {
+            self.entry = None;
         }
         Ok(())
     }
@@ -145,39 +172,50 @@ impl HnswIndex {
         &self,
         entry: usize,
         query: &[f32],
-        lvl: usize,
+        layer: usize,
         ef: usize,
     ) -> Result<Vec<Neighbor>, String> {
-        let mut visited: BitVec = bitvec![0; self.nodes.len()];
+        if !self.nodes.contains_key(&entry) {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::new();
         let mut cand = BinaryHeap::<Neighbor>::new();
         let mut res = BinaryHeap::<Neighbor>::new();
-        let dist0 = simd_euclidean_distance(&self.nodes[&entry].vector, query);
+
+        let d0 = simd_euclidean_distance(&self.nodes[&entry].vector, query);
         cand.push(Neighbor {
             id: entry,
-            dist: dist0,
+            dist: d0,
         });
         res.push(Neighbor {
             id: entry,
-            dist: dist0,
+            dist: d0,
         });
-        visited.set(entry, true);
+        visited.insert(entry);
+
         while let Some(cur) = cand.pop() {
             let worst = res.peek().map_or(f32::INFINITY, |n| n.dist);
             if cur.dist > worst {
                 break;
             }
-            let node = &self.nodes[&cur.id];
-            if lvl < node.connections.len() {
-                for &nb in &node.connections[lvl] {
-                    if visited[nb] {
+            let Some(node) = self.nodes.get(&cur.id) else {
+                continue;
+            };
+            if layer < node.connections.len() {
+                for &nb in &node.connections[layer] {
+                    /* skip stale neighbour ids */
+                    let Some(nb_node) = self.nodes.get(&nb) else {
+                        continue;
+                    };
+                    if !visited.insert(nb) {
                         continue;
                     }
-                    visited.set(nb, true);
-                    let d = simd_euclidean_distance(&self.nodes[&nb].vector, query);
-                    let n = Neighbor { id: nb, dist: d };
-                    if res.len() < ef || d < worst {
-                        cand.push(n.clone());
-                        res.push(n);
+                    let dist = simd_euclidean_distance(&nb_node.vector, query);
+                    let cand_n = Neighbor { id: nb, dist };
+                    if res.len() < ef || dist < worst {
+                        cand.push(cand_n.clone());
+                        res.push(cand_n);
                         if res.len() > ef {
                             res.pop();
                         }
@@ -185,46 +223,51 @@ impl HnswIndex {
                 }
             }
         }
+
         Ok(res.into_sorted_vec())
     }
 
-    fn select_neighbors(&self, neighs: &[Neighbor], lvl: usize) -> Vec<Neighbor> {
-        let mut v = neighs.to_vec();
-        v.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
-        let m = if lvl == 0 { M0 } else { M };
-        v.truncate(m);
-        v
-    }
-
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(usize, f32)>, String> {
-        if self.nodes.is_empty() {
+        /* early-outs */
+        let Some(mut ep) = self.entry else {
             return Ok(Vec::new());
-        }
-        let mut ep = self.entry.unwrap();
-        let mut ep_dist = simd_euclidean_distance(&self.nodes[&ep].vector, query);
-        let top = self.nodes[&ep].layer;
-        for l in (1..=top).rev() {
+        };
+        let Some(entry_node) = self.nodes.get(&ep) else {
+            return Ok(Vec::new());
+        };
+
+        /* greedy descent on upper layers */
+        let mut ep_dist = simd_euclidean_distance(&entry_node.vector, query);
+        let top_layer = entry_node.layer;
+        for layer in (1..=top_layer).rev() {
             loop {
-                let mut changed = false;
-                let node = &self.nodes[&ep];
-                if l < node.connections.len() {
-                    for &nb in &node.connections[l] {
-                        let d = simd_euclidean_distance(&self.nodes[&nb].vector, query);
+                let mut moved = false;
+                let Some(node) = self.nodes.get(&ep) else {
+                    break;
+                };
+                if layer < node.connections.len() {
+                    for &nb in &node.connections[layer] {
+                        let Some(nb_node) = self.nodes.get(&nb) else {
+                            continue;
+                        };
+                        let d = simd_euclidean_distance(&nb_node.vector, query);
                         if d < ep_dist {
                             ep = nb;
                             ep_dist = d;
-                            changed = true;
+                            moved = true;
                         }
                     }
                 }
-                if !changed {
+                if !moved {
                     break;
                 }
             }
         }
-        let mut res = self.search_layer(ep, query, 0, EF_SEARCH)?;
-        res.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
-        Ok(res.into_iter().take(k).map(|n| (n.id, n.dist)).collect())
+
+        /* final, layer-0 search */
+        let mut best = self.search_layer(ep, query, 0, EF_SEARCH)?;
+        best.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+        Ok(best.into_iter().take(k).map(|n| (n.id, n.dist)).collect())
     }
 }
 
@@ -233,6 +276,7 @@ pub struct HnswIndexWrapper {
     id_map: HashMap<usize, String>,
     next: usize,
 }
+
 impl HnswIndexWrapper {
     pub fn new() -> Self {
         Self {
@@ -241,19 +285,22 @@ impl HnswIndexWrapper {
             next: 0,
         }
     }
-    pub fn insert(&mut self, id_str: &str, vector: Vec<f32>) -> Result<(), String> {
+
+    pub fn insert(&mut self, value: &str, vector: Vec<f32>) -> Result<(), String> {
         let nid = self.next;
+        self.index.add(nid, vector)?;
+        self.id_map.insert(nid, value.to_owned());
         self.next += 1;
-        self.id_map.insert(nid, id_str.to_owned());
-        self.index.add(nid, vector)
+        Ok(())
     }
+
     pub fn search(
         &self,
-        q: &[f32],
+        query: &[f32],
         k: usize,
         _dist: Distance,
     ) -> Result<Vec<(String, f32)>, String> {
-        let raw = self.index.search(q, k)?;
+        let raw = self.index.search(query, k)?;
         Ok(raw
             .into_iter()
             .filter_map(|(nid, d)| {
@@ -263,12 +310,12 @@ impl HnswIndexWrapper {
             })
             .collect())
     }
-    pub fn remove(&mut self, id_str: &str) -> Result<(), String> {
-        let nid = *self
+
+    pub fn remove(&mut self, value: &str) -> Result<(), String> {
+        let (&nid, _) = self
             .id_map
             .iter()
-            .find(|(_, v)| *v == id_str)
-            .map(|(k, _)| k)
+            .find(|(_, v)| *v == value)
             .ok_or_else(|| "id not found".to_string())?;
         self.index.remove(nid)?;
         self.id_map.remove(&nid);

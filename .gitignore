@@ -17,6 +17,7 @@
 /native/vettore/target/
 
 /.elixir_ls/
+/.elixir-tools/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
@@ -26,6 +27,8 @@ erl_crash.dump
 
 # Ignore package tarball (built via "mix hex.build").
 vector-*.tar
+
+*.txt
 
 # Temporary files, for example, from tests.
 /tmp/

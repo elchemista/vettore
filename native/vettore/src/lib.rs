@@ -4,4 +4,5 @@ pub mod hnsw;
 pub mod mmr;
 pub mod nifs;
 pub mod simd_utils;
+pub mod similarity;
 pub mod types;
