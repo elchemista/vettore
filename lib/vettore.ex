@@ -311,14 +311,9 @@ defmodule Vettore do
 
   #  Helpers (private)
   defp embeddings_to_tuples(list) do
-    Enum.reduce(list, [], fn
-      %Embedding{value: v, vector: vec, metadata: m}, acc
-      when is_bitstring(v) and is_list(vec) ->
-        acc ++ [{v, vec, sanitize_meta(m)}]
-
-      _, acc ->
-        acc
-    end)
+    for %Embedding{value: v, vector: vec, metadata: m} <- list, is_bitstring(v), is_list(vec) do
+      {v, vec, sanitize_meta(m)}
+    end
   end
 
   defp sanitize_meta(nil), do: nil
