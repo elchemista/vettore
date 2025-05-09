@@ -5,21 +5,21 @@ defmodule Vettore do
     **All vectors (embeddings) are stored in a Rust data structure** (a `HashMap`), accessed via a shared resource
     (using Rustler’s `ResourceArc` with a `Mutex`). Core operations include:
 
-      - **Creating a collection**:
+      - Creating a collection :
         A named set of embeddings with a fixed dimension and a chosen similarity metric (:cosine, :euclidean, :dot,
         :hnsw, :binary).
 
-      - **Inserting an embedding**:
+      - Inserting an embedding :
         Add a new embedding (with ID, vector, and optional metadata) to a specific collection.
 
-      - **Retrieving embeddings**:
+      - Retrieving embeddings :
         Fetch all embeddings from a collection or look up a single embedding by its unique ID.
 
-      - **Similarity search**:
+      - Similarity search :
         Given a query vector, calculate a “score” for every embedding in the collection and return the top‑k results
         (e.g. the smallest distances or largest similarities).
 
-    ## Usage Example
+      # Usage Example
 
         db = Vettore.new()
         :ok = Vettore.create_collection(db, "my_collection", 3, :euclidean)
@@ -55,7 +55,7 @@ defmodule Vettore do
   * `distance` must be one of the atoms: `:euclidean`, `:cosine`, `:dot`,
     `:hnsw`, or `:binary`.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean)
       {:ok, "my_collection"}
@@ -85,7 +85,7 @@ defmodule Vettore do
   @doc """
   Delete a collection.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.delete_collection("my_collection")
       {:ok, "my_collection"}
@@ -105,7 +105,7 @@ defmodule Vettore do
   Insert **one** `%Vettore.Embedding{}` into the collection.
   Returns `{:ok, value}` on success or `{:error, reason}`.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}})
       {:ok, "my_id"}
@@ -126,7 +126,7 @@ defmodule Vettore do
   @doc """
   Batch‑insert a list of embeddings. Reject elements that are not `%Vettore.Embedding{}`.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.batch("my_collection", [%Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}])
       {:ok, ["my_id"]}
@@ -149,7 +149,7 @@ defmodule Vettore do
   @doc """
   Fetch a single embedding by *value (ID)* and return it as `%Vettore.Embedding{}`.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_by_value("my_collection", "my_id")
       {:ok, %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}}
@@ -169,7 +169,7 @@ defmodule Vettore do
   @doc """
   Fetch a single embedding by *vector* and return it as `%Vettore.Embedding{}`.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_by_vector("my_collection", [1.0, 2.0, 3.0])
       {:ok, %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}}
@@ -189,7 +189,7 @@ defmodule Vettore do
   @doc """
   Delete a single embedding.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.delete("my_collection", "my_id")
       {:ok, "my_id"}
@@ -204,7 +204,7 @@ defmodule Vettore do
   @doc """
   Return all embeddings in *raw* form (`{value, vector, metadata}` tuples).
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_all("my_collection")
       {:ok, [{"my_id", [1.0, 2.0, 3.0], %{"note" => "hello"}}]}
@@ -225,7 +225,7 @@ defmodule Vettore do
     * `:filter` – metadata map; only embeddings whose metadata contains all
       key‑value pairs are considered.
 
-  #Examples
+  # Examples
 
       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.similarity_search("my_collection", [1.0, 2.0, 3.0], limit: 1)
       {:ok, [{"my_id", 0.0}]}
@@ -261,7 +261,7 @@ defmodule Vettore do
      * `:limit` – desired output length (default **10**)
      * `:alpha` – relevance‑diversity balance **0.0..1.0** (default **0.5**)
 
-   #Examples
+   # Examples
 
        iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id2", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id3", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.rerank("my_collection", [{"my_id", 0.0}, {"my_id2", 0.0}, {"my_id3", 0.0}], limit: 1)
        {:ok, [{"my_id", 0.0}]}

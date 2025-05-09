@@ -19,7 +19,7 @@ defmodule Vettore.Distance do
   The result is in **`0.0..1.0`** via the mapping `1 / (1 + d)` so that
   identical vectors yield `1.0`.
 
-  #Examples
+  # Examples
 
       iex> Vettore.Distance.euclidean([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
       0.0
@@ -31,7 +31,7 @@ defmodule Vettore.Distance do
   @doc """
   Cosine similarity in **`0.0..1.0`** (`(dot + 1) / 2` after length-normalisation).
 
-  #Examples
+  # Examples
 
       iex> Vettore.Distance.cosine([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
       0.0
@@ -43,7 +43,7 @@ defmodule Vettore.Distance do
   @doc """
   Raw dot product (no post-processing).
 
-  #Examples
+  # Examples
 
       iex> Vettore.Distance.dot_product([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
       1
@@ -56,7 +56,7 @@ defmodule Vettore.Distance do
   Bit-wise Hamming distance between two compressed vectors (see
   `compress_f32_vector/1`).
 
-  #Examples
+  # Examples
 
       iex> Vettore.Distance.hamming([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0])
       0
@@ -69,7 +69,7 @@ defmodule Vettore.Distance do
   Compress a float vector into its sign-bit representation (64 floats → 64 bits →
   one `u64`).  Useful for ultra-fast binary similarity.
 
-  #Examples
+  # Examples
 
       iex> Vettore.Distance.compress_f32_vector([1.0, 2.0, 3.0])
       [1, 0, 0,..... 1, 0, 0]
@@ -87,7 +87,7 @@ defmodule Vettore.Distance do
   * `alpha`     – 0 ⇢ only diversity, 1 ⇢ only query-relevance
   * `final_k`   – length of the wanted output list
 
-  #Examples
+  # Examples
 
       iex> Vettore.Distance.mmr_rerank([{"my_id", 0.0}], [{"my_id", [1.0, 2.0, 3.0]}], "euclidean", 0.5, 1)
       [{"my_id", 0.0}]
