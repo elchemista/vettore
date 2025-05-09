@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.2.1"
+  @version "0.2.2"
 
   def project do
     [
@@ -21,7 +21,7 @@ defmodule Vettore.MixProject do
         tag: "v#{@version}"
       ],
       docs: [
-        master: "readme",
+        master: "Vettore",
         extras: [
           "README.md",
           "LICENSE"

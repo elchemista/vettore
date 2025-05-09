@@ -1,52 +1,58 @@
-//! HNSW – minimal wrapper used by Vettore
-//! • identical public API
-//! • extra “existence” checks when following neighbour ids so that look-ups
-//!   like `self.nodes[&nb]` are never attempted for a removed node.
+//! hnsw.rs – minimal, safe HNSW used by Vettore
+//! Public surface is unchanged; internals fixed & hardened.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use rand::Rng;
+use rand::{thread_rng, Rng};
 use smallvec::SmallVec;
 
 use crate::distances::{clamp_0_1, simd_euclidean_distance};
 use crate::types::Distance;
 
-const M: usize = 16;
-const M0: usize = 32;
-const EF_CONSTRUCTION: usize = 100;
-const EF_SEARCH: usize = 64;
-const MAX_LEVEL: usize = 12;
+pub const M: usize = 16;
+pub const M0: usize = 32; // layer-0 width
+pub const EF_CONSTRUCTION: usize = 100;
+pub const EF_SEARCH: usize = 64;
+pub const MAX_LEVEL: usize = 12;
 
 #[derive(Clone)]
 struct Neighbor {
     id: usize,
     dist: f32,
 }
-impl Ord for Neighbor {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.dist.partial_cmp(&other.dist).unwrap().reverse() // max-heap
-    }
-}
-impl PartialOrd for Neighbor {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        Some(self.cmp(o))
-    }
-}
+impl Eq for Neighbor {}
 impl PartialEq for Neighbor {
     fn eq(&self, o: &Self) -> bool {
         self.dist == o.dist
     }
 }
-impl Eq for Neighbor {}
+impl Ord for Neighbor {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // max-heap; NaN treated as worst possible
+        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+    }
+}
+impl PartialOrd for Neighbor {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        // reverse so that smaller distance == "greater priority"
+        match (self.dist.is_nan(), o.dist.is_nan()) {
+            (true, true) => Some(Ordering::Equal),
+            (true, false) => Some(Ordering::Less), // NaN goes to bottom
+            (false, true) => Some(Ordering::Greater),
+            (false, false) => Some(o.dist.partial_cmp(&self.dist).unwrap()),
+        }
+    }
+}
 
+#[derive(Clone)]
 struct Node {
     vector: Vec<f32>,
     connections: Vec<SmallVec<[usize; M0]>>,
     layer: usize,
 }
 
-/* HNSW */
+/* core index */
 pub struct HnswIndex {
     nodes: HashMap<usize, Node>,
     entry: Option<usize>,
@@ -66,17 +72,50 @@ impl HnswIndex {
 
     #[inline]
     fn rand_level(&self) -> usize {
-        let mut rng = rand::rng();
-        let mut lvl = 0usize;
-        while rng.random::<f32>() < self.lambda && lvl < self.max_level {
+        let mut rng = thread_rng(); // ‹thread_rng› → ‹rng›
+        let mut lvl = 0;
+        while rng.gen::<f32>() < self.lambda && lvl < self.max_level {
             lvl += 1;
         }
         lvl
     }
 
-    /* ───────────── insert ───────────── */
+    /* keep the closest {M|M0} connections for `node_id` at `layer` */
+    fn prune_node_layer(&mut self, node_id: usize, layer: usize) {
+        let limit = if layer == 0 { M0 } else { M };
+
+        let (conn_snapshot, reference_vec) = match self.nodes.get(&node_id) {
+            Some(n) => (n.connections[layer].clone(), n.vector.clone()),
+            None => return,
+        };
+
+        let mut scored: Vec<(usize, f32)> = conn_snapshot
+            .into_iter()
+            .filter_map(|nid| {
+                self.nodes
+                    .get(&nid)
+                    .map(|nbr| (nid, simd_euclidean_distance(&nbr.vector, &reference_vec)))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        scored.truncate(limit);
+
+        let mut new_conn: SmallVec<[usize; M0]> = SmallVec::new();
+        new_conn.extend(scored.into_iter().map(|(nid, _)| nid));
+
+        if let Some(n) = self.nodes.get_mut(&node_id) {
+            n.connections[layer] = new_conn;
+        }
+    }
+
+    /* ── insert─ */
     pub fn add(&mut self, id: usize, vector: Vec<f32>) -> Result<(), String> {
-        /* first ever node */
+        if self.nodes.contains_key(&id) {
+            return Err("duplicate id".into());
+        }
+
+        /* first node shortcut */
         if self.nodes.is_empty() {
             let lvl = self.rand_level();
             self.nodes.insert(
@@ -92,15 +131,12 @@ impl HnswIndex {
         }
 
         let node_lvl = self.rand_level();
-
         /* greedy descent from current entry */
-        let mut ep = self.entry.unwrap();
+        let mut ep = self.entry.expect("entry must exist");
         let mut ep_dist = simd_euclidean_distance(&self.nodes[&ep].vector, &vector);
         let top_layer = self.nodes[&ep].layer;
-
         for layer in (0..=top_layer).rev() {
-            if let Some(best) = self.search_layer(ep, &vector, layer, 1)?.first() {
-                // Only jump to `best.id` if it is genuinely closer
+            if let Some(best) = self.search_layer(ep, &vector, layer, 1)?.into_iter().next() {
                 if best.dist < ep_dist {
                     ep = best.id;
                     ep_dist = best.dist;
@@ -108,26 +144,43 @@ impl HnswIndex {
             }
         }
 
-        /* neighbour selection & linking */
+        /* neighbour selection & two-way linking */
         let mut new_conns = vec![SmallVec::<[usize; M0]>::new(); node_lvl + 1];
+
         for layer in 0..=node_lvl {
+            // EF-construction search at this layer
             let mut cand = self.search_layer(ep, &vector, layer, EF_CONSTRUCTION)?;
             cand.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+            cand.dedup_by_key(|n| n.id);
             cand.truncate(if layer == 0 { M0 } else { M });
 
-            for nbr in &cand {
-                new_conns[layer].push(nbr.id);
+            /* neighbours for the *new* node */
+            for nb in &cand {
+                new_conns[layer].push(nb.id);
             }
-            for nbr in cand {
-                if let Some(n) = self.nodes.get_mut(&nbr.id) {
+
+            /* stage nodes that need pruning */
+            let mut to_prune = Vec::<usize>::new();
+
+            /* symmetric link */
+            for nb in cand {
+                if let Some(n) = self.nodes.get_mut(&nb.id) {
                     if layer < n.connections.len() {
-                        n.connections[layer].push(id);
+                        let conn = &mut n.connections[layer];
+                        if !conn.contains(&id) {
+                            conn.push(id);
+                        }
+                        to_prune.push(nb.id); // <- remember for later
                     }
                 }
             }
+
+            for pid in to_prune {
+                self.prune_node_layer(pid, layer);
+            }
         }
 
-        /* actually insert */
+        /* finally insert the node */
         self.nodes.insert(
             id,
             Node {
@@ -136,18 +189,22 @@ impl HnswIndex {
                 layer: node_lvl,
             },
         );
+
+        /* update entry if the new node reaches a higher layer */
         if node_lvl > self.nodes[&self.entry.unwrap()].layer {
             self.entry = Some(id);
         }
         Ok(())
     }
 
+    /* ── delete ───────────────────────────────────────────────────── */
     pub fn remove(&mut self, id: usize) -> Result<(), String> {
         let node = self
             .nodes
             .remove(&id)
             .ok_or_else(|| "node not found".to_string())?;
 
+        /* unlink from neighbours */
         for (layer, neighs) in node.connections.into_iter().enumerate() {
             for nb in neighs {
                 if let Some(n) = self.nodes.get_mut(&nb) {
@@ -158,16 +215,18 @@ impl HnswIndex {
             }
         }
 
-        /* fix entry pointer */
+        /* repair entry pointer */
         if self.entry == Some(id) {
-            self.entry = self.nodes.keys().next().copied();
-        }
-        if self.nodes.is_empty() {
-            self.entry = None;
+            self.entry = self
+                .nodes
+                .iter()
+                .max_by_key(|(_, n)| n.layer)
+                .map(|(&id, _)| id);
         }
         Ok(())
     }
 
+    /* ── internal layer search */
     fn search_layer(
         &self,
         entry: usize,
@@ -202,23 +261,26 @@ impl HnswIndex {
             let Some(node) = self.nodes.get(&cur.id) else {
                 continue;
             };
-            if layer < node.connections.len() {
-                for &nb in &node.connections[layer] {
-                    /* skip stale neighbour ids */
-                    let Some(nb_node) = self.nodes.get(&nb) else {
-                        continue;
-                    };
-                    if !visited.insert(nb) {
-                        continue;
-                    }
-                    let dist = simd_euclidean_distance(&nb_node.vector, query);
-                    let cand_n = Neighbor { id: nb, dist };
-                    if res.len() < ef || dist < worst {
-                        cand.push(cand_n.clone());
-                        res.push(cand_n);
-                        if res.len() > ef {
-                            res.pop();
-                        }
+
+            if layer >= node.connections.len() {
+                continue;
+            }
+
+            for &nb in &node.connections[layer] {
+                if !visited.insert(nb) {
+                    continue;
+                }
+                let Some(nb_node) = self.nodes.get(&nb) else {
+                    continue;
+                };
+                let dist = simd_euclidean_distance(&nb_node.vector, query);
+                let cand_n = Neighbor { id: nb, dist };
+
+                if res.len() < ef || dist < worst {
+                    cand.push(cand_n.clone());
+                    res.push(cand_n);
+                    if res.len() > ef {
+                        res.pop();
                     }
                 }
             }
@@ -227,8 +289,8 @@ impl HnswIndex {
         Ok(res.into_sorted_vec())
     }
 
+    /* ─public k-NN search  */
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(usize, f32)>, String> {
-        /* early-outs */
         let Some(mut ep) = self.entry else {
             return Ok(Vec::new());
         };
@@ -239,23 +301,28 @@ impl HnswIndex {
         /* greedy descent on upper layers */
         let mut ep_dist = simd_euclidean_distance(&entry_node.vector, query);
         let top_layer = entry_node.layer;
+
         for layer in (1..=top_layer).rev() {
             loop {
                 let mut moved = false;
                 let Some(node) = self.nodes.get(&ep) else {
                     break;
                 };
-                if layer < node.connections.len() {
-                    for &nb in &node.connections[layer] {
-                        let Some(nb_node) = self.nodes.get(&nb) else {
-                            continue;
-                        };
-                        let d = simd_euclidean_distance(&nb_node.vector, query);
-                        if d < ep_dist {
-                            ep = nb;
-                            ep_dist = d;
-                            moved = true;
-                        }
+
+                let neigh_slice: &[usize] = if layer < node.connections.len() {
+                    &node.connections[layer]
+                } else {
+                    &[]
+                };
+                for &nb in neigh_slice {
+                    let Some(nb_node) = self.nodes.get(&nb) else {
+                        continue;
+                    };
+                    let d = simd_euclidean_distance(&nb_node.vector, query);
+                    if d < ep_dist {
+                        ep = nb;
+                        ep_dist = d;
+                        moved = true;
                     }
                 }
                 if !moved {
@@ -264,13 +331,14 @@ impl HnswIndex {
             }
         }
 
-        /* final, layer-0 search */
+        /* final search on layer-0 */
         let mut best = self.search_layer(ep, query, 0, EF_SEARCH)?;
         best.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
         Ok(best.into_iter().take(k).map(|n| (n.id, n.dist)).collect())
     }
 }
 
+/* ── thin wrapper to map ids ⇄ payload strings */
 pub struct HnswIndexWrapper {
     index: HnswIndex,
     id_map: HashMap<usize, String>,
