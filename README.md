@@ -179,6 +179,65 @@ embeds  = [{"id1", [v1...]}, {"id2", [v2...]}, ...]
 Vettore.Distance.mmr_rerank(initial, embeds, "cosine", 0.5, 5)
 ```
 
+### Example
+
+For example you can create Vector DB with ETS backend:
+
+```elixir
+defmodule ETSVectorDB do
+  @moduledoc """
+  A simple ETS-backed vector store with k-NN search using cosine similarity.
+  """
+
+  alias Vettore.Distance, as: Dist
+
+  @type id :: String.t() | atom()
+  @type vector :: [float()]
+  @type table :: atom()
+
+  @doc """
+  Creates (or re-creates) an ETS table to hold your vectors.
+  """
+  @spec create_table(table()) :: :ok
+  def create_table(table \\ :vector_db) do
+    # If it already exists, delete and recreate
+    if :ets.info(table) != :undefined, do: :ets.delete(table)
+    :ets.new(table, [:set, :public, read_concurrency: true])
+    :ok
+  end
+
+  @doc """
+  Inserts or updates a vector under the given id.
+  """
+  @spec put(table(), id(), vector()) :: :ok
+  def put(table \\ :vector_db, id, vector) when is_list(vector) do
+    :ets.insert(table, {id, vector})
+    :ok
+  end
+
+  @doc """
+  Finds the top `k` vectors most similar to `query_vec` using cosine similarity.
+
+  Returns a list of `{id, score}` sorted by descending score (highest = most similar).
+  """
+  @spec search(table(), vector(), pos_integer(), keyword()) :: [{id(), float()}]
+  def search(table \\ :vector_db, query_vec, k, opts \\ [])
+      when is_list(query_vec) and is_integer(k) and k > 0 do
+    # you could add other options here, e.g. distance: :euclidean
+    :ets.foldl(
+      fn {id, vec}, acc ->
+        score = Dist.cosine(query_vec, vec)
+        [{id, score} | acc]
+      end,
+      [],
+      table
+    )
+    |> Enum.sort_by(fn {_id, score} -> -score end)
+    |> Enum.take(k)
+  end
+end
+```
+
 ## Similarity Search
 
 The `similarity_search` function works as follows:
