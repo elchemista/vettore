@@ -10,15 +10,15 @@ defmodule Vettore.Nifs do
   #   • Thin Elixir wrappers (e.g. `new/0`) delegate to those NIFs so the public
   #     Elixir API stays tidy and backward-compatible.
 
-  use Rustler, otp_app: :vettore, crate: "vettore"
-  # version = Mix.Project.config()[:version]
+  # use Rustler, otp_app: :vettore, crate: "vettore"
+  version = Mix.Project.config()[:version]
 
-  # use RustlerPrecompiled,
-  #   otp_app: :vettore,
-  #   crate: "vettore",
-  #   base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
-  #   force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
-  #   version: version
+  use RustlerPrecompiled,
+    otp_app: :vettore,
+    crate: "vettore",
+    base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
+    force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
+    version: version
 
   @doc false
   @spec new_db() :: reference()
