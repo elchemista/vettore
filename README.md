@@ -17,7 +17,7 @@ Add `vettore` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.2.1"}
+    {:vettore, "~> 0.2.2"}
   ]
 end
 ```
