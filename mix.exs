@@ -24,8 +24,7 @@ defmodule Vettore.MixProject do
         master: "readme",
         extras: [
           "README.md",
-          "LICENSE",
-          "bench/performance.md"
+          "LICENSE"
         ]
       ],
       source_url: "https://github.com/elchemista/vettore",
@@ -53,6 +52,7 @@ defmodule Vettore.MixProject do
              mix.exs
              README.md
              LICENSE
+             checksum-Elixir.Vettore.Nifs.exs
              native/vettore/Cargo.toml
              native/vettore/src
              priv/native/*.so
