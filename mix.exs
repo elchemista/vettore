@@ -22,7 +22,7 @@ defmodule Vettore.MixProject do
         tag: "v#{@version}"
       ],
       docs: [
-        master: "Vettore",
+        main: "readme",
         extras: [
           "README.md",
           "LICENSE"
