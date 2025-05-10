@@ -63,14 +63,19 @@ fn brute_binary(c: &Collection, q: &[f32], k: usize) -> Result<Vec<(String, f32)
         v
     };
 
-    /*  keep top-k with a min-heap, convert to similarity */
+    // keep top-k by smallest Hamming distance, then convert to similarity in [0,1]
     pairs.sort_by_key(|&(_, d)| d);
     Ok(pairs
         .into_iter()
         .take(k)
         .filter_map(|(r, d)| {
-            c.value_by_row(r)
-                .map(|v| (v.clone(), 1.0 / (1.0 + d as f32)))
+            c.value_by_row(r).map(|v| {
+                // fraction of differing bits
+                let frac = d as f32 / q.len() as f32;
+                // similarity = 1 - fraction, clamped to [0,1]
+                let score = clamp_0_1(1.0 - frac);
+                (v.clone(), score)
+            })
         })
         .collect())
 }

@@ -101,7 +101,7 @@ defmodule Vettore.Distance do
           final_k()
         ) :: embeddings()
   def mmr_rerank(initial, embeddings, distance, alpha, k)
-      when is_list(initial) and is_list(embeddings) and is_bitstring(distance) and alpha >= 0 and
+      when is_list(initial) and is_list(embeddings) and is_binary(distance) and alpha >= 0 and
              alpha <= 1 and k > 0,
       do: N.mmr_rerank_embeddings(initial, embeddings, distance, alpha, k)
 end
