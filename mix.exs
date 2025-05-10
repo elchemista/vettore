@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.2.2"
+  @version "0.2.3"
 
   def project do
     [
@@ -9,6 +9,7 @@ defmodule Vettore.MixProject do
       name: "Vettore",
       version: @version,
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       build_embedded: Mix.env() == :prod,
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -33,6 +34,9 @@ defmodule Vettore.MixProject do
   end
 
   # Run "mix help compile.app" to learn about applications.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
   def application do
     [
       extra_applications: []
@@ -71,7 +75,8 @@ defmodule Vettore.MixProject do
       {:rustler, ">= 0.0.0", optional: true},
       {:rustler_precompiled, "~> 0.8"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
-      {:benchee, "~> 1.0", only: :dev},
+      {:benchee, "~> 1.0", only: [:dev, :test]},
+      # {:jason, "~> 1.4"},
       # Documentation Provider
       {:ex_doc, "~> 0.28.3", only: [:dev, :test], optional: true, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
