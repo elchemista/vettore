@@ -2,6 +2,7 @@ pub mod db;
 pub mod distances;
 pub mod hnsw;
 pub mod mmr;
+pub mod muvera;
 pub mod nifs;
 pub mod simd_utils;
 pub mod similarity;
