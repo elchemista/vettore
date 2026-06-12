@@ -1,322 +1,176 @@
 defmodule Vettore do
   @moduledoc """
-    The Vettore library is designed for fast, in-memory operations on vector (embedding) data.
+  Vettore vNext.
 
-    **All vectors (embeddings) are stored in a Rust data structure** (a `HashMap`), accessed via a shared resource
-    (using Rustler’s `ResourceArc` with a `Mutex`). Core operations include:
-
-      * Creating a collection :
-        A named set of embeddings with a fixed dimension and a chosen similarity metric (:cosine, :euclidean, :dot,
-        :hnsw, :binary).
-
-      * Inserting an embedding :
-        Add a new embedding (with ID, vector, and optional metadata) to a specific collection.
-
-      * Retrieving embeddings :
-        Fetch all embeddings from a collection or look up a single embedding by its unique ID.
-
-      * Similarity search :
-        Given a query vector, calculate a “score” for every embedding in the collection and return the top‑k results
-        (e.g. the smallest distances or largest similarities).
-
-      # Usage Example
-
-        db = Vettore.new()
-        :ok = Vettore.create_collection(db, "my_collection", 3, :euclidean)
-
-        # Insert an embedding via struct:
-        embedding = %Vettore.Embedding{value: "my_id or text", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}
-        :ok = Vettore.insert(db, "my_collection", embedding)
-
-        # Retrieve it back:
-        {:ok, returned_emb} = Vettore.get_by_value(db, "my_collection", "my_id")
-        IO.inspect(returned_emb.vector, label: "Retrieved vector")
-
-        # Perform a similarity search:
-        {:ok, top_results} = Vettore.similarity_search(db, "my_collection", [1.5, 1.5, 1.5], 2)
-        IO.inspect(top_results, label: "Top K search results")
+  The primary API is `Vettore.Collection`, where ETS owns collection state and
+  native code is reserved for optional acceleration. This module keeps a small
+  compatibility surface for older `Vettore.new/create_collection/insert/search`
+  workflows, implemented on top of the new ETS collections.
   """
 
-  alias Vettore.Nifs, as: N
-  alias Vettore.Embedding
+  alias Vettore.{Collection, Distance, Embedding}
 
-  @allowed_metrics ~w(euclidean cosine dot hnsw binary)a
-
-  @doc """
-  Allocate an **empty in‑memory DB** (owned by Rust).  Keep the returned
-  reference around – every other call expects it.
-  """
-  @spec new() :: reference()
-  def new, do: N.new_db()
-
-  @doc """
-  Create a collection.
-
-  * `distance` must be one of the atoms: `:euclidean`, `:cosine`, `:dot`,
-    `:hnsw`, or `:binary`.
-
-  # Examples
-
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean)
-      {:ok, "my_collection"}
-  """
-  @spec create_collection(
-          reference(),
-          String.t(),
-          pos_integer(),
-          atom(),
-          keyword()
-        ) :: {:ok, String.t()} | {:error, String.t()}
-  def create_collection(db, name, dimension, distance, opts \\ [])
-
-  def create_collection(db, name, dimension, distance, opts)
-      when is_reference(db) and
-             is_bitstring(name) and byte_size(name) > 0 and
-             is_integer(dimension) and dimension > 0 and
-             is_atom(distance) and distance in @allowed_metrics and
-             is_list(opts) do
-    keep? = Keyword.get(opts, :keep_embeddings, true)
-    N.create_collection(db, name, dimension, Atom.to_string(distance), keep?)
+  defmodule DB do
+    @moduledoc false
+    defstruct [:table]
   end
 
-  def create_collection(_, _, _, _, _),
-    do: {:error, "invalid arguments (see @doc for correct types)"}
-
   @doc """
-  Delete a collection.
-
-  # Examples
-
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.delete_collection("my_collection")
-      {:ok, "my_collection"}
+  Creates a lightweight ETS-backed compatibility database.
   """
-  @spec delete_collection(reference(), String.t()) ::
-          {:ok, String.t()} | {:error, String.t()}
-  def delete_collection(db, name)
-      when is_reference(db) and
-             is_bitstring(name) do
-    N.delete_collection(db, name)
+  @spec new() :: DB.t()
+  def new do
+    table =
+      :ets.new(:vettore_db, [
+        :set,
+        :public,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
+
+    %DB{table: table}
   end
 
-  def delete_collection(_, _),
-    do: {:error, "invalid db reference or collection name"}
-
   @doc """
-  Insert **one** `%Vettore.Embedding{}` into the collection.
-  Returns `{:ok, value}` on success or `{:error, reason}`.
-
-  # Examples
-
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}})
-      {:ok, "my_id"}
+  Compatibility collection creation.
   """
-  @spec insert(reference(), String.t(), Embedding.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def insert(db, collection, %Embedding{value: value, vector: vec, metadata: meta})
-      when is_reference(db) and is_bitstring(collection) and
-             is_bitstring(value) and is_list(vec) do
-    if Enum.all?(vec, &is_number/1) do
-      N.insert_embedding(db, collection, value, vec, sanitize_meta(meta))
-    else
-      {:error, "vector must be a list of numbers"}
+  def create_collection(db, name, dimensions, metric, opts \\ [])
+
+  def create_collection(%DB{} = db, name, dimensions, metric, opts)
+      when is_binary(name) and is_integer(dimensions) and dimensions > 0 do
+    metric = normalize_metric(metric)
+    index = Keyword.get(opts, :index, if(metric == :hnsw, do: :hnsw, else: :flat))
+    metric = if metric == :hnsw, do: :l2, else: metric
+
+    collection_opts = [
+      name: name,
+      dimensions: dimensions,
+      metric: metric,
+      index: index,
+      store: Keyword.get(opts, :store, :ets),
+      normalize: Keyword.get(opts, :normalize, default_normalize(metric)),
+      score: Keyword.get(opts, :score, :similarity)
+    ]
+
+    with {:ok, collection} <- Collection.new(collection_opts) do
+      true = :ets.insert(db.table, {{:collection, name}, collection})
+      {:ok, name}
     end
   end
 
-  def insert(_, _, _), do: {:error, "invalid arguments to insert/3"}
+  def create_collection(_db, _name, _dimensions, _metric, _opts), do: {:error, :invalid_arguments}
 
-  @doc """
-  Batch‑insert a list of embeddings. Reject elements that are not `%Vettore.Embedding{}`.
+  def delete_collection(%DB{} = db, name) when is_binary(name) do
+    true = :ets.delete(db.table, {:collection, name})
+    {:ok, name}
+  end
 
-  # Examples
+  def delete_collection(_db, _name), do: {:error, :invalid_arguments}
 
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.batch("my_collection", [%Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}])
-      {:ok, ["my_id"]}
-  """
-  @spec batch(reference(), String.t(), [Embedding.t()]) ::
-          {:ok, [String.t()]} | {:error, String.t()}
-  def batch(db, collection, embeddings) when is_list(embeddings) do
-    with true <- is_reference(db),
-         true <- is_bitstring(collection) and String.length(collection) > 0 do
-      tuples = embeddings_to_tuples(embeddings)
-      N.insert_embeddings(db, collection, tuples)
-    else
-      {:error, _} = err -> err
-      _ -> {:error, "invalid db reference or collection name"}
+  def insert(%DB{} = db, collection_name, %Embedding{} = embedding)
+      when is_binary(collection_name) do
+    with {:ok, collection} <- fetch_collection(db, collection_name),
+         :ok <- Collection.put(collection, embedding) do
+      {:ok, embedding.id || embedding.value}
     end
   end
 
-  def batch(_, _, _), do: {:error, "embeddings must be a list"}
+  def insert(_db, _collection_name, _embedding), do: {:error, :invalid_arguments}
 
-  @doc """
-  Fetch a single embedding by *value (ID)* and return it as `%Vettore.Embedding{}`.
-
-  # Examples
-
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_by_value("my_collection", "my_id")
-      {:ok, %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}}
-  """
-  @spec get_by_value(reference(), String.t(), String.t()) ::
-          {:ok, Embedding.t()} | {:error, String.t()}
-  def get_by_value(db, collection, value)
-      when is_reference(db) and is_bitstring(collection) and byte_size(collection) > 0 and
-             is_bitstring(value) do
-    with {:ok, {value, vec, meta}} <- N.get_embedding_by_value(db, collection, value) do
-      {:ok, %Embedding{value: value, vector: vec, metadata: meta}}
+  def batch(%DB{} = db, collection_name, embeddings)
+      when is_binary(collection_name) and is_list(embeddings) do
+    with {:ok, collection} <- fetch_collection(db, collection_name),
+         :ok <- Collection.put_many(collection, embeddings) do
+      {:ok, Enum.map(embeddings, &(&1.id || &1.value))}
     end
   end
 
-  def get_by_value(_, _, _), do: {:error, "invalid arguments to get_by_value/3"}
+  def batch(_db, _collection_name, _embeddings), do: {:error, :invalid_arguments}
 
-  @doc """
-  Fetch a single embedding by *vector* and return it as `%Vettore.Embedding{}`.
-
-  # Examples
-
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_by_vector("my_collection", [1.0, 2.0, 3.0])
-      {:ok, %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}}
-  """
-  @spec get_by_vector(reference(), String.t(), [number()]) ::
-          {:ok, Embedding.t()} | {:error, String.t()}
-  def get_by_vector(db, collection, vector)
-      when is_reference(db) and is_bitstring(collection) and byte_size(collection) > 0 and
-             is_list(vector) do
-    with {:ok, {value, vec, meta}} <- N.get_embedding_by_vector(db, collection, vector) do
-      {:ok, %Embedding{value: value, vector: vec, metadata: meta}}
+  def get_by_value(%DB{} = db, collection_name, id)
+      when is_binary(collection_name) and is_binary(id) do
+    with {:ok, collection} <- fetch_collection(db, collection_name) do
+      Collection.get(collection, id)
     end
   end
 
-  def get_by_vector(_, _, _), do: {:error, "invalid arguments to get_by_vector/3"}
+  def get_by_value(_db, _collection_name, _id), do: {:error, :invalid_arguments}
 
-  @doc """
-  Delete a single embedding.
+  def get_by_vector(%DB{} = db, collection_name, vector)
+      when is_binary(collection_name) and is_list(vector) do
+    with {:ok, collection} <- fetch_collection(db, collection_name),
+         {:ok, embeddings} <- Collection.all(collection),
+         {:ok, prepared} <- Collection.prepare_query(collection, vector) do
+      embeddings
+      |> Enum.find(fn embedding -> embedding.vector == prepared end)
+      |> case do
+        nil -> {:error, :not_found}
+        embedding -> {:ok, embedding}
+      end
+    end
+  end
 
-  # Examples
+  def get_by_vector(_db, _collection_name, _vector), do: {:error, :invalid_arguments}
 
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.delete("my_collection", "my_id")
-      {:ok, "my_id"}
-  """
-  @spec delete(reference(), String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def delete(db, collection, id)
-      when is_reference(db) and is_bitstring(collection) and is_bitstring(id),
-      do: N.delete_embedding_by_value(db, collection, id)
+  def delete(%DB{} = db, collection_name, id) when is_binary(collection_name) and is_binary(id) do
+    with {:ok, collection} <- fetch_collection(db, collection_name),
+         :ok <- Collection.delete(collection, id) do
+      {:ok, id}
+    end
+  end
 
-  def delete(_, _, _), do: {:error, "invalid arguments to delete/3"}
+  def delete(_db, _collection_name, _id), do: {:error, :invalid_arguments}
 
-  @doc """
-  Return all embeddings in *raw* form (`{value, vector, metadata}` tuples).
+  def get_all(%DB{} = db, collection_name) when is_binary(collection_name) do
+    with {:ok, collection} <- fetch_collection(db, collection_name),
+         {:ok, embeddings} <- Collection.all(collection) do
+      {:ok, Enum.map(embeddings, &{&1.id, &1.vector, &1.metadata})}
+    end
+  end
 
-  # Examples
+  def get_all(_db, _collection_name), do: {:error, :invalid_arguments}
 
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.get_all("my_collection")
-      {:ok, [{"my_id", [1.0, 2.0, 3.0], %{"note" => "hello"}}]}
-  """
-  @spec get_all(reference(), String.t()) ::
-          {:ok, [{String.t(), [number()], map() | nil}]} | {:error, String.t()}
-  def get_all(db, collection)
-      when is_reference(db) and is_bitstring(collection),
-      do: N.get_all_embeddings(db, collection)
+  def similarity_search(db, collection_name, query, opts \\ [])
 
-  def get_all(_, _), do: {:error, "invalid arguments to get_all/2"}
+  def similarity_search(%DB{} = db, collection_name, query, opts)
+      when is_binary(collection_name) and is_list(query) and is_list(opts) do
+    with {:ok, collection} <- fetch_collection(db, collection_name),
+         {:ok, results} <- Collection.search(collection, query, opts) do
+      {:ok, Enum.map(results, &{&1.id, &1.score})}
+    end
+  end
 
-  @doc """
-  Similarity / nearest‑neighbour search.
+  def similarity_search(_db, _collection_name, _query, _opts), do: {:error, :invalid_arguments}
 
-  Options:
-    * `:limit`  – number of results (default **10**)
-    * `:filter` – metadata map; only embeddings whose metadata contains all
-      key‑value pairs are considered.
+  def rerank(db, collection_name, initial, opts \\ [])
 
-  # Examples
-
-      iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.similarity_search("my_collection", [1.0, 2.0, 3.0], limit: 1)
-      {:ok, [{"my_id", 0.0}]}
-  """
-  @spec similarity_search(reference(), String.t(), [number()], keyword()) ::
-          {:ok, [{String.t(), float()}]} | {:error, String.t()}
-  def similarity_search(db, collection, query, opts \\ [])
-
-  def similarity_search(db, collection, query, opts)
-      when is_reference(db) and is_binary(collection) and byte_size(collection) > 0 and
-             is_list(query) and is_list(opts) do
+  def rerank(%DB{} = db, collection_name, initial, opts)
+      when is_binary(collection_name) and is_list(initial) and is_list(opts) do
     limit = Keyword.get(opts, :limit, 10)
-    filter = Keyword.get(opts, :filter)
+    alpha = Keyword.get(opts, :alpha, 0.5)
 
-    with :ok <- validate_limit(limit),
-         :ok <- validate_filter(opts) do
-      case filter do
-        nil -> N.similarity_search(db, collection, query, limit)
-        f -> N.similarity_search_with_filter(db, collection, query, limit, f)
-      end
-    else
-      {:error, msg} -> {:error, msg}
+    with {:ok, collection} <- fetch_collection(db, collection_name),
+         {:ok, embeddings} <- Collection.all(collection) do
+      pairs = Enum.map(embeddings, &{&1.id, &1.vector})
+      Distance.mmr_rerank(initial, pairs, collection.metric, alpha, limit)
     end
   end
 
-  def similarity_search(_, _, _, _),
-    do: {:error, "invalid arguments to similarity_search/4"}
+  def rerank(_db, _collection_name, _initial, _opts), do: {:error, :invalid_arguments}
 
-  @doc """
-   Re‑rank an existing result list with **Maximal Marginal Relevance**.
-
-   Options:
-     * `:limit` – desired output length (default **10**)
-     * `:alpha` – relevance‑diversity balance **0.0..1.0** (default **0.5**)
-
-   # Examples
-
-       iex> Vettore.new() |> Vettore.create_collection("my_collection", 3, :euclidean) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id2", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.insert("my_collection", %Vettore.Embedding{value: "my_id3", vector: [1.0, 2.0, 3.0], metadata: %{"note" => "hello"}}) |> Vettore.rerank("my_collection", [{"my_id", 0.0}, {"my_id2", 0.0}, {"my_id3", 0.0}], limit: 1)
-       {:ok, [{"my_id", 0.0}]}
-  """
-
-  @spec rerank(reference(), String.t(), [{String.t(), number()}], keyword()) ::
-          {:ok, [{String.t(), number()}]} | {:error, String.t()}
-  def rerank(db, collection, initial, opts \\ [])
-
-  def rerank(db, collection, initial, opts)
-      when is_reference(db) and is_binary(collection) and is_list(initial) and is_list(opts) do
-    # Validate initial list format
-    if Enum.all?(initial, &valid_initial?/1) do
-      limit = Keyword.get(opts, :limit, 10)
-      alpha = Keyword.get(opts, :alpha, 0.5)
-
-      # Validate limit and alpha
-      with :ok <- validate_limit(limit),
-           :ok <- validate_alpha(alpha) do
-        N.mmr_rerank(db, collection, initial, alpha, limit)
-      else
-        {:error, msg} -> {:error, msg}
-      end
-    else
-      {:error, "initial list must be [{String.t(), number()}]"}
+  defp fetch_collection(%DB{} = db, name) do
+    case :ets.lookup(db.table, {:collection, name}) do
+      [{{:collection, ^name}, collection}] -> {:ok, collection}
+      [] -> {:error, :collection_not_found}
     end
   end
 
-  def rerank(_, _, _, _), do: {:error, "invalid arguments to rerank/4"}
+  defp normalize_metric(:euclidean), do: :l2
+  defp normalize_metric(:binary), do: :hamming
+  defp normalize_metric(:dot), do: :inner_product
+  defp normalize_metric(:hnsw), do: :hnsw
+  defp normalize_metric(metric), do: metric
 
-  defp validate_limit(n) when is_integer(n) and n > 0, do: :ok
-  defp validate_limit(_), do: {:error, ":limit must be a positive integer"}
-
-  defp valid_initial?({id, score}) when is_binary(id) and is_number(score), do: true
-  defp valid_initial?(_), do: false
-
-  defp validate_alpha(a) when is_number(a) and a >= 0 and a <= 1, do: :ok
-  defp validate_alpha(_), do: {:error, ":alpha must be between 0.0 and 1.0"}
-
-  defp validate_filter(opts) do
-    case Keyword.fetch(opts, :filter) do
-      {:ok, f} when is_map(f) -> :ok
-      {:ok, _} -> {:error, ":filter must be a map"}
-      :error -> :ok
-    end
-  end
-
-  #  Helpers (private)
-  defp embeddings_to_tuples(list) do
-    for %Embedding{value: v, vector: vec, metadata: m} <- list, is_bitstring(v), is_list(vec) do
-      {v, vec, sanitize_meta(m)}
-    end
-  end
-
-  defp sanitize_meta(nil), do: nil
-  defp sanitize_meta(m) when is_map(m), do: m
-  defp sanitize_meta(_), do: nil
+  defp default_normalize(:cosine), do: :l2
+  defp default_normalize(_metric), do: :none
 end

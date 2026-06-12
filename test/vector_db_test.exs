@@ -1,84 +1,93 @@
 defmodule VettoreDBTest do
   use ExUnit.Case, async: true
-  alias Vettore.Embedding
 
-  @metrics [:euclidean, :cosine, :dot, :hnsw, :binary]
+  alias Vettore.{Collection, Embedding, Result}
 
-  for metric <- @metrics do
-    coll = "#{metric}_coll"
+  describe "Vettore.Collection" do
+    test "stores records in ETS and searches with explicit result semantics" do
+      assert {:ok, collection} =
+               Collection.new(
+                 name: :test_vectors,
+                 dimensions: 2,
+                 metric: :cosine,
+                 normalize: :l2,
+                 score: :raw
+               )
 
-    describe "#{metric} collection end-to-end" do
-      test "full workflow for #{metric}" do
-        coll = unquote(coll)
-        metric = unquote(metric)
+      assert :ok =
+               Collection.put_many(collection, [
+                 %Embedding{id: "right", vector: [1.0, 0.0], metadata: %{"tag" => "axis"}},
+                 %Embedding{id: "up", vector: [0.0, 1.0]},
+                 %Embedding{id: "left", vector: [-1.0, 0.0]}
+               ])
 
-        db = Vettore.new()
-        assert {:ok, ^coll} = Vettore.create_collection(db, coll, 3, metric)
+      assert {:error, :duplicate_id} =
+               Collection.put(collection, %Embedding{id: "right", vector: [0.5, 0.5]})
 
-        v1 = [1.0, 2.0, 3.0]
-        v2 = [-1.3, 3.2, 5.6]
+      assert {:ok, %Embedding{id: "right", metadata: %{"tag" => "axis"}}} =
+               Collection.get(collection, "right")
 
-        assert {:ok, "e1"} =
-                 Vettore.insert(db, coll, %Embedding{
-                   value: "e1",
-                   vector: v1,
-                   metadata: %{"tag" => "A"}
-                 })
+      assert {:ok, [%Result{id: "right", score: 1.0, distance: distance, metric: :cosine} | _]} =
+               Collection.search(collection, [1.0, 0.0], limit: 2)
 
-        # duplicate value → error
-        assert {:error, _} =
-                 Vettore.insert(db, coll, %Embedding{value: "e1", vector: v2, metadata: nil})
+      assert distance == 0.0
+    end
 
-        # duplicate vector → error
-        assert {:error, "duplicate vector"} =
-                 Vettore.insert(db, coll, %Embedding{value: "ex", vector: v1, metadata: nil})
+    test "duplicate vectors are allowed when ids are unique" do
+      {:ok, collection} = Collection.new(name: :dupes, dimensions: 2, metric: :l2)
 
-        # insert second distinct
-        assert {:ok, "e2"} =
-                 Vettore.insert(db, coll, %Embedding{value: "e2", vector: v2, metadata: nil})
+      assert :ok =
+               Collection.put_many(collection, [
+                 %Embedding{id: "a", vector: [1.0, 1.0]},
+                 %Embedding{id: "b", vector: [1.0, 1.0]}
+               ])
 
-        #  get_all
-        assert {:ok, all2} = Vettore.get_all(db, coll)
-        assert length(all2) == 2
+      assert {:ok, embeddings} = Collection.all(collection)
+      assert Enum.map(embeddings, & &1.id) |> Enum.sort() == ["a", "b"]
+    end
 
-        # get_by_value
-        assert {:ok, %Embedding{value: "e1", vector: _, metadata: %{"tag" => "A"}}} =
-                 Vettore.get_by_value(db, coll, "e1")
+    test "flat and hnsw boundaries return compatible result shapes" do
+      embeddings = [
+        %Embedding{id: "near", vector: [0.0, 0.0]},
+        %Embedding{id: "far", vector: [10.0, 10.0]}
+      ]
 
-        # get_by_vector
-        assert {:ok, %Embedding{value: "e2", vector: _, metadata: nil}} =
-                 Vettore.get_by_vector(db, coll, v2)
+      {:ok, flat} = Collection.new(name: :flat, dimensions: 2, metric: :l2, index: :flat)
+      {:ok, hnsw} = Collection.new(name: :hnsw, dimensions: 2, metric: :l2, index: :hnsw)
 
-        # batch insert two more distinct
-        # negative second element
-        v3 = [7.1, -8.2, 9.3]
-        # negatives in two positions
-        v4 = [-10.4, 11.5, -12.6]
+      assert :ok = Collection.put_many(flat, embeddings)
+      assert :ok = Collection.put_many(hnsw, embeddings)
 
-        b1 = %Embedding{value: "b1", vector: v3, metadata: nil}
-        b2 = %Embedding{value: "b2", vector: v4, metadata: %{"foo" => "bar"}}
-        assert {:ok, ["b1", "b2"]} = Vettore.batch(db, coll, [b1, b2])
-        assert {:ok, all4} = Vettore.get_all(db, coll)
-        assert length(all4) == 4
+      assert {:ok, [%Result{id: "near"}]} = Collection.search(flat, [0.0, 0.0], limit: 1)
+      assert {:ok, [%Result{id: "near"}]} = Collection.search(hnsw, [0.0, 0.0], limit: 1)
+    end
 
-        # delete one
-        assert {:ok, "e1"} = Vettore.delete(db, coll, "e1")
-        assert {:error, _} = Vettore.get_by_value(db, coll, "e1")
+    test "collections are isolated" do
+      {:ok, first} = Collection.new(name: :first, dimensions: 1, metric: :l2)
+      {:ok, second} = Collection.new(name: :second, dimensions: 1, metric: :l2)
 
-        # similarity_search limit 2
-        query = [1.0, 2.0, 3.0]
-        assert {:ok, results} = Vettore.similarity_search(db, coll, query, limit: 2)
-        assert length(results) <= 2
+      assert :ok = Collection.put(first, %Embedding{id: "same", vector: [1.0]})
+      assert :ok = Collection.put(second, %Embedding{id: "same", vector: [2.0]})
 
-        for {val, score} <- results do
-          assert is_binary(val)
-          assert is_float(score)
-        end
+      assert {:ok, %Embedding{vector: [1.0]}} = Collection.get(first, "same")
+      assert {:ok, %Embedding{vector: [2.0]}} = Collection.get(second, "same")
+    end
+  end
 
-        # rerank limit 2, alpha 0.5
-        assert {:ok, reranked} = Vettore.rerank(db, coll, results, limit: 2, alpha: 0.5)
-        assert length(reranked) <= 2
-      end
+  describe "compat Vettore API" do
+    test "legacy wrapper is backed by ETS collections" do
+      db = Vettore.new()
+      assert {:ok, "legacy"} = Vettore.create_collection(db, "legacy", 2, :cosine)
+      assert {:ok, "a"} = Vettore.insert(db, "legacy", %Embedding{value: "a", vector: [1.0, 0.0]})
+      assert {:ok, "b"} = Vettore.insert(db, "legacy", %Embedding{value: "b", vector: [0.0, 1.0]})
+
+      assert {:error, :duplicate_id} =
+               Vettore.insert(db, "legacy", %Embedding{value: "a", vector: [0.5, 0.5]})
+
+      assert {:ok, [{"a", score} | _]} =
+               Vettore.similarity_search(db, "legacy", [1.0, 0.0], limit: 1)
+
+      assert score == 1.0
     end
   end
 end

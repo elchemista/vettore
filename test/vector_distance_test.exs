@@ -1,115 +1,83 @@
 defmodule VettoreDistanceTest do
   use ExUnit.Case, async: true
+
   alias Vettore.Distance
 
-  @moduletag :distance
-
-  describe "euclidean/2" do
-    test "identical vectors → similarity = 1.0" do
-      v = [1.0, -2.3, 4.5]
-      assert {:ok, sim} = Distance.euclidean(v, v)
-      assert_in_delta sim, 1.0, 1.0e-6
+  describe "compute/4" do
+    test "l2 returns raw distance" do
+      assert {:ok, zero} = Distance.compute(:l2, [1.0, 2.0], [1.0, 2.0])
+      assert zero == 0.0
+      assert {:ok, five} = Distance.compute(:l2, [0.0, 0.0], [3.0, 4.0])
+      assert five == 5.0
     end
 
-    test "nonzero distance is mapped via 1/(1 + d)" do
-      # ‖[3,4]‖ = 5 → sim = 1/(1+5) = 1/6
-      assert {:ok, sim} = Distance.euclidean([0.0, 0.0], [3.0, 4.0])
-      assert_in_delta sim, 1.0 / 6.0, 1.0e-6
+    test "l2_squared returns squared distance" do
+      assert {:ok, 25.0} = Distance.compute(:l2_squared, [0.0, 0.0], [3.0, 4.0])
     end
 
-    test "dimension mismatch returns error" do
-      assert {:error, _} = Distance.euclidean([1.0], [1.0, 2.0])
-    end
-  end
-
-  describe "cosine/2" do
-    test "identical vectors → similarity = 1.0" do
-      v = [1.0, 2.0, 3.0]
-      assert {:ok, sim} = Distance.cosine(v, v)
-      assert_in_delta sim, 1.0, 1.0e-6
+    test "cosine returns raw cosine similarity" do
+      assert {:ok, same} = Distance.compute(:cosine, [1.0, 0.0], [1.0, 0.0], normalize: :l2)
+      assert {:ok, opposite} = Distance.compute(:cosine, [1.0, 0.0], [-1.0, 0.0], normalize: :l2)
+      assert {:ok, orthogonal} = Distance.compute(:cosine, [1.0, 0.0], [0.0, 1.0], normalize: :l2)
+      assert same == 1.0
+      assert opposite == -1.0
+      assert orthogonal == 0.0
     end
 
-    test "orthogonal vectors → similarity = 0.5" do
-      # [1,0]⋅[0,1]=0 → (0+1)/2 = 0.5
-      assert {:ok, sim} = Distance.cosine([1.0, 0.0], [0.0, 1.0])
-      assert_in_delta sim, 0.5, 1.0e-6
+    test "inner product and negative inner product" do
+      assert {:ok, 32.0} = Distance.compute(:inner_product, [1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
+
+      assert {:ok, -32.0} =
+               Distance.compute(:negative_inner_product, [1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
     end
 
-    test "dimension mismatch returns error" do
-      assert {:error, _} = Distance.cosine([1.0], [1.0, 2.0])
-    end
-  end
-
-  describe "dot_product/2" do
-    test "correct raw dot product" do
-      a = [1.0, 2.0, 3.0]
-      b = [4.0, 5.0, 6.0]
-      # 1*4 + 2*5 + 3*6 = 32
-      assert {:ok, 32.0} = Distance.dot_product(a, b)
+    test "additional distance metrics" do
+      assert {:ok, 7.0} = Distance.compute(:manhattan, [1.0, 2.0], [4.0, 6.0])
+      assert {:ok, 4.0} = Distance.compute(:chebyshev, [1.0, 2.0], [4.0, 6.0])
+      assert {:ok, 2} = Distance.compute(:hamming, [1, 0, 1], [0, 0, 0])
+      assert {:ok, jaccard} = Distance.compute(:jaccard, [1, 0, 1], [0, 1, 1])
+      assert_in_delta jaccard, 2 / 3, 1.0e-6
     end
 
     test "dimension mismatch returns error" do
-      assert {:error, _} = Distance.dot_product([1.0], [1.0, 2.0])
+      assert {:error, :dimension_mismatch} = Distance.compute(:l2, [1.0], [1.0, 2.0])
     end
   end
 
-  describe "compress_f32_vector/1 and hamming/2" do
-    test "compress then identical vectors → hamming = 0" do
-      v = [1.0, -2.0, 3.5, -4.5, 0.0]
-      bits = Distance.compress_f32_vector(v)
-      assert is_list(bits)
-      assert {:ok, 0} = Distance.hamming(bits, bits)
+  describe "normalize/2" do
+    test "l2 normalization handles normal and zero vectors" do
+      assert {:ok, [0.6, 0.8]} = Distance.normalize([3.0, 4.0], :l2)
+      assert {:ok, zeroes} = Distance.normalize([0.0, 0.0], :l2)
+      assert zeroes == [0.0, 0.0]
     end
 
-    test "different vectors → hamming > 0" do
-      bits1 = Distance.compress_f32_vector([1.0, 2.0, 3.0, 4.0])
-      bits2 = Distance.compress_f32_vector([-1.0, 2.0, -3.0, 4.0])
-      assert {:ok, d} = Distance.hamming(bits1, bits2)
-      assert d > 0
-    end
+    test "zscore and minmax normalization" do
+      assert {:ok, zscores} = Distance.normalize([1.0, 2.0, 3.0], :zscore)
+      assert_in_delta Enum.at(zscores, 0), -1.224744871391589, 1.0e-6
+      assert Enum.at(zscores, 1) == 0.0
+      assert_in_delta Enum.at(zscores, 2), 1.224744871391589, 1.0e-6
 
-    test "length mismatch returns error" do
-      assert {:error, _} = Distance.hamming([0], [0, 1])
+      assert {:ok, minmax} = Distance.normalize([2.0, 4.0, 6.0], :minmax)
+      assert minmax == [0.0, 0.5, 1.0]
     end
   end
 
-  describe "mmr_rerank/5" do
-    setup do
-      # simple 2D embeddings: a=(1,0), b=(0,1), c=(1,1)
-      embeddings = [
-        {"a", [1.0, 0.0]},
-        {"b", [0.0, 1.0]},
-        {"c", [1.0, 1.0]}
-      ]
-
-      # initial scores to some query
-      initial = [
-        {"a", 0.9},
-        {"b", 0.8},
-        {"c", 0.7}
-      ]
-
-      %{embeddings: embeddings, initial: initial}
+  describe "compat helpers" do
+    test "old named helpers use vNext raw semantics" do
+      assert {:ok, 5.0} = Distance.euclidean([0.0, 0.0], [3.0, 4.0])
+      assert {:ok, 1.0} = Distance.cosine([1.0, 0.0], [1.0, 0.0])
+      assert {:ok, 32.0} = Distance.dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
     end
 
-    test "alpha = 1.0 yields pure relevance order", %{initial: init, embeddings: emb} do
-      assert {:ok, out} = Distance.mmr_rerank(init, emb, "dot", 1.0, 2)
-      assert Enum.map(out, &elem(&1, 0)) == ["a", "b"]
+    test "compression and hamming" do
+      bits1 = Distance.compress_f32_vector([1.0, -2.0, 0.0])
+      bits2 = Distance.compress_f32_vector([-1.0, -2.0, 0.0])
+      assert bits1 == [1, 0, 1]
+      assert {:ok, 1} = Distance.hamming(bits1, bits2)
     end
 
-    test "alpha = 0.0 yields maximal diversity", %{initial: init, embeddings: emb} do
-      assert {:ok, out} = Distance.mmr_rerank(init, emb, "dot", 0.0, 2)
-      # after picking "a", the least‐similar to "a" is "b" (dot=0 vs c has dot=1)
-      assert Enum.map(out, &elem(&1, 0)) == ["a", "b"]
-    end
-
-    test "final_k > candidates yields all", %{initial: init, embeddings: emb} do
-      assert {:ok, out} = Distance.mmr_rerank(init, emb, "dot", 0.5, 5)
-      assert length(out) == 3
-    end
-
-    test "invalid distance returns error", %{initial: init, embeddings: emb} do
-      assert {:error, _} = Distance.mmr_rerank(init, emb, "unknown", 0.5, 2)
+    test "mmr rejects unknown metrics" do
+      assert {:error, _} = Distance.mmr_rerank([{"a", 0.9}], [{"a", [1.0]}], "unknown", 0.5, 1)
     end
   end
 end
