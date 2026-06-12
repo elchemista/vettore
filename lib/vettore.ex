@@ -5,17 +5,17 @@ defmodule Vettore do
     **All vectors (embeddings) are stored in a Rust data structure** (a `HashMap`), accessed via a shared resource
     (using Rustler’s `ResourceArc` with a `Mutex`). Core operations include:
 
-      - Creating a collection :
+      * Creating a collection :
         A named set of embeddings with a fixed dimension and a chosen similarity metric (:cosine, :euclidean, :dot,
         :hnsw, :binary).
 
-      - Inserting an embedding :
+      * Inserting an embedding :
         Add a new embedding (with ID, vector, and optional metadata) to a specific collection.
 
-      - Retrieving embeddings :
+      * Retrieving embeddings :
         Fetch all embeddings from a collection or look up a single embedding by its unique ID.
 
-      - Similarity search :
+      * Similarity search :
         Given a query vector, calculate a “score” for every embedding in the collection and return the top‑k results
         (e.g. the smallest distances or largest similarities).
 
