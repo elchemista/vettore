@@ -1,8 +1,6 @@
-pub mod db;
-pub mod distances;
-pub mod hnsw;
-pub mod mmr;
+#![allow(non_local_definitions)]
+
+mod distances;
+mod hnsw;
+mod muvera;
 pub mod nifs;
-pub mod simd_utils;
-pub mod similarity;
-pub mod types;

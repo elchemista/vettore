@@ -1,84 +1,280 @@
-use crate::simd_utils::load_f32x4;
-use crate::types::Distance;
+//! Native distance, similarity, normalization, and compression kernels.
+//!
+//! This module is intentionally algorithm-only. It owns no collection records
+//! and no database state; Elixir/ETS remains the canonical store. Hot dense
+//! vector kernels use portable SIMD through `wide` where it is useful and fall
+//! back to scalar tails for arbitrary dimensions.
 
-pub fn clamp_0_1(v: f32) -> f32 {
-    v.max(0.0).min(1.0)
+use wide::f32x8;
+
+#[derive(Clone, Copy)]
+pub enum Metric {
+    L2,
+    L2Squared,
+    Cosine,
+    InnerProduct,
+    NegativeInnerProduct,
+    Manhattan,
+    Chebyshev,
+    Hamming,
+    Jaccard,
 }
 
-pub fn simd_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    let len = a.len();
-    let mut i = 0;
-    let mut acc = 0.0;
-    while i + 4 <= len {
-        let va = load_f32x4(a, i);
-        let vb = load_f32x4(b, i);
-        acc += ((va - vb) * (va - vb)).reduce_add();
-        i += 4;
+/// Dispatches a named metric to its native kernel after checking dimensions.
+pub fn compute(metric: Metric, left: &[f32], right: &[f32]) -> Result<f32, String> {
+    if left.len() != right.len() {
+        return Err("dimension mismatch".to_string());
     }
-    while i < len {
-        let d = a[i] - b[i];
-        acc += d * d;
-        i += 1;
+
+    match metric {
+        Metric::L2 => Ok(l2(left, right)),
+        Metric::L2Squared => Ok(l2_squared(left, right)),
+        Metric::Cosine => Ok(dot(left, right)),
+        Metric::InnerProduct => Ok(dot(left, right)),
+        Metric::NegativeInnerProduct => Ok(-dot(left, right)),
+        Metric::Manhattan => Ok(manhattan(left, right)),
+        Metric::Chebyshev => Ok(chebyshev(left, right)),
+        Metric::Hamming => Ok(hamming(left, right)),
+        Metric::Jaccard => Ok(jaccard(left, right)),
     }
-    acc.sqrt()
 }
 
-pub fn simd_dot_product(a: &[f32], b: &[f32]) -> f32 {
-    let len = a.len();
-    let mut i = 0;
-    let mut acc = 0.0;
-    while i + 4 <= len {
-        let va = load_f32x4(a, i);
-        let vb = load_f32x4(b, i);
-        acc += (va * vb).reduce_add();
-        i += 4;
+/// Converts similarity metrics into ascending rank distances for indexes.
+pub fn rank_distance(metric: Metric, left: &[f32], right: &[f32]) -> Result<f32, String> {
+    match metric {
+        Metric::Cosine => Ok(1.0 - compute(metric, left, right)?),
+        Metric::InnerProduct => Ok(-compute(metric, left, right)?),
+        _ => compute(metric, left, right),
     }
-    while i < len {
-        acc += a[i] * b[i];
+}
+
+/// Euclidean distance derived from the SIMD squared L2 kernel.
+pub fn l2(left: &[f32], right: &[f32]) -> f32 {
+    l2_squared(left, right).sqrt()
+}
+
+/// Squared L2 distance using portable SIMD for dense f32 chunks.
+pub fn l2_squared(left: &[f32], right: &[f32]) -> f32 {
+    simd_l2_squared(left, right)
+}
+
+/// Inner product using portable SIMD for dense f32 chunks.
+pub fn dot(left: &[f32], right: &[f32]) -> f32 {
+    simd_dot(left, right)
+}
+
+/// Accumulates squared coordinate differences in 8-lane SIMD chunks.
+fn simd_l2_squared(left: &[f32], right: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let mut i = 0usize;
+
+    while i + 8 <= left.len() {
+        let va = f32x8::from([
+            left[i],
+            left[i + 1],
+            left[i + 2],
+            left[i + 3],
+            left[i + 4],
+            left[i + 5],
+            left[i + 6],
+            left[i + 7],
+        ]);
+        let vb = f32x8::from([
+            right[i],
+            right[i + 1],
+            right[i + 2],
+            right[i + 3],
+            right[i + 4],
+            right[i + 5],
+            right[i + 6],
+            right[i + 7],
+        ]);
+        let diff = va - vb;
+        acc += (diff * diff).reduce_add();
+        i += 8;
+    }
+
+    while i < left.len() {
+        let diff = left[i] - right[i];
+        acc += diff * diff;
         i += 1;
     }
     acc
 }
 
-pub fn compress_vector(v: &[f32]) -> Vec<u64> {
-    let mut out = Vec::new();
-    let mut cur = 0u64;
-    let mut fill = 0;
-    for &x in v {
-        cur <<= 1;
-        if x >= 0.0 {
-            cur |= 1;
-        }
-        fill += 1;
-        if fill == 64 {
-            out.push(cur);
-            cur = 0;
-            fill = 0;
-        }
+/// Accumulates products in 8-lane SIMD chunks.
+fn simd_dot(left: &[f32], right: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let mut i = 0usize;
+
+    while i + 8 <= left.len() {
+        let va = f32x8::from([
+            left[i],
+            left[i + 1],
+            left[i + 2],
+            left[i + 3],
+            left[i + 4],
+            left[i + 5],
+            left[i + 6],
+            left[i + 7],
+        ]);
+        let vb = f32x8::from([
+            right[i],
+            right[i + 1],
+            right[i + 2],
+            right[i + 3],
+            right[i + 4],
+            right[i + 5],
+            right[i + 6],
+            right[i + 7],
+        ]);
+        acc += (va * vb).reduce_add();
+        i += 8;
     }
-    if fill > 0 {
-        cur <<= 64 - fill;
-        out.push(cur);
+
+    while i < left.len() {
+        acc += left[i] * right[i];
+        i += 1;
     }
-    out
+    acc
 }
 
-pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
-    a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()
+/// Manhattan/L1 distance using SIMD absolute differences.
+fn manhattan(left: &[f32], right: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let mut i = 0usize;
+
+    while i + 8 <= left.len() {
+        let va = f32x8::from([
+            left[i],
+            left[i + 1],
+            left[i + 2],
+            left[i + 3],
+            left[i + 4],
+            left[i + 5],
+            left[i + 6],
+            left[i + 7],
+        ]);
+        let vb = f32x8::from([
+            right[i],
+            right[i + 1],
+            right[i + 2],
+            right[i + 3],
+            right[i + 4],
+            right[i + 5],
+            right[i + 6],
+            right[i + 7],
+        ]);
+        acc += (va - vb).abs().reduce_add();
+        i += 8;
+    }
+
+    while i < left.len() {
+        acc += (left[i] - right[i]).abs();
+        i += 1;
+    }
+
+    acc
 }
 
-pub fn score(query: &[f32], vector: &[f32], bin: Option<&Vec<u64>>, dist: Distance) -> f32 {
-    match dist {
-        Distance::Euclidean | Distance::Hnsw => {
-            clamp_0_1(1.0 / (1.0 + simd_euclidean_distance(query, vector)))
+/// Chebyshev/L-infinity distance.
+fn chebyshev(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| (*a - *b).abs())
+        .fold(0.0f32, f32::max)
+}
+
+/// Hamming distance over truthy/non-truthy float coordinates.
+fn hamming(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right)
+        .filter(|(a, b)| (**a != 0.0) != (**b != 0.0))
+        .count() as f32
+}
+
+/// Jaccard distance over truthy/non-truthy float coordinates.
+fn jaccard(left: &[f32], right: &[f32]) -> f32 {
+    let mut intersection = 0usize;
+    let mut union = 0usize;
+
+    for (a, b) in left.iter().zip(right) {
+        let left_truthy = *a != 0.0;
+        let right_truthy = *b != 0.0;
+        if left_truthy || right_truthy {
+            union += 1;
         }
-        Distance::Cosine => clamp_0_1((simd_dot_product(query, vector) + 1.0) / 2.0),
-        Distance::DotProduct => clamp_0_1(1.0 / (1.0 + f32::exp(-simd_dot_product(query, vector)))),
-        Distance::Binary => {
-            let qbits = compress_vector(query);
-            let ebits = bin.expect("binary column missing");
-            let frac = hamming_distance(&qbits, ebits) as f32 / query.len() as f32;
-            1.0 - clamp_0_1(frac)
+        if left_truthy && right_truthy {
+            intersection += 1;
         }
     }
+
+    if union == 0 {
+        0.0
+    } else {
+        1.0 - intersection as f32 / union as f32
+    }
+}
+
+/// L2-normalizes a vector. Zero vectors stay zero.
+pub fn normalize_l2(vector: Vec<f32>) -> Result<Vec<f32>, String> {
+    let norm = dot(&vector, &vector).sqrt();
+    if norm == 0.0 {
+        Ok(vec![0.0; vector.len()])
+    } else {
+        Ok(vector.into_iter().map(|value| value / norm).collect())
+    }
+}
+
+/// Z-score normalizes a vector using population variance.
+pub fn normalize_zscore(vector: Vec<f32>) -> Result<Vec<f32>, String> {
+    if vector.is_empty() {
+        return Ok(vector);
+    }
+
+    let mean = vector.iter().sum::<f32>() / vector.len() as f32;
+    let variance = vector
+        .iter()
+        .map(|value| {
+            let diff = *value - mean;
+            diff * diff
+        })
+        .sum::<f32>()
+        / vector.len() as f32;
+    let stddev = variance.sqrt();
+
+    if stddev == 0.0 {
+        Ok(vec![0.0; vector.len()])
+    } else {
+        Ok(vector
+            .into_iter()
+            .map(|value| (value - mean) / stddev)
+            .collect())
+    }
+}
+
+/// Min-max normalizes a vector into `[0.0, 1.0]`. Constant vectors become zero.
+pub fn normalize_minmax(vector: Vec<f32>) -> Result<Vec<f32>, String> {
+    if vector.is_empty() {
+        return Ok(vector);
+    }
+
+    let min = vector.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = vector.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if min == max {
+        Ok(vec![0.0; vector.len()])
+    } else {
+        Ok(vector
+            .into_iter()
+            .map(|value| (value - min) / (max - min))
+            .collect())
+    }
+}
+
+/// Encodes vector signs as integer bits for compatibility helpers.
+pub fn compress_sign_bits(vector: &[f32]) -> Vec<u64> {
+    vector
+        .iter()
+        .map(|value| u64::from(*value >= 0.0))
+        .collect()
 }

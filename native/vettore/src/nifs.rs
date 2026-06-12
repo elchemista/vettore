@@ -1,249 +1,215 @@
-use std::collections::HashMap;
+//! Rustler NIF boundary for Vettore's native algorithms.
+//!
+//! Keep this file thin: each NIF should expose a named algorithm operation and
+//! delegate the work to focused modules such as `distances`, `hnsw`, or
+//! `muvera`.
 
-use rustler::{Env, ResourceArc, Term};
+use rustler::{NifResult, ResourceArc};
 
-use crate::distances::{
-    clamp_0_1, compress_vector, hamming_distance, simd_dot_product, simd_euclidean_distance,
-};
-use crate::simd_utils::normalize_vec;
+use crate::distances::Metric;
+use crate::hnsw::{HnswIndex, HnswResource};
 
-use crate::db::VettoreDB;
-use crate::mmr::mmr_rerank as algo_mmr_rerank;
-use crate::similarity::similarity_search as algo_sim_search;
-use crate::types::{Distance, Metadata};
-
-pub struct DBResource(pub VettoreDB);
-impl rustler::Resource for DBResource {}
-
-/* handy macro – just give me &VettoreDB */
-macro_rules! db_ref {
-    ($arc:expr) => {
-        &$arc.0
-    };
-}
-
-/* tiny helper for uniform error */
-macro_rules! badarg {
-    ($msg:expr) => {
-        Err(format!("[vettore] {}", $msg))
-    };
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes L2/Euclidean distance between two f32 vectors.
+fn l2_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(Metric::L2, &left, &right))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn new_db() -> ResourceArc<DBResource> {
-    ResourceArc::new(DBResource(VettoreDB::default()))
-}
-
-/* collection management */
-#[rustler::nif(schedule = "DirtyCpu")]
-fn create_collection(
-    db: ResourceArc<DBResource>,
-    name: String,
-    dim: usize,
-    distance: String,
-    keep_embeddings: bool,
-) -> Result<String, String> {
-    db_ref!(db).create_collection(name.clone(), dim, &distance, keep_embeddings)?;
-    Ok(name)
+/// Computes squared L2 distance without the final square root.
+fn l2_squared_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(Metric::L2Squared, &left, &right))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn delete_collection(db: ResourceArc<DBResource>, name: String) -> Result<String, String> {
-    db_ref!(db).delete_collection(&name)?;
-    Ok(name)
+/// Computes raw cosine similarity; callers normalize vectors when required.
+fn cosine_similarity(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(Metric::Cosine, &left, &right))
 }
 
-/* single insert */
 #[rustler::nif(schedule = "DirtyCpu")]
-fn insert_embedding(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    value: String,
+/// Computes raw inner product.
+fn inner_product(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(
+        Metric::InnerProduct,
+        &left,
+        &right,
+    ))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes negative inner product for distance-style ordering.
+fn negative_inner_product(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(
+        Metric::NegativeInnerProduct,
+        &left,
+        &right,
+    ))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes Manhattan/L1 distance.
+fn manhattan_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(Metric::Manhattan, &left, &right))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes Chebyshev/L-infinity distance.
+fn chebyshev_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(Metric::Chebyshev, &left, &right))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes Hamming distance over truthy/non-truthy coordinates.
+fn hamming_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(Metric::Hamming, &left, &right))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes Jaccard distance over truthy/non-truthy coordinates.
+fn jaccard_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::compute(Metric::Jaccard, &left, &right))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// L2-normalizes a vector in native code.
+fn normalize_l2(vector: Vec<f32>) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::distances::normalize_l2(vector))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Z-score normalizes a vector in native code.
+fn normalize_zscore(vector: Vec<f32>) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::distances::normalize_zscore(vector))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Min-max normalizes a vector in native code.
+fn normalize_minmax(vector: Vec<f32>) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::distances::normalize_minmax(vector))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Compresses signs into integer bits for compatibility with old helpers.
+fn compress_sign_bits(vector: Vec<f32>) -> Vec<u64> {
+    crate::distances::compress_sign_bits(&vector)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Creates a native HNSW graph ordered by L2 distance.
+fn hnsw_new_l2() -> ResourceArc<HnswResource> {
+    hnsw_new(Metric::L2)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Creates a native HNSW graph ordered by cosine rank distance.
+fn hnsw_new_cosine() -> ResourceArc<HnswResource> {
+    hnsw_new(Metric::Cosine)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Creates a native HNSW graph ordered by inner-product rank distance.
+fn hnsw_new_inner_product() -> ResourceArc<HnswResource> {
+    hnsw_new(Metric::InnerProduct)
+}
+
+/// Allocates the Rust resource that owns only ANN graph state.
+fn hnsw_new(metric: Metric) -> ResourceArc<HnswResource> {
+    ResourceArc::new(HnswResource(std::sync::RwLock::new(HnswIndex::new(metric))))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Inserts or replaces one vector in the native HNSW graph.
+fn hnsw_insert(
+    index: ResourceArc<HnswResource>,
+    id: String,
     vector: Vec<f32>,
-    metadata: Option<Metadata>,
-) -> Result<String, String> {
-    db_ref!(db).insert(&col_name, value.clone(), vector, metadata)?;
-    Ok(value)
-}
-
-/* batch insert (each insert locks only its own collection) */
-#[rustler::nif(schedule = "DirtyCpu")]
-fn insert_embeddings(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    embeddings: Vec<(String, Vec<f32>, Option<Metadata>)>,
-) -> Result<Vec<String>, String> {
-    let db_ref = db_ref!(db);
-    let mut out = Vec::with_capacity(embeddings.len());
-    for (value, vec, md) in embeddings {
-        db_ref.insert(&col_name, value.clone(), vec, md)?;
-        out.push(value);
-    }
-    Ok(out)
-}
-
-/* look-ups */
-#[rustler::nif(schedule = "DirtyCpu")]
-fn get_embedding_by_value(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    value: String,
-) -> Result<(String, Vec<f32>, Option<Metadata>), String> {
-    let rec = db_ref!(db).get_by_value(&col_name, &value)?;
-    Ok((rec.value, rec.vector, rec.metadata))
+) -> Result<(), String> {
+    let mut guard = index
+        .0
+        .write()
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.insert(id, vector)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn get_embedding_by_vector(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    vector: Vec<f32>,
-) -> Result<(String, Vec<f32>, Option<Metadata>), String> {
-    let rec = db_ref!(db).get_by_vector(&col_name, &vector)?;
-    Ok((rec.value, rec.vector, rec.metadata))
+/// Removes one vector from the native HNSW graph.
+fn hnsw_delete(index: ResourceArc<HnswResource>, id: String) -> Result<(), String> {
+    let mut guard = index
+        .0
+        .write()
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.delete(&id);
+    Ok(())
 }
 
-/* dump */
 #[rustler::nif(schedule = "DirtyCpu")]
-fn get_all_embeddings(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-) -> Result<Vec<(String, Vec<f32>, Option<Metadata>)>, String> {
-    let recs = db_ref!(db).get_all(&col_name)?;
-    Ok(recs
-        .into_iter()
-        .map(|r| (r.value, r.vector, r.metadata))
-        .collect())
-}
-
-/* similarity search – uses read-guard */
-#[rustler::nif(schedule = "DirtyCpu")]
-fn similarity_search(
-    db: ResourceArc<DBResource>,
-    col_name: String,
+/// Searches the native HNSW graph and returns external ids plus raw metric values.
+fn hnsw_search(
+    index: ResourceArc<HnswResource>,
     query: Vec<f32>,
-    k: usize,
+    limit: usize,
 ) -> Result<Vec<(String, f32)>, String> {
-    let arc = db_ref!(db).collection(&col_name)?;
-    let guard = arc
+    let guard = index
+        .0
         .read()
-        .map_err(|_| "collection lock poisoned".to_string())?;
-    algo_sim_search(&*guard, &query, k)
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.search(&query, limit)
 }
 
-/* delete one */
 #[rustler::nif(schedule = "DirtyCpu")]
-fn delete_embedding_by_value(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    value: String,
-) -> Result<String, String> {
-    db_ref!(db).delete_by_value(&col_name, &value)?;
-    Ok(value)
-}
-
-/* MMR rerank (needs vectors of the initial hits) */
-#[rustler::nif(schedule = "DirtyCpu")]
-fn mmr_rerank(
-    db: ResourceArc<DBResource>,
-    col_name: String,
-    initial: Vec<(String, f32)>,
-    alpha: f32,
-    final_k: usize,
-) -> Result<Vec<(String, f32)>, String> {
-    let arc = db_ref!(db).collection(&col_name)?;
-    let guard = arc
-        .read()
-        .map_err(|_| "collection lock poisoned".to_string())?;
-
-    let mut embed_map: HashMap<String, Vec<f32>> = HashMap::with_capacity(initial.len());
-    for (val, _) in &initial {
-        if let Some(rec) = guard.get_by_value(val) {
-            embed_map.insert(val.clone(), rec.vector);
-        }
-    }
-
-    Ok(algo_mmr_rerank(
-        &initial,
-        &embed_map,
-        guard.distance,
-        alpha,
-        final_k,
+/// Encodes query-side MUVERA/FDE vectors by summing projected partition vectors.
+fn muvera_encode_query(
+    vectors: Vec<Vec<f32>>,
+    dimension: usize,
+    num_repetitions: usize,
+    num_simhash_projections: usize,
+    seed: u64,
+    projection_dimension: usize,
+    final_projection_dimension: Option<usize>,
+) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::muvera::encode(
+        vectors,
+        crate::muvera::Config {
+            dimension,
+            num_repetitions,
+            num_simhash_projections,
+            seed,
+            projection_dimension,
+            final_projection_dimension,
+        },
+        crate::muvera::Mode::Query,
     ))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn euclidean_distance(a: Vec<f32>, b: Vec<f32>) -> Result<f32, String> {
-    if a.len() != b.len() {
-        return badarg!("dimension mismatch");
-    }
-    Ok(clamp_0_1(1.0 / (1.0 + simd_euclidean_distance(&a, &b))))
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn cosine_similarity(a: Vec<f32>, b: Vec<f32>) -> Result<f32, String> {
-    if a.len() != b.len() {
-        return badarg!("dimension mismatch");
-    }
-    let sim = (simd_dot_product(&normalize_vec(&a), &normalize_vec(&b)) + 1.0) / 2.0;
-    Ok(clamp_0_1(sim))
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn dot_product(a: Vec<f32>, b: Vec<f32>) -> Result<f32, String> {
-    if a.len() != b.len() {
-        return badarg!("dimension mismatch");
-    }
-    Ok(simd_dot_product(&a, &b))
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn hamming_distance_bits(a: Vec<u64>, b: Vec<u64>) -> Result<u32, String> {
-    if a.len() != b.len() {
-        return badarg!("length mismatch");
-    }
-    Ok(hamming_distance(&a, &b))
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn compress_f32_vector(v: Vec<f32>) -> Vec<u64> {
-    compress_vector(&v)
-}
-
-/* distance string → enum */
-fn distance_from_str(s: &str) -> Result<Distance, String> {
-    match s.to_lowercase().as_str() {
-        "euclidean" | "l2" => Ok(Distance::Euclidean),
-        "cosine" => Ok(Distance::Cosine),
-        "dot" | "dotproduct" => Ok(Distance::DotProduct),
-        "binary" | "hamming" => Ok(Distance::Binary),
-        "hnsw" => Ok(Distance::Hnsw),
-        _ => badarg!("unknown distance"),
-    }
-}
-
-/* NIF form of standalone MMR (no DB involved) */
-#[rustler::nif(schedule = "DirtyCpu")]
-fn mmr_rerank_embeddings(
-    initial: Vec<(String, f32)>,
-    embeddings: Vec<(String, Vec<f32>)>,
-    distance: String,
-    alpha: f32,
-    final_k: usize,
-) -> Result<Vec<(String, f32)>, String> {
-    let dist = distance_from_str(&distance)?;
-    Ok(algo_mmr_rerank(
-        &initial,
-        &embeddings.into_iter().collect(),
-        dist,
-        alpha,
-        final_k,
+/// Encodes document-side MUVERA/FDE vectors by averaging projected partition vectors.
+fn muvera_encode_document(
+    vectors: Vec<Vec<f32>>,
+    dimension: usize,
+    num_repetitions: usize,
+    num_simhash_projections: usize,
+    seed: u64,
+    projection_dimension: usize,
+    final_projection_dimension: Option<usize>,
+) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::muvera::encode(
+        vectors,
+        crate::muvera::Config {
+            dimension,
+            num_repetitions,
+            num_simhash_projections,
+            seed,
+            projection_dimension,
+            final_projection_dimension,
+        },
+        crate::muvera::Mode::Document,
     ))
 }
 
-/* on-load */
-fn on_load(env: Env, _info: Term) -> bool {
-    env.register::<DBResource>().is_ok()
+/// Registers Rust resources with the BEAM VM when the NIF library loads.
+fn load(env: rustler::Env, _term: rustler::Term) -> bool {
+    rustler::resource!(HnswResource, env)
 }
 
-rustler::init!("Elixir.Vettore.Nifs", load = on_load);
+rustler::init!("Elixir.Vettore.Nifs", load = load);

@@ -6,9 +6,13 @@ defmodule Vettore.Index do
   store. Implementations must return `Vettore.Result` structs.
   """
 
-  alias Vettore.Collection
+  alias Vettore.{Collection, Embedding}
   alias Vettore.Result
 
+  @callback new(atom()) :: {:ok, term()} | {:error, term()}
+  @callback put(Collection.t(), Embedding.t()) :: :ok | {:error, term()}
+  @callback put_many(Collection.t(), [Embedding.t()]) :: :ok | {:error, term()}
+  @callback delete(Collection.t(), String.t()) :: :ok | {:error, term()}
   @callback search(Collection.t(), [number()], keyword()) ::
               {:ok, [Result.t()]} | {:error, term()}
 end

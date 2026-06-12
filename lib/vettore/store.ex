@@ -18,5 +18,8 @@ defmodule Vettore.Store do
   @callback get(state(), id()) :: {:ok, Embedding.t()} | {:error, term()}
   @callback delete(state(), id()) :: :ok | {:error, term()}
   @callback all(state()) :: {:ok, [Embedding.t()]} | {:error, term()}
+  @callback fold(state(), acc, (Embedding.t(), acc -> acc)) :: {:ok, acc} when acc: term()
   @callback count(state()) :: non_neg_integer()
+  @callback snapshot(state(), Path.t()) :: :ok | {:error, term()}
+  @callback load_snapshot(Path.t()) :: {:ok, {state(), config()}} | {:error, term()}
 end

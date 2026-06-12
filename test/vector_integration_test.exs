@@ -1,14 +1,7 @@
 defmodule VettoreIntegrationTest do
   use ExUnit.Case, async: true
 
-  alias Vettore.{Encoding.Muvera, MultiVector, Postgres}
-
-  test "postgres helpers expose pgvector operators and normalization" do
-    assert Postgres.operator(:l2) == "<->"
-    assert Postgres.operator(:inner_product) == "<#>"
-    assert Postgres.operator(:cosine) == "<=>"
-    assert {:ok, [0.6, 0.8]} = Postgres.normalize([3.0, 4.0], :l2)
-  end
+  alias Vettore.{Encoding.Muvera, MultiVector}
 
   test "multi-vector chamfer sums best per-query matches" do
     query = [[1.0, 0.0], [0.0, 1.0]]
@@ -29,5 +22,20 @@ defmodule VettoreIntegrationTest do
     assert length(query_fde) == 2
     assert length(doc_fde) == 2
     assert query_fde != doc_fde
+  end
+
+  test "muvera NIF is loaded and callable directly" do
+    assert {:ok, fde} =
+             Vettore.Nifs.muvera_encode_query(
+               [[1.0, 0.0], [0.0, 1.0]],
+               2,
+               1,
+               0,
+               42,
+               2,
+               nil
+             )
+
+    assert fde == [1.0, 1.0]
   end
 end

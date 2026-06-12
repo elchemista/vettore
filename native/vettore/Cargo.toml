@@ -1,6 +1,6 @@
 [package]
 name = "vettore"
-version = "0.2.2"
+version = "0.3.0"
 authors = []
 edition = "2021"
 
@@ -10,13 +10,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-bitvec = "1.0.1"
-parking_lot = "0.12.3"
-dashmap = "5.5.3"
-rayon = { version = "1.10.0", optional = true }
-rand = { version = "0.8.0" }
 rustler = "0.36.1"
-smallvec = "1.15.0"
 wide = "0.7.32"
 
 [profile.release]
@@ -24,7 +18,3 @@ codegen-units = 1
 lto = true
 panic = 'abort'
 strip = "debuginfo"
-
-[features]
-default = ["parallel"]
-parallel = ["rayon"]   # enable with `--features parallel`

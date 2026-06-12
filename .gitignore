@@ -19,6 +19,10 @@
 /.elixir_ls/
 /.elixir-tools/
 
+GUIDELINE.md
+
+SKILL.md
+
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
 
@@ -35,3 +39,4 @@ vector-*.tar
 
 # Rust binary artifacts
 /target/
+/priv/native/

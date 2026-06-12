@@ -1,28 +1,124 @@
 defmodule Vettore.Nifs do
   @moduledoc false
 
-  # vNext keeps Rust optional. This module remains as a compatibility namespace
-  # for callers that reached into the old NIF layer directly.
+  use Rustler, otp_app: :vettore, crate: "vettore"
 
-  def new_db, do: {:error, :native_db_removed}
-  def create_collection(_db, _name, _dim, _dist, _keep?), do: {:error, :native_db_removed}
-  def delete_collection(_db, _name), do: {:error, :native_db_removed}
-  def insert_embedding(_db, _col, _id, _vec, _meta \\ nil), do: {:error, :native_db_removed}
-  def insert_embeddings(_db, _col, _embeddings), do: {:error, :native_db_removed}
-  def get_embedding_by_value(_db, _col, _id), do: {:error, :native_db_removed}
-  def get_embedding_by_vector(_db, _col, _vec), do: {:error, :native_db_removed}
-  def get_all_embeddings(_db, _col), do: {:error, :native_db_removed}
-  def delete_embedding_by_value(_db, _col, _id), do: {:error, :native_db_removed}
-  def similarity_search(_db, _col, _q, _k), do: {:error, :native_db_removed}
-  def similarity_search_with_filter(_db, _col, _q, _k, _filter), do: {:error, :native_db_removed}
-  def mmr_rerank(_db, _col, _init, _alpha, _k), do: {:error, :native_db_removed}
+  @doc false
+  @spec l2_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def l2_distance(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
 
-  def euclidean_distance(left, right), do: Vettore.Distance.euclidean(left, right)
-  def cosine_similarity(left, right), do: Vettore.Distance.cosine(left, right)
-  def dot_product(left, right), do: Vettore.Distance.dot_product(left, right)
-  def hamming_distance_bits(left, right), do: Vettore.Distance.hamming(left, right)
-  def compress_f32_vector(vector), do: Vettore.Distance.compress_f32_vector(vector)
+  @doc false
+  @spec l2_squared_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def l2_squared_distance(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
 
-  def mmr_rerank_embeddings(initial, embeddings, distance, alpha, k),
-    do: Vettore.Distance.mmr_rerank(initial, embeddings, distance, alpha, k)
+  @doc false
+  @spec cosine_similarity([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def cosine_similarity(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec inner_product([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def inner_product(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec negative_inner_product([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def negative_inner_product(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec manhattan_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def manhattan_distance(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec chebyshev_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def chebyshev_distance(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hamming_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def hamming_distance(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec jaccard_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
+  def jaccard_distance(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec normalize_l2([float()]) :: {:ok, [float()]} | {:error, String.t()}
+  def normalize_l2(_vector), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec normalize_zscore([float()]) :: {:ok, [float()]} | {:error, String.t()}
+  def normalize_zscore(_vector), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec normalize_minmax([float()]) :: {:ok, [float()]} | {:error, String.t()}
+  def normalize_minmax(_vector), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec compress_sign_bits([float()]) :: [non_neg_integer()]
+  def compress_sign_bits(_vector), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_new_l2() :: reference()
+  def hnsw_new_l2, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_new_cosine() :: reference()
+  def hnsw_new_cosine, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_new_inner_product() :: reference()
+  def hnsw_new_inner_product, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_insert(reference(), String.t(), [float()]) :: :ok | {:ok, {}} | {:error, String.t()}
+  def hnsw_insert(_index, _id, _vector), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_delete(reference(), String.t()) :: :ok | {:ok, {}} | {:error, String.t()}
+  def hnsw_delete(_index, _id), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_search(reference(), [float()], pos_integer()) ::
+          {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def hnsw_search(_index, _query, _limit), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec muvera_encode_query(
+          [[float()]],
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          pos_integer(),
+          pos_integer() | nil
+        ) :: {:ok, [float()]} | {:error, String.t()}
+  def muvera_encode_query(
+        _vectors,
+        _dimension,
+        _num_repetitions,
+        _num_simhash_projections,
+        _seed,
+        _projection_dimension,
+        _final_projection_dimension
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec muvera_encode_document(
+          [[float()]],
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          pos_integer(),
+          pos_integer() | nil
+        ) :: {:ok, [float()]} | {:error, String.t()}
+  def muvera_encode_document(
+        _vectors,
+        _dimension,
+        _num_repetitions,
+        _num_simhash_projections,
+        _seed,
+        _projection_dimension,
+        _final_projection_dimension
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 end

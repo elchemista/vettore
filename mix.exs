@@ -8,7 +8,7 @@ defmodule Vettore.MixProject do
       app: :vettore,
       name: "Vettore",
       version: @version,
-      elixir: "~> 1.18",
+      elixir: "~> 1.19",
       build_embedded: Mix.env() == :prod,
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -34,7 +34,7 @@ defmodule Vettore.MixProject do
   end
 
   defp description() do
-    "Vettore: ETS-native vector collections and distance utilities for Elixir"
+    "Adaptive vector search for Elixir with ETS storage and native acceleration"
   end
 
   defp package() do
@@ -46,6 +46,8 @@ defmodule Vettore.MixProject do
              mix.exs
              README.md
              LICENSE
+             native/vettore/Cargo.toml
+             native/vettore/src
       ),
       licenses: ["Apache-2.0"],
       links: %{
@@ -57,6 +59,7 @@ defmodule Vettore.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:rustler, "~> 0.36.1"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.0", only: :dev},
       # Documentation Provider
