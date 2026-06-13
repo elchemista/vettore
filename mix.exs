@@ -46,6 +46,7 @@ defmodule Vettore.MixProject do
              mix.exs
              README.md
              LICENSE
+             checksum-*.exs
              native/vettore/Cargo.toml
              native/vettore/src
       ),

@@ -3,11 +3,16 @@ defmodule Vettore.Nifs do
 
   version = Mix.Project.config()[:version]
 
+  force_build? =
+    Mix.env() in [:dev, :test] or
+      System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"]
+
   use RustlerPrecompiled,
     otp_app: :vettore,
     crate: "vettore",
     base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
-    force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
+    force_build: force_build?,
+    nif_versions: ["2.15", "2.16"],
     version: version
 
   @doc false
