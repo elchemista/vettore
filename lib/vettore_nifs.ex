@@ -1,7 +1,14 @@
 defmodule Vettore.Nifs do
   @moduledoc false
 
-  use Rustler, otp_app: :vettore, crate: "vettore"
+  version = Mix.Project.config()[:version]
+
+  use RustlerPrecompiled,
+    otp_app: :vettore,
+    crate: "vettore",
+    base_url: "https://github.com/elchemista/vettore/releases/download/v#{version}",
+    force_build: System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"],
+    version: version
 
   @doc false
   @spec l2_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
