@@ -1,27 +1,45 @@
 # Vettore
 
-Vettore is an ETS-native vector toolkit for Elixir.
+Vettore is a small vector toolkit for Elixir that keeps your data in ETS and
+uses Rust only where it helps: distance kernels, normalization, HNSW search, and
+MUVERA-style encodings.
 
-It provides:
+Earlier versions leaned toward a Rust-owned in-memory database. That was fast,
+but it made the library feel less like an Elixir tool and more like an external
+engine with Elixir bindings. Vettore now chooses ETS as the canonical store on
+purpose:
 
-- ETS-backed vector collections
+- records are visible and easy to inspect from Elixir
+- supervision, snapshots, and ownership stay simple
+- metadata and application values live beside vectors naturally
+- native indexes can be rebuilt from canonical ETS state
+- the public API stays small, predictable, and BEAM-friendly
+
+The important idea is simple:
+
+- Elixir owns the records.
+- ETS is the source of truth.
+- Rust accelerates the expensive parts.
+- Search results say clearly what is a score and what is a distance.
+
+That choice is not the absolute fastest possible architecture. A fully
+Rust-owned vector database can beat ETS for large exact scans, but Vettore
+optimizes for a different kind of usefulness: simple integration with ordinary
+Elixir systems, with Rust kept as acceleration rather than ownership.
+
+## What You Get
+
+- ETS-backed collections
 - exact flat search
-- optional native HNSW approximate search
-- Matryoshka-style funnel search and binary quantized candidate search
-- named distance and similarity functions
-- vector normalization
-- explicit scoring semantics
-- multi-vector Chamfer/MaxSim scoring
-- MUVERA-style fixed-dimensional encodings through Rust NIFs
-- a small compatibility layer for the old `Vettore.new/0` API
-
-The vNext architecture is intentionally simple:
-
-- Elixir and ETS own canonical collection state.
-- Rust is used for acceleration only.
-- Indexes are separate from storage.
-- Metrics are separate from indexes.
-- Search results expose both score and distance semantics explicitly.
+- native HNSW approximate search
+- Matryoshka-style funnel search
+- binary quantized candidate search
+- hybrid candidate pipelines with exact or multi-vector reranking
+- ColBERT-style late interaction over multi-vector records
+- MUVERA-style fixed-dimensional encodings
+- named distance, similarity, normalization, and MMR helpers
+- a top-level `Vettore.*` API, plus compatibility wrappers for the older
+  `Vettore.new/0` database-style API
 
 ## Installation
 
@@ -33,399 +51,124 @@ def deps do
 end
 ```
 
-Vettore uses Rust NIFs through `rustler`, so local compilation requires a Rust
-toolchain.
+## Quick Start
 
-For local development:
-
-```bash
-mix deps.get
-mix test
-```
-
-## Architecture
-
-Vettore has three main layers.
-
-### Store
-
-The store owns records and collection metadata.
-
-The default store is:
-
-```elixir
-Vettore.Store.ETS
-```
-
-ETS is the canonical source of truth. Records, ids, metadata, and normalized
-vectors live there. Native resources are acceleration structures, not the
-database.
-
-Keeping the full store in ETS is slower than moving the whole database into
-Rust, especially for exact scans over many records. This is an intentional
-tradeoff: Vettore favors simple ownership, observability, snapshotting, and
-natural integration with the Elixir ecosystem and BEAM VM. Rust is still used
-where it pays off most, but the canonical data stays in Elixir.
-
-ETS compression can be enabled per collection:
+Create a collection, insert a few records, and search:
 
 ```elixir
 {:ok, collection} =
-  Vettore.Collection.new(
-    name: :compressed_documents,
-    dimensions: 384,
-    metric: :cosine,
-    normalize: :l2,
-    compressed: true
-  )
-```
-
-This passes `:compressed` to the underlying ETS table. It may reduce memory for
-large records at the cost of extra CPU on reads and writes.
-
-ETS collections can be snapshotted to disk and loaded later:
-
-```elixir
-:ok = Vettore.Collection.snapshot(collection, "priv/snapshots/documents.ets")
-
-{:ok, loaded} =
-  Vettore.Collection.load_snapshot("priv/snapshots/documents.ets")
-```
-
-Snapshots store the canonical ETS table: records, metadata, normalized vectors,
-and collection config. Native index state is not stored. When a snapshot is
-loaded, Vettore rebuilds the configured index from ETS records.
-
-You can override the loaded index:
-
-```elixir
-{:ok, loaded} =
-  Vettore.Collection.load_snapshot(
-    "priv/snapshots/documents.ets",
-    index: :hnsw
-  )
-```
-
-### Index
-
-Indexes search over records owned by the store.
-
-Supported indexes:
-
-- `:flat` - exact scan over ETS records
-- `:hnsw` - native Rust HNSW graph over stored ids and vectors
-
-Index choice is independent from metric choice:
-
-```elixir
-index: :flat,
-metric: :cosine
-```
-
-or:
-
-```elixir
-index: :hnsw,
-metric: :l2
-```
-
-### Native Acceleration
-
-Rust is used for:
-
-- distance kernels
-- normalization kernels
-- sign-bit compression
-- HNSW graph search
-- MUVERA/FDE encoding
-
-Rust does not own the canonical collection database.
-
-## Collections
-
-Create a collection with dimensions, metric, normalization mode, and index:
-
-```elixir
-{:ok, collection} =
-  Vettore.Collection.new(
+  Vettore.new(
     name: :documents,
     dimensions: 3,
-    store: :ets,
     index: :flat,
     metric: :cosine,
-    normalize: :l2,
-    score: :raw,
-    compressed: false
+    normalize: :l2
   )
-```
 
-Insert records:
-
-```elixir
 :ok =
-  Vettore.Collection.put_many(collection, [
-    %Vettore.Embedding{
-      id: "a",
-      vector: [1.0, 0.0, 0.0],
-      metadata: %{"kind" => "axis"}
-    },
-    %Vettore.Embedding{
-      id: "b",
-      vector: [0.0, 1.0, 0.0]
-    }
+  Vettore.put_many(collection, [
+    %{id: "east", vector: [1.0, 0.0, 0.0], metadata: %{kind: :axis}},
+    %{id: "north", vector: [0.0, 1.0, 0.0]},
+    %{id: "west", vector: [-1.0, 0.0, 0.0]}
   ])
-```
 
-Search:
-
-```elixir
 {:ok, results} =
-  Vettore.Collection.search(collection, [1.0, 0.0, 0.0], limit: 2)
+  Vettore.search(collection, [1.0, 0.0, 0.0], limit: 2)
 ```
 
 Results are `%Vettore.Result{}` structs:
 
 ```elixir
 %Vettore.Result{
-  id: "a",
-  value: "a",
+  id: "east",
+  value: "east",
   score: 1.0,
   distance: 0.0,
   metric: :cosine,
-  metadata: %{"kind" => "axis"}
+  metadata: %{kind: :axis}
 }
 ```
 
-## Embeddings
+## Public API
 
-Collection records use `%Vettore.Embedding{}`:
-
-```elixir
-%Vettore.Embedding{
-  id: "doc-1",
-  value: "optional external value",
-  vector: [0.1, 0.2, 0.3],
-  binary_vector: [1, 1, 1],
-  metadata: %{source: "local"}
-}
-```
-
-Rules:
-
-- `id` is the preferred unique identifier.
-- If `id` is missing, `value` can be used as the id when it is a non-empty string.
-- Duplicate ids are rejected.
-- Duplicate vectors are allowed.
-- Vectors are normalized at insertion according to collection config.
-- Binary sign vectors are generated at insertion for quantized candidate search.
-
-Maps are accepted too:
+New code can stay under the top-level `Vettore` module:
 
 ```elixir
-Vettore.Collection.put(collection, %{
-  id: "doc-2",
-  vector: [0.2, 0.1, 0.0],
-  metadata: %{source: "map"}
-})
+Vettore.new(opts)
+Vettore.put(collection, embedding)
+Vettore.put_many(collection, embeddings)
+Vettore.get(collection, id)
+Vettore.delete(collection, id)
+Vettore.all(collection)
+Vettore.search(collection, query, opts)
+Vettore.funnel_search(collection, query, opts)
+Vettore.quantized_search(collection, query, opts)
+Vettore.multi_vector_search(collection, query_vectors, opts)
+Vettore.hybrid_search(collection, query, opts)
+Vettore.snapshot(collection, path)
+Vettore.load_snapshot(path, opts)
 ```
 
-## Metrics
+`Vettore.new/1` creates a collection. `Vettore.new/0` still creates the older
+compatibility database.
 
-Collection metrics:
+## Choosing A Search Path
 
-- `:l2`
-- `:l2_squared`
-- `:cosine`
-- `:inner_product`
-- `:negative_inner_product`
-- `:manhattan`
-- `:chebyshev`
-- `:hamming`
-- `:jaccard`
+Start with the simplest thing that matches your job.
 
-Aliases accepted by `Vettore.Collection.new/1`:
+| Use this | When |
+| --- | --- |
+| `search/3` with `index: :flat` | Small data, tests, correctness baselines, exact results |
+| `search/3` with `index: :hnsw` | Fast approximate search over larger collections |
+| `funnel_search/3` | Matryoshka embeddings where early dimensions are meaningful |
+| `quantized_search/3` | Cheap sign-bit candidate search before exact reranking |
+| `multi_vector_search/3` | ColBERT-style late interaction over token/page vectors |
+| `hybrid_search/3` | Combine candidate generators, then rerank once |
 
-- `:euclidean` -> `:l2`
-- `:dot` -> `:inner_product`
-- `:dot_product` -> `:inner_product`
+The standalone helpers are nice while exploring. For production-style retrieval,
+`hybrid_search/3` is usually the most ergonomic surface.
 
-`Vettore.Distance` itself is intentionally explicit. Use named functions:
+## Exact Search
 
-```elixir
-Vettore.Distance.l2([0.0, 0.0], [3.0, 4.0])
-# {:ok, 5.0}
-
-Vettore.Distance.l2_squared([0.0, 0.0], [3.0, 4.0])
-# {:ok, 25.0}
-
-Vettore.Distance.cosine([1.0, 0.0], [0.0, 1.0])
-# {:ok, 0.0}
-
-Vettore.Distance.inner_product([1.0, 2.0], [3.0, 4.0])
-# {:ok, 11.0}
-
-Vettore.Distance.negative_inner_product([1.0, 2.0], [3.0, 4.0])
-# {:ok, -11.0}
-
-Vettore.Distance.manhattan([1.0, 2.0], [4.0, 6.0])
-# {:ok, 7.0}
-
-Vettore.Distance.chebyshev([1.0, 2.0], [4.0, 6.0])
-# {:ok, 4.0}
-
-Vettore.Distance.hamming([1, 0, 1], [0, 0, 0])
-# {:ok, 2.0}
-
-Vettore.Distance.jaccard([1, 0, 1], [0, 1, 1])
-# {:ok, 0.6666667}
-```
-
-There is no generic public metric dispatcher. Call the metric function you want
-directly.
-
-## Normalization
-
-Supported normalization modes:
-
-- `:none`
-- `:l2`
-- `:zscore`
-- `:minmax`
-
-Examples:
-
-```elixir
-Vettore.Distance.normalize([3.0, 4.0], :l2)
-# {:ok, [0.6, 0.8]}
-
-Vettore.Distance.normalize([1.0, 2.0, 3.0], :zscore)
-# {:ok, [-1.2247449, 0.0, 1.2247449]}
-
-Vettore.Distance.normalize([2.0, 4.0, 6.0], :minmax)
-# {:ok, [0.0, 0.5, 1.0]}
-```
-
-Collection defaults:
-
-- `metric: :cosine` defaults to `normalize: :l2`
-- all other metrics default to `normalize: :none`
-
-For collection search, inserted vectors and query vectors are prepared with the
-same collection normalization mode.
-
-## Scoring Semantics
-
-Vettore keeps scoring explicit.
-
-Distance metrics are naturally lower-is-better. Similarity metrics are
-higher-is-better. Search results always expose a score and, when possible, a
-distance.
-
-For `score: :raw`:
-
-- cosine score is raw cosine similarity
-- inner product score is raw inner product
-- distance metric score is `-distance`
-
-Examples:
-
-```elixir
-Vettore.Distance.result_values(:l2, 5.0, :raw)
-# {-5.0, 5.0}
-
-Vettore.Distance.result_values(:cosine, 0.25, :raw)
-# {0.25, 0.75}
-
-Vettore.Distance.result_values(:inner_product, 3.0, :raw)
-# {3.0, -3.0}
-```
-
-For `score: :similarity`, distance metrics are converted to:
-
-```elixir
-1.0 / (1.0 + distance)
-```
-
-Cosine is converted to:
-
-```elixir
-(raw + 1.0) / 2.0
-```
-
-## Exact Flat Search
-
-Flat search is the default:
+Flat search scans ETS records exactly and scores them with native distance
+kernels.
 
 ```elixir
 {:ok, collection} =
-  Vettore.Collection.new(
+  Vettore.new(
     name: :exact_vectors,
     dimensions: 384,
     index: :flat,
     metric: :cosine,
     normalize: :l2
   )
-```
 
-The flat index scans ETS records exactly. It is useful for:
-
-- small collections
-- deterministic tests
-- classifier centroids
-- local caches
-- correctness baselines
-
-The current exact path keeps ETS as the store and uses native distance kernels
-for scoring. This keeps the implementation simple and idiomatic for Elixir, but
-it is not as fast as a fully Rust-owned exact index would be.
-
-## Adaptive Search Helpers
-
-Vettore includes two first-pass candidate helpers that keep ETS as the canonical
-store and rerank final results with the full stored vectors.
-
-Matryoshka-style funnel search scores progressively larger vector prefixes,
-then reranks the surviving candidates exactly:
-
-```elixir
 {:ok, results} =
-  Vettore.Collection.funnel_search(collection, query,
-    stages: [128, 256],
-    candidates: 200,
-    limit: 10
-  )
+  Vettore.search(collection, query_vector, limit: 10)
 ```
 
-This works best with embedding models trained for Matryoshka/nested dimensions,
-where earlier dimensions preserve coarse semantic signal.
-
-Binary quantized search uses stored sign bits for a cheap Hamming first pass,
-then reranks candidates with the collection metric:
-
-```elixir
-{:ok, results} =
-  Vettore.Collection.quantized_search(collection, query,
-    candidates: 200,
-    limit: 10
-  )
-```
-
-Both helpers are intended as simple candidate generators. They trade first-pass
-precision for less work before exact reranking.
+This path is intentionally boring. It is great for small collections, local
+caches, classifier centroids, deterministic tests, and recall baselines.
 
 ## HNSW Search
 
-HNSW is optional approximate nearest-neighbor search:
+HNSW keeps a native graph beside the ETS store. ETS remains canonical; the graph
+is an acceleration structure.
 
 ```elixir
 {:ok, collection} =
-  Vettore.Collection.new(
+  Vettore.new(
     name: :ann_vectors,
     dimensions: 768,
     index: :hnsw,
     metric: :cosine,
     normalize: :l2
   )
+
+:ok = Vettore.put(collection, %{id: "doc-1", vector: embedding})
+
+{:ok, results} =
+  Vettore.search(collection, query_vector, limit: 10)
 ```
 
 Supported HNSW metrics:
@@ -434,65 +177,145 @@ Supported HNSW metrics:
 - `:cosine`
 - `:inner_product`
 
-HNSW stores only native graph state, external ids, and vectors needed for ANN
-search. ETS remains canonical.
+## Adaptive Candidate Search
 
-Insertions update both ETS and the HNSW graph:
+These helpers first find a candidate set, then rerank with full stored vectors.
+They are useful when you want to make the first pass cheaper without changing
+the canonical store.
 
-```elixir
-:ok =
-  Vettore.Collection.put(collection, %Vettore.Embedding{
-    id: "doc-1",
-    vector: embedding
-  })
-```
+### Matryoshka Funnel
 
-Deletion removes the record from ETS and the graph:
+Funnel search scores progressively larger vector prefixes. It works best with
+models trained for Matryoshka or nested embeddings.
 
 ```elixir
-:ok = Vettore.Collection.delete(collection, "doc-1")
+{:ok, results} =
+  Vettore.funnel_search(collection, query_vector,
+    stages: [128, 256, 384],
+    candidates: 200,
+    limit: 10
+  )
 ```
+
+### Binary Quantized Candidates
+
+Quantized search uses stored sign bits for a cheap Hamming-distance first pass,
+then reranks with the collection metric.
+
+```elixir
+{:ok, results} =
+  Vettore.quantized_search(collection, query_vector,
+    candidates: 200,
+    limit: 10
+  )
+```
+
+Vettore generates `binary_vector` at insert time:
+
+```elixir
+{:ok, embedding} = Vettore.get(collection, "doc-1")
+embedding.binary_vector
+# [1, 0, 1, ...]
+```
+
+## Hybrid Search
+
+`hybrid_search/3` lets you combine candidate generators, union their ids, fetch
+the canonical records from ETS, and rerank once.
+
+```elixir
+{:ok, results} =
+  Vettore.hybrid_search(collection, query_vector,
+    generators: [
+      funnel: [stages: [128, 384], candidates: 200],
+      quantized: [candidates: 200]
+    ],
+    rerank: :exact,
+    limit: 10
+  )
+```
+
+For HNSW collections, add `:hnsw` as a generator:
+
+```elixir
+{:ok, results} =
+  Vettore.hybrid_search(collection, query_vector,
+    generators: [
+      hnsw: [candidates: 100],
+      quantized: [candidates: 200]
+    ],
+    rerank: :exact,
+    limit: 10
+  )
+```
+
+The same pipeline can rerank with late interaction:
+
+```elixir
+{:ok, results} =
+  Vettore.hybrid_search(collection, query_vector,
+    generators: [quantized: [candidates: 200]],
+    rerank: {:multi_vector, query_vectors},
+    limit: 10
+  )
+```
+
+That is the general pattern:
+
+1. Generate cheap candidates.
+2. Merge them by id.
+3. Rerank with the expensive scorer you actually care about.
 
 ## Multi-Vector Search
 
-`Vettore.MultiVector.chamfer/3` computes Chamfer/MaxSim-style similarity.
-
-For every query vector, it finds the best matching document vector and sums the
-best scores:
+Multi-vector search is for ColBERT-style retrieval: each record can hold many
+vectors, usually token vectors or page-patch vectors. A query also has many
+vectors. For each query vector, Vettore finds the best matching document vector
+and sums those best scores.
 
 ```elixir
-query_vectors = [
-  [1.0, 0.0],
-  [0.0, 1.0]
-]
+:ok =
+  Vettore.put(collection, %Vettore.Embedding{
+    id: "page-1",
+    vectors: [
+      [1.0, 0.0],
+      [0.0, 1.0]
+    ],
+    metadata: %{source: "manual"}
+  })
 
-document_vectors = [
-  [1.0, 0.0],
-  [1.0, 1.0]
-]
+{:ok, results} =
+  Vettore.multi_vector_search(
+    collection,
+    [[1.0, 0.0], [0.0, 1.0]],
+    metric: :inner_product,
+    limit: 10
+  )
+```
 
-Vettore.MultiVector.chamfer(query_vectors, document_vectors, metric: :inner_product)
+The lower-level scoring helper is available too:
+
+```elixir
+Vettore.MultiVector.colbert_score(
+  [[1.0, 0.0], [0.0, 1.0]],
+  [[1.0, 0.0], [1.0, 1.0]],
+  metric: :inner_product
+)
 # {:ok, 2.0}
 ```
 
-This is useful for late interaction retrieval, reranking, and multi-embedding
-documents.
-
-Supported metrics are delegated to named `Vettore.Distance` functions.
+`Vettore.MultiVector.chamfer/3` is the same MaxSim-style operation under a more
+general name.
 
 ## MUVERA-Style Encodings
 
-`Vettore.Encoding.Muvera` provides Rust-backed fixed-dimensional encodings for
-multi-vector retrieval.
+MUVERA reduces multi-vector retrieval to fixed-dimensional vectors. The intended
+flow is:
 
-The intended retrieval shape:
-
-1. Encode query multi-vectors into a fixed-dimensional vector.
-2. Encode document multi-vectors into fixed-dimensional vectors.
-3. Search FDE vectors with inner product.
-4. Rerank candidates with exact Chamfer/MaxSim over stored multi-vectors.
-
-Example:
+1. Encode query multi-vectors into a fixed-dimensional query vector.
+2. Encode document multi-vectors into fixed-dimensional document vectors.
+3. Search those vectors with inner product.
+4. Rerank candidates with exact MaxSim/Chamfer.
 
 ```elixir
 vectors = [
@@ -508,12 +331,8 @@ config = [
 ]
 
 {:ok, query_fde} = Vettore.Encoding.Muvera.encode_query(vectors, config)
-{:ok, document_fde} = Vettore.Encoding.Muvera.encode_document(vectors, config)
+{:ok, doc_fde} = Vettore.Encoding.Muvera.encode_document(vectors, config)
 ```
-
-Query encodings sum projected vectors in each partition. Document encodings
-average projected vectors in each partition. Both use the same deterministic
-seed/config so their FDEs are comparable.
 
 Config options:
 
@@ -524,46 +343,143 @@ Config options:
 - `:projection_dimension` - defaults to input dimension
 - `:final_projection_dimension` - optional count-sketch compression size
 
-## MMR Reranking
+## Records And Storage
 
-`Vettore.Distance.mmr_rerank/5` reranks initial candidates with maximal marginal
-relevance:
+Records are `%Vettore.Embedding{}` structs or maps with equivalent keys.
 
 ```elixir
-initial = [
-  {"a", 0.9},
-  {"b", 0.8},
-  {"c", 0.1}
-]
+%Vettore.Embedding{
+  id: "doc-1",
+  value: "optional external value",
+  vector: [0.1, 0.2, 0.3],
+  vectors: [[0.1, 0.2, 0.3], [0.0, 0.5, 0.5]],
+  binary_vector: [1, 1, 1],
+  metadata: %{source: "local"}
+}
+```
 
-embeddings = [
-  {"a", [1.0, 0.0]},
-  {"b", [1.0, 0.0]},
-  {"c", [0.0, 1.0]}
-]
+Useful details:
+
+- `id` is the preferred unique identifier.
+- If `id` is missing, a non-empty string `value` can be used as the id.
+- Duplicate ids are rejected.
+- Duplicate vectors are allowed.
+- Vectors are normalized at insertion according to the collection config.
+- If `vectors` is present but `vector` is omitted, Vettore stores an averaged
+  representative vector for ordinary search/indexing.
+- `binary_vector` is generated automatically for quantized candidate search.
+
+ETS collections can be snapshotted:
+
+```elixir
+:ok = Vettore.snapshot(collection, "priv/snapshots/docs.ets")
+
+{:ok, loaded} =
+  Vettore.load_snapshot("priv/snapshots/docs.ets")
+```
+
+Snapshots store the ETS table: records, metadata, normalized vectors, binary
+vectors, multi-vectors, and collection config. Native indexes are rebuilt from
+ETS when loaded.
+
+You can load the same data with a different index:
+
+```elixir
+{:ok, loaded} =
+  Vettore.load_snapshot("priv/snapshots/docs.ets", index: :hnsw)
+```
+
+ETS compression is available when you want to trade CPU for memory:
+
+```elixir
+{:ok, collection} =
+  Vettore.new(
+    name: :compressed_documents,
+    dimensions: 384,
+    metric: :cosine,
+    normalize: :l2,
+    compressed: true
+  )
+```
+
+## Metrics And Scoring
+
+Collection metrics:
+
+- `:l2`
+- `:l2_squared`
+- `:cosine`
+- `:inner_product`
+- `:negative_inner_product`
+- `:manhattan`
+- `:chebyshev`
+- `:hamming`
+- `:jaccard`
+
+Aliases accepted by `Vettore.new/1`:
+
+- `:euclidean` -> `:l2`
+- `:dot` -> `:inner_product`
+- `:dot_product` -> `:inner_product`
+
+with `Vettore.Distance` you can use directly all distance functions:
+
+```elixir
+Vettore.Distance.l2([0.0, 0.0], [3.0, 4.0])
+# {:ok, 5.0}
+
+Vettore.Distance.cosine([1.0, 0.0], [0.0, 1.0])
+# {:ok, 0.0}
+
+Vettore.Distance.inner_product([1.0, 2.0], [3.0, 4.0])
+# {:ok, 11.0}
+```
+
+## Normalization
+
+Supported normalization modes:
+
+- `:none`
+- `:l2`
+- `:zscore`
+- `:minmax`
+
+```elixir
+Vettore.Distance.normalize([3.0, 4.0], :l2)
+# {:ok, [0.6, 0.8]}
+```
+
+Collection defaults:
+
+- `metric: :cosine` defaults to `normalize: :l2`
+- all other metrics default to `normalize: :none`
+
+Inserted vectors and query vectors are prepared with the same collection
+normalization mode.
+
+## Other Helpers
+
+MMR reranking:
+
+```elixir
+initial = [{"a", 0.9}, {"b", 0.8}, {"c", 0.1}]
+embeddings = [{"a", [1.0, 0.0]}, {"b", [1.0, 0.0]}, {"c", [0.0, 1.0]}]
 
 Vettore.Distance.mmr_rerank(initial, embeddings, :cosine, 0.5, 2)
 # {:ok, [{"a", 0.9}, {"c", 0.1}]}
 ```
 
-The metric must be a canonical atom such as `:cosine`, `:l2`, or
-`:inner_product`.
-
-## Sign Compression
-
-Vettore can convert float vector signs into integer bits:
+Sign compression:
 
 ```elixir
 Vettore.Distance.compress_f32_vector([1.0, -2.0, 0.0])
 # [1, 0, 1]
 ```
 
-This is kept as a compatibility/helper utility. It is not used as a duplicate
-vector index.
-
 ## Compatibility API
 
-The old top-level API still exists as a small compatibility layer:
+The old top-level API still exists as a small compatibility layer backed by ETS
+collections:
 
 ```elixir
 db = Vettore.new()
@@ -581,109 +497,9 @@ db = Vettore.new()
   Vettore.similarity_search(db, "legacy", [1.0, 0.0], limit: 1)
 ```
 
-New code should prefer `Vettore.Collection`.
-
-Compatibility functions:
-
-- `Vettore.new/0`
-- `Vettore.create_collection/5`
-- `Vettore.delete_collection/2`
-- `Vettore.insert/3`
-- `Vettore.batch/3`
-- `Vettore.get_by_value/3`
-- `Vettore.get_by_vector/3`
-- `Vettore.delete/3`
-- `Vettore.get_all/2`
-- `Vettore.similarity_search/4`
-- `Vettore.rerank/4`
-
-## Error Handling
-
-Most public operations return tagged tuples:
-
-```elixir
-{:ok, value}
-{:error, reason}
-```
-
-Common errors:
-
-- `:invalid_dimensions`
-- `:invalid_metric`
-- `:invalid_vector`
-- `:dimension_mismatch`
-- `:duplicate_id`
-- `:missing_id`
-- `:not_found`
-- `:invalid_limit`
-- `{:unknown_metric, metric}`
-- `{:unknown_normalization, mode}`
-
-## Design Notes
-
-Vettore avoids these vNext pitfalls:
-
-- no Rust-owned canonical DB
-- no duplicate-vector rejection by sign-bit hash
-- no public generic metric dispatcher
-- no hidden cosine score conversions
-- no PostgreSQL dependency in the core library
-
-The core contract is:
-
-- choose a store
-- choose an index
-- choose a metric
-- choose normalization
-- get explicit result semantics back
+New code should prefer the collection-style top-level API: `Vettore.new/1`, `Vettore.put/2`, and `Vettore.search/3`.
 
 ## Development
 
-Run tests:
-
-```bash
-mix test
-```
-
-Run style checks:
-
-```bash
-mix credo --all
-```
-
-Run Dialyzer:
-
-```bash
-mix dialyzer
-```
-
-Run Rust tests:
-
-```bash
-cd native/vettore
-cargo test
-```
-
-## Current Verification
-
-The current refactor is expected to pass:
-
-```bash
-mix test
-mix credo --all
-mix dialyzer
-```
-
-The Spectre integration profile is also expected to pass when using this local
-Vettore checkout.
-
-## Roadmap
-
-Likely next improvements:
-
-- Rust-backed exact flat index resource to avoid one NIF call per ETS row
-- benchmarks for 384D and 768D at 1k, 10k, and 100k records
-- packed bitset representation for Hamming/Jaccard
-- configurable HNSW parameters
-- stronger MUVERA recall tests against deterministic fixtures
-- persistence/rebuild helpers for native indexes from ETS records
+The tests include a real `ex_fastembed` integration with
+`BAAI/bge-small-en-v1.5` over a small phrase corpus.

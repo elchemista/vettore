@@ -10,6 +10,13 @@ defmodule VettoreIntegrationTest do
     assert {:ok, 2.0} = MultiVector.chamfer(query, doc, metric: :inner_product)
   end
 
+  test "colbert_score is an explicit late-interaction alias" do
+    query = [[1.0, 0.0], [0.0, 1.0]]
+    doc = [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]]
+
+    assert {:ok, 2.0} = MultiVector.colbert_score(query, doc, metric: :inner_product)
+  end
+
   test "muvera query and document encodings are deterministic and asymmetric" do
     vectors = [[1.0, 0.0], [0.0, 1.0]]
     config = [num_repetitions: 1, num_simhash_projections: 0, seed: 42]

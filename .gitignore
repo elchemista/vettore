@@ -19,6 +19,8 @@
 /.elixir_ls/
 /.elixir-tools/
 
+/.fastembed_cache/
+
 GUIDELINE.md
 
 SKILL.md

@@ -62,6 +62,7 @@ defmodule Vettore.MixProject do
       {:rustler, "~> 0.36.1"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.0", only: :dev},
+      {:ex_fastembed, github: "elchemista/ex_fastembed", branch: "master", only: :test},
       # Documentation Provider
       {:ex_doc, "~> 0.28.3", only: [:dev, :test], optional: true, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

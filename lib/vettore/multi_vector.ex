@@ -13,6 +13,15 @@ defmodule Vettore.MultiVector do
 
   For each query vector, this finds the best matching document vector and sums
   those best scores.
+
+  ## Examples
+
+      iex> Vettore.MultiVector.chamfer(
+      ...>   [[1.0, 0.0], [0.0, 1.0]],
+      ...>   [[1.0, 0.0], [1.0, 1.0]],
+      ...>   metric: :inner_product
+      ...> )
+      {:ok, 2.0}
   """
   @spec chamfer([vector()], [vector()], keyword()) ::
           {:ok, float()} | {:error, term()}
@@ -28,6 +37,28 @@ defmodule Vettore.MultiVector do
   end
 
   def chamfer(_query_vectors, _document_vectors, _opts), do: {:error, :invalid_multi_vector}
+
+  @doc """
+  Computes a ColBERT-style late interaction score.
+
+  This is an explicit alias for Chamfer/MaxSim scoring: each query vector takes
+  its best match from the document vectors, then the best-match scores are
+  summed.
+
+  ## Examples
+
+      iex> Vettore.MultiVector.colbert_score(
+      ...>   [[1.0, 0.0], [0.0, 1.0]],
+      ...>   [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]],
+      ...>   metric: :inner_product
+      ...> )
+      {:ok, 2.0}
+  """
+  @spec colbert_score([vector()], [vector()], keyword()) ::
+          {:ok, float()} | {:error, term()}
+  def colbert_score(query_vectors, document_vectors, opts \\ []) do
+    chamfer(query_vectors, document_vectors, opts)
+  end
 
   @spec sum_best_similarities([vector()], [vector()], metric()) ::
           {:ok, float()} | {:error, term()}

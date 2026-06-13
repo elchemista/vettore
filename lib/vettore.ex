@@ -1,14 +1,12 @@
 defmodule Vettore do
   @moduledoc """
-  Vettore vNext.
+  Vettore public API.
 
-  The primary API is `Vettore.Collection`, where ETS owns collection state and
-  native code is reserved for optional acceleration. This module keeps a small
-  compatibility surface for older `Vettore.new/create_collection/insert/search`
-  workflows, implemented on top of the new ETS collections.
+  `Vettore.new/1` creates an ETS-backed collection. The older
+  `Vettore.new/0` database-style API remains available for compatibility.
   """
 
-  alias Vettore.{Collection, Distance, Embedding}
+  alias Vettore.{Collection, Distance, Embedding, Result}
 
   @doc """
   Creates a lightweight ETS-backed compatibility database.
@@ -31,6 +29,265 @@ defmodule Vettore do
 
     %Vettore.DB{table: table}
   end
+
+  @doc """
+  Creates an ETS-backed vector collection.
+
+  This is the preferred public constructor for new code. Use `Vettore.new/0`
+  only when you need the older compatibility database API.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :cosine)
+      iex> collection.metric
+      :cosine
+  """
+  @spec new(keyword()) :: {:ok, Collection.t()} | {:error, term()}
+  def new(opts) when is_list(opts), do: Collection.new(opts)
+
+  @doc """
+  Saves a collection snapshot.
+
+  Only canonical ETS state is written. Native index state is rebuilt when a
+  snapshot is loaded.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> path = Path.join(System.tmp_dir!(), "vettore_snapshot_example.ets")
+      iex> Vettore.snapshot(collection, path)
+      :ok
+      iex> File.rm(path)
+      :ok
+  """
+  @spec snapshot(Collection.t(), Path.t()) :: :ok | {:error, term()}
+  def snapshot(%Collection{} = collection, path) when is_binary(path) do
+    collection.store_mod.snapshot(collection.store_state, path)
+  end
+
+  def snapshot(_collection, _path), do: {:error, :invalid_snapshot}
+
+  @doc """
+  Loads a collection snapshot.
+
+  Pass options such as `index: :flat` or `index: :hnsw` to rebuild the loaded
+  collection with a different index.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> :ok = Vettore.put(collection, %{id: "a", vector: [1.0, 2.0]})
+      iex> path = Path.join(System.tmp_dir!(), "vettore_load_example.ets")
+      iex> :ok = Vettore.snapshot(collection, path)
+      iex> {:ok, loaded} = Vettore.load_snapshot(path)
+      iex> {:ok, embedding} = Vettore.get(loaded, "a")
+      iex> File.rm(path)
+      iex> embedding.id
+      "a"
+  """
+  @spec load_snapshot(Path.t(), keyword()) :: {:ok, Collection.t()} | {:error, term()}
+  def load_snapshot(path, opts \\ []), do: Collection.load_snapshot(path, opts)
+
+  @doc """
+  Inserts one embedding into a collection.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> Vettore.put(collection, %{id: "a", vector: [0.0, 0.0]})
+      :ok
+  """
+  @spec put(Collection.t(), Embedding.t() | map()) :: :ok | {:error, term()}
+  def put(%Collection{} = collection, embedding), do: Collection.put(collection, embedding)
+
+  @doc """
+  Inserts many embeddings into a collection.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> Vettore.put_many(collection, [
+      ...>   %{id: "a", vector: [0.0, 0.0]},
+      ...>   %{id: "b", vector: [1.0, 1.0]}
+      ...> ])
+      :ok
+  """
+  @spec put_many(Collection.t(), [Embedding.t() | map()]) :: :ok | {:error, term()}
+  def put_many(%Collection{} = collection, embeddings),
+    do: Collection.put_many(collection, embeddings)
+
+  @doc """
+  Fetches one embedding by id.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> :ok = Vettore.put(collection, %{id: "a", vector: [0.0, 0.0]})
+      iex> {:ok, %Vettore.Embedding{id: "a"}} = Vettore.get(collection, "a")
+  """
+  @spec get(Collection.t(), String.t()) :: {:ok, Embedding.t()} | {:error, term()}
+  def get(%Collection{} = collection, id) when is_binary(id) do
+    collection.store_mod.get(collection.store_state, id)
+  end
+
+  @doc """
+  Deletes one embedding by id.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> :ok = Vettore.put(collection, %{id: "a", vector: [0.0, 0.0]})
+      iex> Vettore.delete(collection, "a")
+      :ok
+  """
+  @spec delete(Collection.t(), String.t()) :: :ok | {:error, term()}
+  def delete(%Collection{} = collection, id) when is_binary(id) do
+    with :ok <- collection.store_mod.delete(collection.store_state, id) do
+      collection.index_mod.delete(collection, id)
+    end
+  end
+
+  @doc """
+  Returns all embeddings in a collection.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> :ok = Vettore.put(collection, %{id: "a", vector: [0.0, 0.0]})
+      iex> {:ok, [%Vettore.Embedding{id: "a"}]} = Vettore.all(collection)
+  """
+  @spec all(Collection.t()) :: {:ok, [Embedding.t()]} | {:error, term()}
+  def all(%Collection{} = collection) do
+    collection.store_mod.all(collection.store_state)
+  end
+
+  @doc """
+  Runs the configured collection search.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+      iex> :ok = Vettore.put(collection, %{id: "near", vector: [0.0, 0.0]})
+      iex> {:ok, [%Vettore.Result{id: "near"}]} = Vettore.search(collection, [0.0, 0.0], limit: 1)
+  """
+  @spec search(Collection.t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
+  def search(%Collection{} = collection, query, opts \\ []) do
+    collection.index_mod.search(collection, query, opts)
+  end
+
+  @doc """
+  Runs Matryoshka-style funnel search.
+
+  Each stage scores a candidate set with a vector prefix, then final results are
+  reranked with the full stored vectors.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 3, metric: :l2, index: :flat)
+      iex> :ok =
+      ...>   Vettore.put_many(collection, [
+      ...>     %{id: "near", vector: [1.0, 0.0, 0.0]},
+      ...>     %{id: "far", vector: [-1.0, 0.0, 0.0]}
+      ...>   ])
+      iex> {:ok, [%Vettore.Result{id: "near"}]} =
+      ...>   Vettore.funnel_search(collection, [1.0, 0.0, 0.0],
+      ...>     stages: [1, 3],
+      ...>     candidates: 2,
+      ...>     limit: 1
+      ...>   )
+  """
+  @spec funnel_search(Collection.t(), [number()], keyword()) ::
+          {:ok, [Result.t()]} | {:error, term()}
+  def funnel_search(%Collection{} = collection, query, opts \\ []),
+    do: Collection.funnel_search(collection, query, opts)
+
+  @doc """
+  Runs binary sign-bit candidate search followed by exact reranking.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2, index: :flat)
+      iex> :ok =
+      ...>   Vettore.put_many(collection, [
+      ...>     %{id: "near", vector: [1.0, 1.0]},
+      ...>     %{id: "far", vector: [-1.0, -1.0]}
+      ...>   ])
+      iex> {:ok, [%Vettore.Result{id: "near"}]} =
+      ...>   Vettore.quantized_search(collection, [1.0, 1.0],
+      ...>     candidates: 2,
+      ...>     limit: 1
+      ...>   )
+  """
+  @spec quantized_search(Collection.t(), [number()], keyword()) ::
+          {:ok, [Result.t()]} | {:error, term()}
+  def quantized_search(%Collection{} = collection, query, opts \\ []),
+    do: Collection.quantized_search(collection, query, opts)
+
+  @doc """
+  Runs ColBERT-style late interaction over multi-vector records.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :inner_product)
+      iex> :ok =
+      ...>   Vettore.put_many(collection, [
+      ...>     %{id: "both_axes", vectors: [[1.0, 0.0], [0.0, 1.0]]},
+      ...>     %{id: "one_axis", vectors: [[1.0, 0.0], [-1.0, 0.0]]}
+      ...>   ])
+      iex> {:ok, [%Vettore.Result{id: "both_axes", score: 2.0} | _]} =
+      ...>   Vettore.multi_vector_search(
+      ...>     collection,
+      ...>     [[1.0, 0.0], [0.0, 1.0]],
+      ...>     limit: 1
+      ...>   )
+  """
+  @spec multi_vector_search(Collection.t(), [[number()]], keyword()) ::
+          {:ok, [Result.t()]} | {:error, term()}
+  def multi_vector_search(%Collection{} = collection, query_vectors, opts \\ []),
+    do: Collection.multi_vector_search(collection, query_vectors, opts)
+
+  @doc """
+  Runs a hybrid candidate pipeline with final reranking.
+
+  `:generators` accepts atoms or keyword entries. Supported generators:
+
+    * `:funnel` - Matryoshka-style prefix candidate search
+    * `:quantized` - binary sign-bit candidate search
+    * `:search` - the collection's configured index
+    * `:hnsw` - alias for `:search` when the collection uses `index: :hnsw`
+
+  The default final reranker is exact vector scoring. Pass
+  `rerank: {:multi_vector, query_vectors}` for ColBERT-style late interaction
+  over the union of generated candidates.
+
+  ## Examples
+
+      iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2, index: :flat)
+      iex> :ok =
+      ...>   Vettore.put_many(collection, [
+      ...>     %{id: "near", vector: [1.0, 1.0]},
+      ...>     %{id: "far", vector: [-1.0, -1.0]}
+      ...>   ])
+      iex> {:ok, [%Vettore.Result{id: "near"}]} =
+      ...>   Vettore.hybrid_search(collection, [1.0, 1.0],
+      ...>     generators: [
+      ...>       funnel: [stages: [1, 2], candidates: 2],
+      ...>       quantized: [candidates: 2]
+      ...>     ],
+      ...>     limit: 1
+      ...>   )
+  """
+  @spec hybrid_search(Collection.t(), [number()], keyword()) ::
+          {:ok, [Result.t()]} | {:error, term()}
+  def hybrid_search(%Collection{} = collection, query, opts \\ []),
+    do: Collection.hybrid_search(collection, query, opts)
+
+  @doc """
+  Validates and normalizes a query for a collection.
+  """
+  @spec prepare_query(Collection.t(), [number()]) :: {:ok, [float()]} | {:error, term()}
+  def prepare_query(%Collection{} = collection, query),
+    do: Collection.prepare_query(collection, query)
 
   @doc """
   Compatibility collection creation.
@@ -88,8 +345,9 @@ defmodule Vettore do
   @spec delete_collection(Vettore.DB.t(), String.t()) ::
           {:ok, String.t()} | {:error, :invalid_arguments}
   def delete_collection(%Vettore.DB{} = db, name) when is_binary(name) do
-    true = :ets.delete(db.table, {:collection, name})
-    {:ok, name}
+    with true <- :ets.delete(db.table, {:collection, name}) do
+      {:ok, name}
+    end
   end
 
   def delete_collection(_db, _name), do: {:error, :invalid_arguments}
@@ -113,7 +371,7 @@ defmodule Vettore do
   def insert(%Vettore.DB{} = db, collection_name, %Embedding{} = embedding)
       when is_binary(collection_name) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
-         :ok <- Collection.put(collection, embedding) do
+         :ok <- put(collection, embedding) do
       {:ok, embedding.id || embedding.value}
     end
   end
@@ -142,7 +400,7 @@ defmodule Vettore do
   def batch(%Vettore.DB{} = db, collection_name, embeddings)
       when is_binary(collection_name) and is_list(embeddings) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
-         :ok <- Collection.put_many(collection, embeddings) do
+         :ok <- put_many(collection, embeddings) do
       {:ok, Enum.map(embeddings, &(&1.id || &1.value))}
     end
   end
@@ -167,7 +425,7 @@ defmodule Vettore do
   def get_by_value(%Vettore.DB{} = db, collection_name, id)
       when is_binary(collection_name) and is_binary(id) do
     with {:ok, collection} <- fetch_collection(db, collection_name) do
-      Collection.get(collection, id)
+      get(collection, id)
     end
   end
 
@@ -191,8 +449,8 @@ defmodule Vettore do
   def get_by_vector(%Vettore.DB{} = db, collection_name, vector)
       when is_binary(collection_name) and is_list(vector) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
-         {:ok, embeddings} <- Collection.all(collection),
-         {:ok, prepared} <- Collection.prepare_query(collection, vector) do
+         {:ok, embeddings} <- all(collection),
+         {:ok, prepared} <- prepare_query(collection, vector) do
       embeddings
       |> Enum.find(fn embedding -> embedding.vector == prepared end)
       |> case do
@@ -223,7 +481,7 @@ defmodule Vettore do
   def delete(%Vettore.DB{} = db, collection_name, id)
       when is_binary(collection_name) and is_binary(id) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
-         :ok <- Collection.delete(collection, id) do
+         :ok <- delete(collection, id) do
       {:ok, id}
     end
   end
@@ -247,7 +505,7 @@ defmodule Vettore do
           {:ok, [{String.t(), [float()], map() | nil}]} | {:error, term()}
   def get_all(%Vettore.DB{} = db, collection_name) when is_binary(collection_name) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
-         {:ok, embeddings} <- Collection.all(collection) do
+         {:ok, embeddings} <- all(collection) do
       {:ok, Enum.map(embeddings, &{&1.id, &1.vector, &1.metadata})}
     end
   end
@@ -276,7 +534,7 @@ defmodule Vettore do
   def similarity_search(%Vettore.DB{} = db, collection_name, query, opts)
       when is_binary(collection_name) and is_list(query) and is_list(opts) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
-         {:ok, results} <- Collection.search(collection, query, opts) do
+         {:ok, results} <- search(collection, query, opts) do
       {:ok, Enum.map(results, &{&1.id, &1.score})}
     end
   end
@@ -308,7 +566,7 @@ defmodule Vettore do
     alpha = Keyword.get(opts, :alpha, 0.5)
 
     with {:ok, collection} <- fetch_collection(db, collection_name),
-         {:ok, embeddings} <- Collection.all(collection) do
+         {:ok, embeddings} <- all(collection) do
       pairs = Enum.map(embeddings, &{&1.id, &1.vector})
       Distance.mmr_rerank(initial, pairs, collection.metric, alpha, limit)
     end

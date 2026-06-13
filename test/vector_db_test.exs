@@ -4,6 +4,25 @@ defmodule VettoreDBTest do
   alias Vettore.{Collection, Embedding, Result}
 
   describe "Vettore.Collection" do
+    test "top-level Vettore API creates and searches collections" do
+      assert {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
+
+      assert :ok =
+               Vettore.put_many(collection, [
+                 %{id: "near", vector: [0.0, 0.0]},
+                 %{id: "far", vector: [10.0, 10.0]}
+               ])
+
+      assert {:ok, %Embedding{id: "near"}} = Vettore.get(collection, "near")
+      assert {:ok, [%Result{id: "near"}]} = Vettore.search(collection, [0.0, 0.0], limit: 1)
+
+      assert {:ok, [%Result{id: "near"}]} =
+               Vettore.hybrid_search(collection, [0.0, 0.0],
+                 generators: [quantized: [candidates: 2]],
+                 limit: 1
+               )
+    end
+
     test "stores records in ETS and searches with explicit result semantics" do
       assert {:ok, collection} =
                Collection.new(
@@ -101,6 +120,114 @@ defmodule VettoreDBTest do
                )
 
       assert distance == 0.0
+    end
+
+    test "multi-vector search ranks records with ColBERT-style late interaction" do
+      {:ok, collection} =
+        Collection.new(
+          name: :late_interaction,
+          dimensions: 2,
+          metric: :inner_product,
+          index: :flat
+        )
+
+      assert :ok =
+               Collection.put_many(collection, [
+                 %Embedding{
+                   id: "both_axes",
+                   vectors: [[1.0, 0.0], [0.0, 1.0]],
+                   metadata: %{kind: :best}
+                 },
+                 %Embedding{
+                   id: "one_axis",
+                   vectors: [[1.0, 0.0], [-1.0, 0.0]]
+                 },
+                 %Embedding{
+                   id: "opposite",
+                   vectors: [[-1.0, 0.0], [0.0, -1.0]]
+                 }
+               ])
+
+      assert {:ok, %Embedding{} = embedding} = Collection.get(collection, "both_axes")
+      assert embedding.vector == [0.5, 0.5]
+      assert embedding.vectors == [[1.0, 0.0], [0.0, 1.0]]
+
+      assert {:ok,
+              [
+                %Result{
+                  id: "both_axes",
+                  score: 2.0,
+                  distance: nil,
+                  metric: :inner_product,
+                  metadata: %{kind: :best}
+                },
+                %Result{id: "one_axis", score: 1.0}
+              ]} =
+               Collection.multi_vector_search(collection, [[1.0, 0.0], [0.0, 1.0]], limit: 2)
+    end
+
+    test "hybrid search combines generators and exact reranks unique candidates" do
+      {:ok, collection} =
+        Collection.new(name: :hybrid_exact, dimensions: 3, metric: :l2, index: :flat)
+
+      assert :ok =
+               Collection.put_many(collection, [
+                 %Embedding{id: "exact", vector: [1.0, 0.0, 0.0]},
+                 %Embedding{id: "same_prefix", vector: [1.0, 5.0, 0.0]},
+                 %Embedding{id: "same_bits", vector: [10.0, 10.0, 10.0]},
+                 %Embedding{id: "opposite", vector: [-1.0, -1.0, -1.0]}
+               ])
+
+      assert {:ok, [%Result{id: "exact", distance: distance} | _]} =
+               Collection.hybrid_search(collection, [1.0, 0.0, 0.0],
+                 generators: [
+                   funnel: [stages: [1], candidates: 2],
+                   quantized: [candidates: 3]
+                 ],
+                 rerank: :exact,
+                 limit: 3
+               )
+
+      assert distance == 0.0
+    end
+
+    test "hybrid search can rerank generated candidates with multi-vector scoring" do
+      {:ok, collection} =
+        Collection.new(
+          name: :hybrid_multi_vector,
+          dimensions: 2,
+          metric: :inner_product,
+          index: :flat
+        )
+
+      assert :ok =
+               Collection.put_many(collection, [
+                 %Embedding{id: "both_axes", vectors: [[1.0, 0.0], [0.0, 1.0]]},
+                 %Embedding{id: "one_axis", vectors: [[1.0, 0.0], [-1.0, 0.0]]},
+                 %Embedding{id: "opposite", vectors: [[-1.0, 0.0], [0.0, -1.0]]}
+               ])
+
+      query_vectors = [[1.0, 0.0], [0.0, 1.0]]
+
+      assert {:ok, [%Result{id: "both_axes", score: 2.0} | _]} =
+               Collection.hybrid_search(collection, [1.0, 1.0],
+                 generators: [quantized: [candidates: 3]],
+                 rerank: {:multi_vector, query_vectors},
+                 limit: 2
+               )
+    end
+
+    test "hybrid search hnsw generator requires an hnsw collection" do
+      {:ok, collection} =
+        Collection.new(name: :hybrid_hnsw_guard, dimensions: 2, metric: :l2, index: :flat)
+
+      assert :ok = Collection.put(collection, %Embedding{id: "near", vector: [0.0, 0.0]})
+
+      assert {:error, :hnsw_index_required} =
+               Collection.hybrid_search(collection, [0.0, 0.0],
+                 generators: [:hnsw],
+                 limit: 1
+               )
     end
 
     test "collections are isolated" do
