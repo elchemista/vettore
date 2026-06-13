@@ -1,27 +1,38 @@
 defmodule Vettore.Index.Flat do
   @moduledoc """
-  Exact flat-scan index over the canonical store.
+  Native exact flat-scan index over mirrored ids and vectors.
+
+  ETS remains the canonical record store for values and metadata. The native
+  resource keeps only ids and vectors so an exact scan is one native call.
   """
 
   @behaviour Vettore.Index
 
-  alias Vettore.{Collection, Distance, Result}
+  alias Vettore.{Collection, Distance, Embedding, Nifs, Result}
 
-  @spec new(atom()) :: {:ok, nil}
+  @spec new(Distance.metric(), keyword()) :: {:ok, reference()} | {:error, term()}
   @impl true
-  def new(_metric), do: {:ok, nil}
+  def new(metric, _opts \\ []), do: new_metric(metric)
 
-  @spec put(Collection.t(), Vettore.Embedding.t()) :: :ok
+  @spec put(Collection.t(), Embedding.t()) :: :ok | {:error, term()}
   @impl true
-  def put(_collection, _embedding), do: :ok
+  def put(%Collection{} = collection, %Embedding{} = embedding) do
+    normalize_ok(Nifs.flat_insert(collection.index_state, embedding.id, embedding.vector))
+  end
 
-  @spec put_many(Collection.t(), [Vettore.Embedding.t()]) :: :ok
+  @spec put_many(Collection.t(), [Embedding.t()]) :: :ok | {:error, term()}
   @impl true
-  def put_many(_collection, _embeddings), do: :ok
+  def put_many(%Collection{} = collection, embeddings) do
+    vectors = Enum.map(embeddings, &{&1.id, &1.vector})
 
-  @spec delete(Collection.t(), String.t()) :: :ok
+    normalize_ok(Nifs.flat_insert_many(collection.index_state, vectors))
+  end
+
+  @spec delete(Collection.t(), String.t()) :: :ok | {:error, term()}
   @impl true
-  def delete(_collection, _id), do: :ok
+  def delete(%Collection{} = collection, id) do
+    normalize_ok(Nifs.flat_delete(collection.index_state, id))
+  end
 
   @spec search(Collection.t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
   @impl true
@@ -29,74 +40,48 @@ defmodule Vettore.Index.Flat do
     limit = Keyword.get(opts, :limit, 10)
 
     with :ok <- validate_limit(limit),
-         {:ok, query} <- Collection.prepare_query(collection, query) do
-      fold_results(collection, query, limit)
+         {:ok, query} <- Collection.prepare_query(collection, query),
+         {:ok, hits} <- Nifs.flat_search(collection.index_state, query, limit) do
+      {:ok, Enum.map(hits, &to_result(collection, &1))}
     end
   end
 
-  @spec fold_results(Collection.t(), [float()], pos_integer()) ::
-          {:ok, [Result.t()]} | {:error, term()}
-  defp fold_results(collection, query, limit) do
-    collection.store_mod.fold(collection.store_state, [], fn embedding, acc ->
-      score_and_insert(collection, query, embedding, acc, limit)
-    end)
+  @spec new_metric(Distance.metric() | atom()) :: {:ok, reference()} | {:error, term()}
+  defp new_metric(:l2), do: {:ok, Nifs.flat_new_l2()}
+  defp new_metric(:l2_squared), do: {:ok, Nifs.flat_new_l2_squared()}
+  defp new_metric(:cosine), do: {:ok, Nifs.flat_new_cosine()}
+  defp new_metric(:inner_product), do: {:ok, Nifs.flat_new_inner_product()}
+  defp new_metric(:negative_inner_product), do: {:ok, Nifs.flat_new_negative_inner_product()}
+  defp new_metric(:manhattan), do: {:ok, Nifs.flat_new_manhattan()}
+  defp new_metric(:chebyshev), do: {:ok, Nifs.flat_new_chebyshev()}
+  defp new_metric(:hamming), do: {:ok, Nifs.flat_new_hamming()}
+  defp new_metric(:jaccard), do: {:ok, Nifs.flat_new_jaccard()}
+  defp new_metric(metric), do: {:error, {:unsupported_flat_metric, metric}}
+
+  @spec to_result(Collection.t(), {String.t(), float()}) :: Result.t()
+  defp to_result(collection, {id, raw}) do
+    embedding =
+      case Collection.get(collection, id) do
+        {:ok, embedding} -> embedding
+        {:error, _reason} -> %Embedding{id: id, value: id}
+      end
+
+    {score, distance} = Distance.result_values(collection.metric, raw, collection.score)
+
+    %Result{
+      id: id,
+      value: embedding.value,
+      score: score,
+      distance: distance,
+      metric: collection.metric,
+      metadata: embedding.metadata
+    }
   end
 
-  @spec score_and_insert(
-          Collection.t(),
-          [float()],
-          Vettore.Embedding.t(),
-          [Result.t()],
-          pos_integer()
-        ) ::
-          [Result.t()]
-  defp score_and_insert(collection, query, embedding, acc, limit) do
-    case score_embedding(collection, query, embedding) do
-      {:ok, result} -> insert_top(acc, result, limit)
-      {:error, _reason} -> acc
-    end
-  end
-
-  @spec score_embedding(Collection.t(), [float()], Vettore.Embedding.t()) ::
-          {:ok, Result.t()} | {:error, term()}
-  defp score_embedding(collection, query, embedding) do
-    with {:ok, distance_or_similarity} <- metric_value(collection.metric, query, embedding.vector) do
-      {score, distance} =
-        Distance.result_values(collection.metric, distance_or_similarity, collection.score)
-
-      {:ok,
-       %Result{
-         id: embedding.id,
-         value: embedding.value,
-         score: score,
-         distance: distance,
-         metric: collection.metric,
-         metadata: embedding.metadata
-       }}
-    end
-  end
-
-  @spec metric_value(Distance.metric(), [float()], [float()]) :: {:ok, float()} | {:error, term()}
-  defp metric_value(:l2, left, right), do: Distance.l2(left, right)
-  defp metric_value(:l2_squared, left, right), do: Distance.l2_squared(left, right)
-  defp metric_value(:cosine, left, right), do: Distance.cosine(left, right, normalize: :none)
-  defp metric_value(:inner_product, left, right), do: Distance.inner_product(left, right)
-
-  defp metric_value(:negative_inner_product, left, right),
-    do: Distance.negative_inner_product(left, right)
-
-  defp metric_value(:manhattan, left, right), do: Distance.manhattan(left, right)
-  defp metric_value(:chebyshev, left, right), do: Distance.chebyshev(left, right)
-  defp metric_value(:hamming, left, right), do: Distance.hamming(left, right)
-  defp metric_value(:jaccard, left, right), do: Distance.jaccard(left, right)
-
-  @spec insert_top([Result.t()], Result.t(), pos_integer()) :: [Result.t()]
-  defp insert_top(results, result, limit) do
-    {higher_or_equal, lower} = Enum.split_while(results, &(&1.score >= result.score))
-
-    (higher_or_equal ++ [result | lower])
-    |> Enum.take(limit)
-  end
+  @spec normalize_ok(:ok | {:ok, {}} | {:error, term()}) :: :ok | {:error, term()}
+  defp normalize_ok({:ok, {}}), do: :ok
+  defp normalize_ok(:ok), do: :ok
+  defp normalize_ok(other), do: other
 
   @spec validate_limit(term()) :: :ok | {:error, :invalid_limit}
   defp validate_limit(limit) when is_integer(limit) and limit > 0, do: :ok

@@ -10,13 +10,25 @@ defmodule Vettore.Index.HNSW do
 
   alias Vettore.{Collection, Distance, Nifs, Result}
 
-  @spec new(:l2 | :cosine | :inner_product | atom()) ::
+  @default_options [
+    m: 16,
+    m0: 32,
+    ef_construction: 100,
+    ef_search: 64,
+    max_level: 12
+  ]
+
+  @spec new(:l2 | :cosine | :inner_product | atom(), keyword()) ::
           {:ok, reference()} | {:error, {:unsupported_hnsw_metric, atom()}}
   @impl true
-  def new(:l2), do: {:ok, Nifs.hnsw_new_l2()}
-  def new(:cosine), do: {:ok, Nifs.hnsw_new_cosine()}
-  def new(:inner_product), do: {:ok, Nifs.hnsw_new_inner_product()}
-  def new(metric), do: {:error, {:unsupported_hnsw_metric, metric}}
+  def new(metric, opts \\ []) do
+    with {:ok, options} <- normalize_options(opts) do
+      new_metric(metric, options)
+    end
+  end
+
+  @spec defaults() :: keyword(pos_integer())
+  def defaults, do: @default_options
 
   @spec put(Collection.t(), Vettore.Embedding.t()) :: :ok | {:error, String.t()}
   @impl true
@@ -74,4 +86,38 @@ defmodule Vettore.Index.HNSW do
   defp normalize_ok({:ok, {}}), do: :ok
   defp normalize_ok(:ok), do: :ok
   defp normalize_ok(other), do: other
+
+  @spec new_metric(atom(), keyword()) ::
+          {:ok, reference()} | {:error, {:unsupported_hnsw_metric, atom()} | String.t()}
+  defp new_metric(:l2, opts), do: apply_new(&Nifs.hnsw_new_l2/5, opts)
+  defp new_metric(:cosine, opts), do: apply_new(&Nifs.hnsw_new_cosine/5, opts)
+  defp new_metric(:inner_product, opts), do: apply_new(&Nifs.hnsw_new_inner_product/5, opts)
+  defp new_metric(metric, _opts), do: {:error, {:unsupported_hnsw_metric, metric}}
+
+  @spec apply_new(function(), keyword()) :: {:ok, reference()} | {:error, String.t()}
+  defp apply_new(fun, opts) do
+    fun.(
+      Keyword.fetch!(opts, :m),
+      Keyword.fetch!(opts, :m0),
+      Keyword.fetch!(opts, :ef_construction),
+      Keyword.fetch!(opts, :ef_search),
+      Keyword.fetch!(opts, :max_level)
+    )
+  end
+
+  @spec normalize_options(keyword()) :: {:ok, keyword()} | {:error, :invalid_hnsw_options}
+  defp normalize_options(opts) when is_list(opts) do
+    options = Keyword.merge(@default_options, opts)
+
+    if Enum.all?(@default_options, fn {key, _default} -> positive_integer?(options[key]) end) do
+      {:ok, options}
+    else
+      {:error, :invalid_hnsw_options}
+    end
+  end
+
+  defp normalize_options(_opts), do: {:error, :invalid_hnsw_options}
+
+  @spec positive_integer?(term()) :: boolean()
+  defp positive_integer?(value), do: is_integer(value) and value > 0
 end

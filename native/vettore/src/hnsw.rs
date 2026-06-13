@@ -11,11 +11,37 @@ use std::sync::RwLock;
 
 use crate::distances::Metric;
 
-const M: usize = 16;
-const M0: usize = 32;
-const EF_CONSTRUCTION: usize = 100;
-const EF_SEARCH: usize = 64;
-const MAX_LEVEL: usize = 12;
+#[derive(Clone, Copy)]
+pub struct HnswParams {
+    pub m: usize,
+    pub m0: usize,
+    pub ef_construction: usize,
+    pub ef_search: usize,
+    pub max_level: usize,
+}
+
+impl HnswParams {
+    /// Validates HNSW graph/search parameters.
+    pub fn validate(self) -> Result<Self, String> {
+        if self.m == 0 {
+            return Err("m must be positive".to_string());
+        }
+        if self.m0 == 0 {
+            return Err("m0 must be positive".to_string());
+        }
+        if self.ef_construction < self.m {
+            return Err("ef_construction must be >= m".to_string());
+        }
+        if self.ef_search == 0 {
+            return Err("ef_search must be positive".to_string());
+        }
+        if self.max_level == 0 {
+            return Err("max_level must be positive".to_string());
+        }
+
+        Ok(self)
+    }
+}
 
 #[derive(Clone)]
 struct ScoredNode {
@@ -85,6 +111,7 @@ struct Node {
 
 pub struct HnswIndex {
     metric: Metric,
+    params: HnswParams,
     nodes: HashMap<usize, Node>,
     external_to_internal: HashMap<String, usize>,
     entry: Option<usize>,
@@ -93,14 +120,17 @@ pub struct HnswIndex {
 
 impl HnswIndex {
     /// Creates an empty HNSW graph for one ranking metric.
-    pub fn new(metric: Metric) -> Self {
-        Self {
+    pub fn new(metric: Metric, params: HnswParams) -> Result<Self, String> {
+        let params = params.validate()?;
+
+        Ok(Self {
             metric,
+            params,
             nodes: HashMap::new(),
             external_to_internal: HashMap::new(),
             entry: None,
             next: 0,
-        }
+        })
     }
 
     /// Inserts or replaces one external id in the graph.
@@ -141,10 +171,15 @@ impl HnswIndex {
         let mut new_connections = vec![Vec::new(); node_level + 1];
 
         for layer in (0..=usize::min(node_level, top_layer)).rev() {
-            let mut candidates = self.search_layer(entry, &vector, layer, EF_CONSTRUCTION)?;
+            let mut candidates =
+                self.search_layer(entry, &vector, layer, self.params.ef_construction)?;
             candidates.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
             candidates.dedup_by_key(|neighbor| neighbor.id);
-            candidates.truncate(if layer == 0 { M0 } else { M });
+            candidates.truncate(if layer == 0 {
+                self.params.m0
+            } else {
+                self.params.m
+            });
 
             for candidate in &candidates {
                 new_connections[layer].push(candidate.id);
@@ -216,7 +251,8 @@ impl HnswIndex {
             entry = self.greedy_closest(entry, query, layer)?.0;
         }
 
-        let mut best = self.search_layer(entry, query, 0, usize::max(EF_SEARCH, limit))?;
+        let mut best =
+            self.search_layer(entry, query, 0, usize::max(self.params.ef_search, limit))?;
         best.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(Ordering::Equal));
 
         best.into_iter()
@@ -332,7 +368,11 @@ impl HnswIndex {
 
     /// Keeps each node's neighbor list bounded by the configured HNSW degree.
     fn prune(&mut self, node_id: usize, layer: usize) -> Result<(), String> {
-        let limit = if layer == 0 { M0 } else { M };
+        let limit = if layer == 0 {
+            self.params.m0
+        } else {
+            self.params.m
+        };
         let Some(node) = self.nodes.get(&node_id) else {
             return Ok(());
         };
@@ -366,7 +406,7 @@ impl HnswIndex {
     fn level_for(&self, external_id: &str) -> usize {
         let mut hash = hash64(external_id.as_bytes());
         let mut level = 0usize;
-        while level < MAX_LEVEL && hash & 0b11 == 0 {
+        while level < self.params.max_level && hash & 0b11 == 0 {
             level += 1;
             hash >>= 2;
         }

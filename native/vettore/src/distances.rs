@@ -271,10 +271,73 @@ pub fn normalize_minmax(vector: Vec<f32>) -> Result<Vec<f32>, String> {
     }
 }
 
-/// Encodes vector signs as integer bits for compatibility helpers.
+/// Encodes vector signs into packed 64-bit words.
 pub fn compress_sign_bits(vector: &[f32]) -> Vec<u64> {
-    vector
+    let mut words = vec![0u64; vector.len().div_ceil(64)];
+
+    for (index, value) in vector.iter().enumerate() {
+        if *value >= 0.0 {
+            words[index / 64] |= 1u64 << (index % 64);
+        }
+    }
+
+    words
+}
+
+/// Hamming distance over packed bit words.
+pub fn packed_hamming(left: &[u64], right: &[u64], dimensions: usize) -> Result<f32, String> {
+    validate_packed_pair(left, right, dimensions)?;
+
+    let distance = left
         .iter()
-        .map(|value| u64::from(*value >= 0.0))
-        .collect()
+        .zip(right)
+        .enumerate()
+        .map(|(index, (a, b))| ((*a ^ *b) & word_mask(index, dimensions)).count_ones())
+        .sum::<u32>();
+
+    Ok(distance as f32)
+}
+
+/// Jaccard distance over packed bit words.
+pub fn packed_jaccard(left: &[u64], right: &[u64], dimensions: usize) -> Result<f32, String> {
+    validate_packed_pair(left, right, dimensions)?;
+
+    let mut intersection = 0u32;
+    let mut union = 0u32;
+
+    for (index, (a, b)) in left.iter().zip(right).enumerate() {
+        let mask = word_mask(index, dimensions);
+        intersection += ((*a & *b) & mask).count_ones();
+        union += ((*a | *b) & mask).count_ones();
+    }
+
+    if union == 0 {
+        Ok(0.0)
+    } else {
+        Ok(1.0 - intersection as f32 / union as f32)
+    }
+}
+
+fn validate_packed_pair(left: &[u64], right: &[u64], dimensions: usize) -> Result<(), String> {
+    let words = dimensions.div_ceil(64);
+
+    if dimensions == 0 {
+        return Err("dimensions must be positive".to_string());
+    }
+    if left.len() != words || right.len() != words {
+        return Err("dimension mismatch".to_string());
+    }
+
+    Ok(())
+}
+
+fn word_mask(index: usize, dimensions: usize) -> u64 {
+    let words = dimensions.div_ceil(64);
+    let remainder = dimensions % 64;
+
+    if index + 1 == words && remainder != 0 {
+        (1u64 << remainder) - 1
+    } else {
+        u64::MAX
+    }
 }

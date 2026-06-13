@@ -8,7 +8,7 @@ defmodule Vettore.Embedding do
     * `:value` - A string or content identifier for this embedding can be Id, or Text (e.g. "this is text data").
     * `:vector` - A list of floating‑point numbers representing the embedding (e.g. `[1.0, 2.0, 3.0]`).
     * `:vectors` - Optional token/document vectors for late interaction search.
-    * `:binary_vector` - Sign-bit compressed vector used for binary quantized candidate search.
+    * `:binary_vector` - Packed sign-bit vector used for binary quantized candidate search.
     * `:metadata` - (Optional) A map with any additional information you want to store
       (e.g. `%{"info" => "my note"}`).
   """

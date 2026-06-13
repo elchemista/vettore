@@ -68,16 +68,94 @@ defmodule Vettore.Nifs do
   def compress_sign_bits(_vector), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  @spec hnsw_new_l2() :: reference()
-  def hnsw_new_l2, do: :erlang.nif_error(:nif_not_loaded)
+  @spec packed_hamming_distance([non_neg_integer()], [non_neg_integer()], pos_integer()) ::
+          {:ok, float()} | {:error, String.t()}
+  def packed_hamming_distance(_left, _right, _dimensions),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  @spec hnsw_new_cosine() :: reference()
-  def hnsw_new_cosine, do: :erlang.nif_error(:nif_not_loaded)
+  @spec packed_jaccard_distance([non_neg_integer()], [non_neg_integer()], pos_integer()) ::
+          {:ok, float()} | {:error, String.t()}
+  def packed_jaccard_distance(_left, _right, _dimensions),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  @spec hnsw_new_inner_product() :: reference()
-  def hnsw_new_inner_product, do: :erlang.nif_error(:nif_not_loaded)
+  @spec flat_new_l2() :: reference()
+  def flat_new_l2, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_l2_squared() :: reference()
+  def flat_new_l2_squared, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_cosine() :: reference()
+  def flat_new_cosine, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_inner_product() :: reference()
+  def flat_new_inner_product, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_negative_inner_product() :: reference()
+  def flat_new_negative_inner_product, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_manhattan() :: reference()
+  def flat_new_manhattan, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_chebyshev() :: reference()
+  def flat_new_chebyshev, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_hamming() :: reference()
+  def flat_new_hamming, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_new_jaccard() :: reference()
+  def flat_new_jaccard, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_insert(reference(), String.t(), [float()]) :: :ok | {:ok, {}} | {:error, String.t()}
+  def flat_insert(_index, _id, _vector), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_insert_many(reference(), [{String.t(), [float()]}]) ::
+          :ok | {:ok, {}} | {:error, String.t()}
+  def flat_insert_many(_index, _vectors), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_delete(reference(), String.t()) :: :ok | {:ok, {}} | {:error, String.t()}
+  def flat_delete(_index, _id), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_search(reference(), [float()], pos_integer()) ::
+          {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def flat_search(_index, _query, _limit), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_new_l2(pos_integer(), pos_integer(), pos_integer(), pos_integer(), pos_integer()) ::
+          {:ok, reference()} | {:error, String.t()}
+  def hnsw_new_l2(_m, _m0, _ef_construction, _ef_search, _max_level),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_new_cosine(pos_integer(), pos_integer(), pos_integer(), pos_integer(), pos_integer()) ::
+          {:ok, reference()} | {:error, String.t()}
+  def hnsw_new_cosine(_m, _m0, _ef_construction, _ef_search, _max_level),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_new_inner_product(
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer()
+        ) ::
+          {:ok, reference()} | {:error, String.t()}
+  def hnsw_new_inner_product(_m, _m0, _ef_construction, _ef_search, _max_level),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec hnsw_insert(reference(), String.t(), [float()]) :: :ok | {:ok, {}} | {:error, String.t()}

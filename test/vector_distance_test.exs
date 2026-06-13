@@ -118,15 +118,19 @@ defmodule VettoreDistanceTest do
   end
 
   describe "compression and reranking" do
-    test "compress_f32_vector turns signs into integer bits" do
-      assert Distance.compress_f32_vector([1.0, -2.0, 0.0]) == [1, 0, 1]
+    test "compress_f32_vector packs signs into 64-bit words" do
+      assert Distance.compress_f32_vector([1.0, -2.0, 0.0]) == [5]
     end
 
-    test "hamming works with compressed sign bits" do
+    test "packed hamming and jaccard work with compressed sign bits" do
       bits1 = Distance.compress_f32_vector([1.0, -2.0, 0.0])
       bits2 = Distance.compress_f32_vector([-1.0, -2.0, 0.0])
+      bits3 = Distance.compress_f32_vector([1.0, 2.0, -1.0])
 
-      assert {:ok, 1.0} = Distance.hamming(bits1, bits2)
+      assert {:ok, 1.0} = Distance.packed_hamming(bits1, bits2, 3)
+
+      assert {:ok, jaccard} = Distance.packed_jaccard(bits1, bits3, 3)
+      assert_in_delta jaccard, 2 / 3, 1.0e-6
     end
 
     test "mmr reranks with named metric dispatch" do

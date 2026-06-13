@@ -230,12 +230,12 @@ defmodule Vettore.Distance do
   def dot_product(left, right), do: inner_product(left, right)
 
   @doc """
-  Compress a float vector into sign bits represented as integers.
+  Compress a float vector into packed sign bits.
 
   ## Examples
 
       iex> Vettore.Distance.compress_f32_vector([1.0, -2.0, 0.0])
-      [1, 0, 1]
+      [5]
   """
   @spec compress_f32_vector(vector()) :: [non_neg_integer()]
   def compress_f32_vector(vector) when is_list(vector) do
@@ -243,6 +243,47 @@ defmodule Vettore.Distance do
     |> float_vector()
     |> Nifs.compress_sign_bits()
   end
+
+  @doc """
+  Hamming distance over packed bit vectors.
+
+  ## Examples
+
+      iex> left = Vettore.Distance.compress_f32_vector([1.0, -2.0, 0.0])
+      iex> right = Vettore.Distance.compress_f32_vector([-1.0, -2.0, 0.0])
+      iex> Vettore.Distance.packed_hamming(left, right, 3)
+      {:ok, 1.0}
+  """
+  @spec packed_hamming([non_neg_integer()], [non_neg_integer()], pos_integer()) ::
+          {:ok, float()} | {:error, term()}
+  def packed_hamming(left, right, dimensions)
+      when is_list(left) and is_list(right) and is_integer(dimensions) do
+    Nifs.packed_hamming_distance(left, right, dimensions)
+    |> normalize_native_error()
+  end
+
+  def packed_hamming(_left, _right, _dimensions), do: {:error, :invalid_vector}
+
+  @doc """
+  Jaccard distance over packed bit vectors.
+
+  ## Examples
+
+      iex> left = Vettore.Distance.compress_f32_vector([1.0, -2.0, 0.0])
+      iex> right = Vettore.Distance.compress_f32_vector([1.0, 2.0, -1.0])
+      iex> {:ok, distance} = Vettore.Distance.packed_jaccard(left, right, 3)
+      iex> Float.round(distance, 6)
+      0.666667
+  """
+  @spec packed_jaccard([non_neg_integer()], [non_neg_integer()], pos_integer()) ::
+          {:ok, float()} | {:error, term()}
+  def packed_jaccard(left, right, dimensions)
+      when is_list(left) and is_list(right) and is_integer(dimensions) do
+    Nifs.packed_jaccard_distance(left, right, dimensions)
+    |> normalize_native_error()
+  end
+
+  def packed_jaccard(_left, _right, _dimensions), do: {:error, :invalid_vector}
 
   @doc """
   Collection-agnostic MMR reranker.

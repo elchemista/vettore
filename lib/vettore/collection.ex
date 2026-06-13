@@ -17,7 +17,8 @@ defmodule Vettore.Collection do
           store_state: term(),
           index_mod: module(),
           index_state: term(),
-          index: atom()
+          index: atom(),
+          index_options: keyword()
         }
   @type embedding_input :: Embedding.t() | map()
   @type hybrid_generator ::
@@ -39,7 +40,8 @@ defmodule Vettore.Collection do
     :store_state,
     :index_mod,
     :index_state,
-    :index
+    :index,
+    :index_options
   ]
 
   @metrics ~w(l2 l2_squared cosine inner_product negative_inner_product manhattan chebyshev hamming jaccard)a
@@ -52,6 +54,7 @@ defmodule Vettore.Collection do
     normalize = Keyword.get(opts, :normalize, default_normalize(metric))
     store = Keyword.get(opts, :store, :ets)
     index = Keyword.get(opts, :index, :flat)
+    index_options = Keyword.get(opts, :index_options, [])
     score = Keyword.get(opts, :score, :raw)
     compressed = Keyword.get(opts, :compressed, false)
 
@@ -67,9 +70,10 @@ defmodule Vettore.Collection do
              normalize: normalize,
              score: score,
              index: index,
+             index_options: index_options,
              compressed: compressed
            }),
-         {:ok, index_state} <- index_mod.new(metric) do
+         {:ok, index_state} <- index_mod.new(metric, index_options) do
       {:ok,
        %__MODULE__{
          name: Keyword.get(opts, :name),
@@ -81,7 +85,8 @@ defmodule Vettore.Collection do
          store_state: store_state,
          index_mod: index_mod,
          index_state: index_state,
-         index: index
+         index: index,
+         index_options: index_options
        }}
     end
   end
@@ -200,7 +205,7 @@ defmodule Vettore.Collection do
 
       stage_embeddings =
         embeddings
-        |> Enum.flat_map(&binary_candidate(query_bits, &1))
+        |> Enum.flat_map(&binary_candidate(collection, query_bits, &1))
         |> Enum.sort_by(fn {distance, embedding} -> {distance, embedding.id} end)
         |> Enum.take(candidates)
         |> Enum.map(fn {_distance, embedding} -> embedding end)
@@ -258,11 +263,12 @@ defmodule Vettore.Collection do
     dimensions = config_option(config, opts, :dimensions, nil)
     normalize = config_option(config, opts, :normalize, default_normalize(metric))
     index = config_option(config, opts, :index, :flat)
+    index_options = config_option(config, opts, :index_options, [])
 
     with :ok <- validate_dimensions(dimensions),
          :ok <- validate_metric(metric),
          {:ok, index_mod} <- index_module(index),
-         {:ok, index_state} <- index_mod.new(metric) do
+         {:ok, index_state} <- index_mod.new(metric, index_options) do
       {:ok,
        %__MODULE__{
          name: config_option(config, opts, :name, nil),
@@ -274,7 +280,8 @@ defmodule Vettore.Collection do
          store_state: store_state,
          index_mod: index_mod,
          index_state: index_state,
-         index: index
+         index: index,
+         index_options: index_options
        }}
     end
   end
@@ -362,7 +369,7 @@ defmodule Vettore.Collection do
 
       embeddings =
         embeddings
-        |> Enum.flat_map(&binary_candidate(query_bits, &1))
+        |> Enum.flat_map(&binary_candidate(collection, query_bits, &1))
         |> Enum.sort_by(fn {distance, embedding} -> {distance, embedding.id} end)
         |> Enum.take(candidates)
         |> Enum.map(fn {_distance, embedding} -> embedding end)
@@ -485,12 +492,12 @@ defmodule Vettore.Collection do
     |> Enum.map(fn {_result, embedding} -> embedding end)
   end
 
-  @spec binary_candidate([non_neg_integer()], Embedding.t()) ::
+  @spec binary_candidate(t(), [non_neg_integer()], Embedding.t()) ::
           [{float(), Embedding.t()}]
-  defp binary_candidate(query_bits, %Embedding{} = embedding) do
+  defp binary_candidate(collection, query_bits, %Embedding{} = embedding) do
     embedding_bits = binary_vector(embedding)
 
-    case Distance.hamming(query_bits, embedding_bits) do
+    case Distance.packed_hamming(query_bits, embedding_bits, collection.dimensions) do
       {:ok, distance} -> [{distance, embedding}]
       {:error, _reason} -> []
     end

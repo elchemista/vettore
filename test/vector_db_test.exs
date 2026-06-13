@@ -74,11 +74,62 @@ defmodule VettoreDBTest do
       {:ok, flat} = Collection.new(name: :flat, dimensions: 2, metric: :l2, index: :flat)
       {:ok, hnsw} = Collection.new(name: :hnsw, dimensions: 2, metric: :l2, index: :hnsw)
 
+      assert is_reference(flat.index_state)
+      assert is_reference(hnsw.index_state)
+
       assert :ok = Collection.put_many(flat, embeddings)
       assert :ok = Collection.put_many(hnsw, embeddings)
 
       assert {:ok, [%Result{id: "near"}]} = Collection.search(flat, [0.0, 0.0], limit: 1)
       assert {:ok, [%Result{id: "near"}]} = Collection.search(hnsw, [0.0, 0.0], limit: 1)
+    end
+
+    test "flat native index mirrors deletes from the canonical ETS store" do
+      {:ok, collection} = Collection.new(name: :flat_delete, dimensions: 2, metric: :l2)
+
+      assert :ok =
+               Collection.put_many(collection, [
+                 %Embedding{id: "delete_me", vector: [0.0, 0.0]},
+                 %Embedding{id: "keep_me", vector: [1.0, 1.0]}
+               ])
+
+      assert :ok = Collection.delete(collection, "delete_me")
+
+      assert {:ok, [%Result{id: "keep_me"}]} =
+               Collection.search(collection, [0.0, 0.0], limit: 1)
+    end
+
+    test "hnsw index accepts configurable graph and search parameters" do
+      options = [m: 4, m0: 8, ef_construction: 16, ef_search: 8, max_level: 4]
+
+      assert {:ok, collection} =
+               Collection.new(
+                 name: :hnsw_options,
+                 dimensions: 2,
+                 metric: :l2,
+                 index: :hnsw,
+                 index_options: options
+               )
+
+      assert collection.index_options == options
+
+      assert :ok =
+               Collection.put_many(collection, [
+                 %Embedding{id: "near", vector: [0.0, 0.0]},
+                 %Embedding{id: "far", vector: [5.0, 5.0]}
+               ])
+
+      assert {:ok, [%Result{id: "near"}]} =
+               Collection.search(collection, [0.0, 0.0], limit: 1)
+
+      assert {:error, :invalid_hnsw_options} =
+               Collection.new(
+                 name: :bad_hnsw_options,
+                 dimensions: 2,
+                 metric: :l2,
+                 index: :hnsw,
+                 index_options: [m: 0]
+               )
     end
 
     test "funnel search uses prefix candidates and reranks with full vectors" do
@@ -111,7 +162,7 @@ defmodule VettoreDBTest do
                  %Embedding{id: "opposite", vector: [-1.0, -1.0]}
                ])
 
-      assert {:ok, %Embedding{binary_vector: [1, 1]}} = Collection.get(collection, "exact")
+      assert {:ok, %Embedding{binary_vector: [3]}} = Collection.get(collection, "exact")
 
       assert {:ok, [%Result{id: "exact", distance: distance}]} =
                Collection.quantized_search(collection, [1.0, 1.0],
@@ -303,7 +354,8 @@ defmodule VettoreDBTest do
           name: :snapshot_hnsw,
           dimensions: 2,
           metric: :l2,
-          index: :hnsw
+          index: :hnsw,
+          index_options: [m: 4, m0: 8, ef_construction: 16, ef_search: 8, max_level: 4]
         )
 
       assert :ok =
@@ -315,6 +367,14 @@ defmodule VettoreDBTest do
       assert :ok = Collection.snapshot(collection, path)
       assert {:ok, loaded} = Collection.load_snapshot(path)
       assert loaded.index == :hnsw
+
+      assert loaded.index_options == [
+               m: 4,
+               m0: 8,
+               ef_construction: 16,
+               ef_search: 8,
+               max_level: 4
+             ]
 
       assert {:ok, [%Result{id: "a_near"}]} =
                Collection.search(loaded, [1.0, 1.0], limit: 1)

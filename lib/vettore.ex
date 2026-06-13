@@ -41,6 +41,16 @@ defmodule Vettore do
       iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :cosine)
       iex> collection.metric
       :cosine
+
+      iex> {:ok, collection} =
+      ...>   Vettore.new(
+      ...>     dimensions: 2,
+      ...>     metric: :l2,
+      ...>     index: :hnsw,
+      ...>     index_options: [m: 4, m0: 8, ef_construction: 16]
+      ...>   )
+      iex> collection.index_options[:m]
+      4
   """
   @spec new(keyword()) :: {:ok, Collection.t()} | {:error, term()}
   def new(opts) when is_list(opts), do: Collection.new(opts)

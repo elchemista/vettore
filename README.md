@@ -130,8 +130,9 @@ The standalone helpers are nice while exploring. For production-style retrieval,
 
 ## Exact Search
 
-Flat search scans ETS records exactly and scores them with native distance
-kernels.
+Flat search keeps ids and vectors in a Rust resource and scores the whole exact
+scan in one native call. ETS remains the canonical store for values, metadata,
+snapshots, and usability.
 
 ```elixir
 {:ok, collection} =
@@ -161,6 +162,13 @@ is an acceleration structure.
     name: :ann_vectors,
     dimensions: 768,
     index: :hnsw,
+    index_options: [
+      m: 16,
+      m0: 32,
+      ef_construction: 100,
+      ef_search: 64,
+      max_level: 12
+    ],
     metric: :cosine,
     normalize: :l2
   )
@@ -473,7 +481,12 @@ Sign compression:
 
 ```elixir
 Vettore.Distance.compress_f32_vector([1.0, -2.0, 0.0])
-# [1, 0, 1]
+# [5]
+
+left = Vettore.Distance.compress_f32_vector([1.0, -2.0, 0.0])
+right = Vettore.Distance.compress_f32_vector([-1.0, -2.0, 0.0])
+Vettore.Distance.packed_hamming(left, right, 3)
+# {:ok, 1.0}
 ```
 
 ## Compatibility API
