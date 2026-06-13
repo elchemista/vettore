@@ -14,6 +14,12 @@ defmodule Vettore.MixProject do
       deps: deps(),
       description: description(),
       package: package(),
+      rustler_precompiled: [
+        provider: :github,
+        owner: "elchemista",
+        repo: "vettore",
+        tag: "v#{@version}"
+      ],
       docs: [
         master: "readme",
         extras: [
@@ -60,7 +66,7 @@ defmodule Vettore.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.36.1"},
+      {:rustler, "~> 0.36.1", optional: true},
       {:rustler_precompiled, "~> 0.8"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.0", only: :dev},
