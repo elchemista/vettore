@@ -1,6 +1,7 @@
 name: Build precompiled NIFs
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -31,14 +32,15 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Extract project version
         shell: bash
         run: |
-          echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> $GITHUB_ENV
+          echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> "${GITHUB_ENV}"
 
       - name: Verify tag matches project version
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
           if [ "v${PROJECT_VERSION}" != "${GITHUB_REF_NAME}" ]; then
@@ -64,7 +66,7 @@ jobs:
           project-dir: "native/vettore"
 
       - name: Artifact upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ steps.build-crate.outputs.file-name }}
           path: ${{ steps.build-crate.outputs.file-path }}
@@ -74,14 +76,14 @@ jobs:
     name: Publish release archives
     runs-on: ubuntu-22.04
     needs: build_release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.ref_type == 'tag'
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           path: release-artifacts
           merge-multiple: true
@@ -100,14 +102,14 @@ jobs:
           } > "${checksum_file}"
 
       - name: Upload release checksum
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: rustler-checksum
           path: checksum-Elixir.Vettore.Nifs.exs
           if-no-files-found: error
 
       - name: Publish archives and packages
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           generate_release_notes: true
           overwrite_files: true

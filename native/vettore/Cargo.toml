@@ -3,6 +3,7 @@ name = "vettore"
 version = "0.3.2"
 authors = []
 edition = "2021"
+rust-version = "1.91"
 
 [lib]
 name = "vettore"
@@ -10,8 +11,13 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.36.1"
-wide = "0.7.32"
+rustler = { version = "0.38.0", default-features = false }
+wide = "1.5.0"
+
+[features]
+default = ["nif_version_2_15"]
+nif_version_2_15 = ["rustler/nif_version_2_15"]
+nif_version_2_16 = ["rustler/nif_version_2_16"]
 
 [profile.release]
 codegen-units = 1

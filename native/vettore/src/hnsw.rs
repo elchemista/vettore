@@ -483,6 +483,9 @@ impl HnswIndex {
 
 pub struct HnswResource(pub RwLock<HnswIndex>);
 
+#[rustler::resource_impl]
+impl rustler::Resource for HnswResource {}
+
 /// FNV-1a style hash used for deterministic graph level assignment.
 fn hash64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;

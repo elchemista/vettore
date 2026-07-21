@@ -28,6 +28,8 @@ Semantic Versioning.
   duplicate compatibility creation, or database deletion fails.
 - Made compatibility-database shutdown atomic with concurrent collection
   creation and removed the unsafe timeout on large owner-mediated batches.
+- Deleted drained ETS tables before acknowledging database shutdown so callers
+  consistently observe `{:error, :closed}` immediately after `close/1`.
 - Added overflow-safe L2, cosine, z-score, and min-max normalization for extreme
   finite f32 values.
 - Recovered valid large L2 and cancelling dot-product results with f64 fallback,
@@ -81,6 +83,14 @@ Semantic Versioning.
   direct MaxSim, MUVERA encodings, and the ETS read/write ownership boundary.
 - Added pull-request CI for enforced Elixir and Rust algorithm coverage, Credo,
   Dialyzer, docs, Hex package contents, Rust formatting, tests, and Clippy.
+- Added explicit Cargo feature forwarding and CI checks for Rustler NIF 2.15 and
+  2.16 precompiled artifact builds.
+- Updated Rustler to 0.38, RustlerPrecompiled to 0.9, and `wide` to 1.5. Local
+  native builds now require Rust 1.91 or newer.
+- Isolated the real `ex_fastembed` integration dependency from published Hex
+  metadata so its older Rustler constraint cannot block application updates.
+- Made the complete precompiled-NIF matrix manually runnable from a release
+  branch without creating or publishing a GitHub Release.
 - The tag release workflow now validates version/tag parity and publishes a
   generated Rustler checksum file with the native archives.
 

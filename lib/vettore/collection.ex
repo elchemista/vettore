@@ -919,7 +919,7 @@ defmodule Vettore.Collection do
 
   @spec prepare_embedding(t(), embedding_input()) :: {:ok, Embedding.t()} | {:error, term()}
   defp prepare_embedding(%__MODULE__{} = collection, embedding) do
-    with {:ok, embedding} <- to_embedding(embedding),
+    with {:ok, %Embedding{} = embedding} <- to_embedding(embedding),
          {:ok, id} <- embedding_id(embedding),
          {:ok, vectors} <- prepare_embedding_vectors(collection, embedding.vectors),
          {:ok, vector} <- prepare_primary_vector(collection, embedding.vector, vectors),

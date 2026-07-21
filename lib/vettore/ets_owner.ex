@@ -95,7 +95,9 @@ defmodule Vettore.ETSOwner do
   def handle_call({:take, key}, _from, table), do: {:reply, :ets.take(table, key), table}
 
   def handle_call(:drain_and_close, _from, table) do
-    {:stop, :normal, :ets.tab2list(table), table}
+    rows = :ets.tab2list(table)
+    true = :ets.delete(table)
+    {:stop, :normal, rows, table}
   end
 
   @spec normalize_loaded_table(:ets.tid()) :: {:ok, :ets.tid()} | {:stop, term()}

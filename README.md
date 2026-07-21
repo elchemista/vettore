@@ -546,11 +546,18 @@ New code should prefer the collection-style top-level API: `Vettore.new/1`, `Vet
 
 ## Development
 
-The tests include a real `ex_fastembed` integration with
-`BAAI/bge-small-en-v1.5` over a small phrase corpus. It compares exact search,
-HNSW, and hybrid retrieval while checking canonical values and metadata.
+CI includes a real `ex_fastembed` integration with `BAAI/bge-small-en-v1.5`
+over a small phrase corpus. It compares exact search, HNSW, and hybrid
+retrieval while checking canonical values and metadata. Enable that test
+locally without adding its older Rustler constraint to the published package:
 
-Build the Rust crate locally by setting `VETTORE_BUILD=1`:
+```bash
+MIX_ENV=test VETTORE_TEST_EX_FASTEMBED=1 mix deps.get --locked
+VETTORE_BUILD=1 VETTORE_TEST_EX_FASTEMBED=1 mix test --cover
+```
+
+Build the Rust crate locally with Rust 1.91 or newer by setting
+`VETTORE_BUILD=1`:
 
 ```bash
 VETTORE_BUILD=1 mix test --cover

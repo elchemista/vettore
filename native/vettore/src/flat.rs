@@ -130,6 +130,9 @@ impl FlatIndex {
 
 pub struct FlatResource(pub RwLock<FlatIndex>);
 
+#[rustler::resource_impl]
+impl rustler::Resource for FlatResource {}
+
 fn validate_vector(vector: &[f32], dimension: Option<usize>) -> Result<(), String> {
     if vector.is_empty() {
         return Err("vector must not be empty".to_string());

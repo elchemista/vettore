@@ -1,6 +1,9 @@
 defmodule VettoreExFastembedIntegrationTest do
   use ExUnit.Case, async: false
 
+  @compile {:no_warn_undefined, ExFastembed}
+  @moduletag skip: System.get_env("VETTORE_TEST_EX_FASTEMBED") != "1"
+
   alias Vettore.{Collection, Embedding, Result}
 
   @model "BAAI/bge-small-en-v1.5"

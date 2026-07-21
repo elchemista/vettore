@@ -72,14 +72,36 @@ defmodule Vettore.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.36.1", optional: true},
-      {:rustler_precompiled, "~> 0.8"},
-      {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
-      {:benchee, "~> 1.0", only: :dev},
-      {:ex_fastembed, github: "elchemista/ex_fastembed", branch: "master", only: :test},
+      rustler_dependency(),
+      {:rustler_precompiled, "~> 0.9.0"},
+      {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},
+      {:benchee, "~> 1.5.1", only: :dev},
       # Documentation Provider
       {:ex_doc, "~> 0.40.3", only: :dev, optional: true, runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
-    ]
+      {:dialyxir, "~> 1.4.7", only: [:dev, :test], runtime: false}
+    ] ++ fastembed_test_dependency()
   end
+
+  # ex_fastembed still constrains its test-only Mix dependency to Rustler 0.36.
+  # Keep that compatibility override out of Vettore's published Hex metadata.
+  defp rustler_dependency do
+    if fastembed_test?() do
+      {:rustler, "~> 0.38.0", optional: true, override: true}
+    else
+      {:rustler, "~> 0.38.0", optional: true}
+    end
+  end
+
+  defp fastembed_test_dependency do
+    if fastembed_test?() do
+      [
+        {:ex_fastembed,
+         github: "elchemista/ex_fastembed", branch: "master", only: :test, runtime: false}
+      ]
+    else
+      []
+    end
+  end
+
+  defp fastembed_test?, do: System.get_env("VETTORE_TEST_EX_FASTEMBED") == "1"
 end

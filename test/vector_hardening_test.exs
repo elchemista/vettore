@@ -217,8 +217,10 @@ defmodule VettoreHardeningTest do
       assert :ok = Vettore.close(db)
       refute Process.alive?(db.owner)
       refute Process.alive?(collection.store_state.owner)
+      assert :undefined == :ets.info(db.table)
       assert {:error, :closed} = Vettore.create_collection(db, "new", 2, :l2)
       assert {:error, :closed} = Vettore.delete_collection(db, "docs")
+      assert {:error, :closed} = Vettore.get_all(db, "docs")
     end
 
     test "compatibility shutdown drains collections racing with creation" do

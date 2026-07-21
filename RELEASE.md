@@ -7,13 +7,14 @@ old checksum map.
 
 ## 1. Verify the source release
 
-From a clean checkout with Rust installed:
+From a clean checkout with Rust 1.91 or newer installed:
 
 ```bash
 VETTORE_BUILD=1 mix deps.get --locked
+MIX_ENV=test VETTORE_TEST_EX_FASTEMBED=1 mix deps.get --locked
 VETTORE_BUILD=1 mix compile --warnings-as-errors
 VETTORE_BUILD=1 mix format --check-formatted
-VETTORE_BUILD=1 mix test --cover --warnings-as-errors
+VETTORE_BUILD=1 VETTORE_TEST_EX_FASTEMBED=1 mix test --cover --warnings-as-errors
 VETTORE_BUILD=1 \
 VETTORE_BENCH_DIMENSIONS=16 \
 VETTORE_BENCH_BATCH=64 \
@@ -26,6 +27,8 @@ VETTORE_BUILD=1 mix credo --strict
 VETTORE_BUILD=1 mix dialyzer
 cargo fmt --manifest-path native/vettore/Cargo.toml --all --check
 cargo test --manifest-path native/vettore/Cargo.toml --locked
+cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-features --features nif_version_2_15
+cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-features --features nif_version_2_16
 cargo llvm-cov --manifest-path native/vettore/Cargo.toml --all-features --ignore-filename-regex 'src/nifs\.rs' --summary-only --fail-under-lines 98
 cargo clippy --manifest-path native/vettore/Cargo.toml --all-targets --all-features --locked -- -D warnings
 VETTORE_BUILD=1 mix docs
@@ -41,6 +44,11 @@ algorithm modules remain subject to the 98% Rust line threshold.
 
 The benchmark smoke run must preflight every search mode successfully and print
 overlap against the exact vector and multi-vector baselines before timing.
+
+Before creating the tag, open **Actions → Build precompiled NIFs → Run
+workflow**, select the release branch, and run it manually. A manual run builds
+and uploads the complete NIF/target artifact matrix for inspection but skips the
+GitHub Release publishing job. Only a matching `v0.3.2` tag publishes assets.
 
 ## 2. Build and publish native archives
 

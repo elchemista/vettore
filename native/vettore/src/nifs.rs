@@ -475,11 +475,4 @@ fn muvera_encode_document(
     ))
 }
 
-/// Registers Rust resources with the BEAM VM when the NIF library loads.
-fn load(env: rustler::Env, _term: rustler::Term) -> bool {
-    let flat_loaded = rustler::resource!(FlatResource, env);
-    let hnsw_loaded = rustler::resource!(HnswResource, env);
-    flat_loaded && hnsw_loaded
-}
-
-rustler::init!("Elixir.Vettore.Nifs", load = load);
+rustler::init!("Elixir.Vettore.Nifs");
