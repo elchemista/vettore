@@ -3,7 +3,7 @@
 All notable changes to Vettore are documented here. The project follows
 Semantic Versioning.
 
-## [0.3.2] - Unreleased
+## [0.3.2] - 2026-07-21
 
 ### Fixed
 
