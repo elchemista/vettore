@@ -22,4 +22,9 @@ defmodule Vettore.Store do
   @callback count(state()) :: non_neg_integer()
   @callback snapshot(state(), Path.t()) :: :ok | {:error, term()}
   @callback load_snapshot(Path.t()) :: {:ok, {state(), config()}} | {:error, term()}
+  @callback configure(state(), config()) :: :ok | {:error, term()}
+  @callback close(state()) :: :ok | {:error, term()}
+  @callback alive?(state()) :: boolean()
+
+  @optional_callbacks configure: 2, close: 1, alive?: 1
 end

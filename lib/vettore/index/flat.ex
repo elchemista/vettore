@@ -10,9 +10,19 @@ defmodule Vettore.Index.Flat do
 
   alias Vettore.{Collection, Distance, Embedding, Nifs, Result}
 
+  @max_nif_usize 4_294_967_295
+
   @spec new(Distance.metric(), keyword()) :: {:ok, reference()} | {:error, term()}
   @impl true
-  def new(metric, _opts \\ []), do: new_metric(metric)
+  def new(metric, opts \\ [])
+
+  def new(metric, opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and opts == [],
+      do: new_metric(metric),
+      else: {:error, :invalid_flat_options}
+  end
+
+  def new(_metric, _opts), do: {:error, :invalid_flat_options}
 
   @spec put(Collection.t(), Embedding.t()) :: :ok | {:error, term()}
   @impl true
@@ -37,12 +47,12 @@ defmodule Vettore.Index.Flat do
   @spec search(Collection.t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
   @impl true
   def search(%Collection{} = collection, query, opts) do
-    limit = Keyword.get(opts, :limit, 10)
-
-    with :ok <- validate_limit(limit),
+    with :ok <- validate_search_options(opts),
+         limit = Keyword.get(opts, :limit, 10),
+         :ok <- validate_limit(limit),
          {:ok, query} <- Collection.prepare_query(collection, query),
          {:ok, hits} <- Nifs.flat_search(collection.index_state, query, limit) do
-      {:ok, Enum.map(hits, &to_result(collection, &1))}
+      {:ok, Enum.flat_map(hits, &to_result(collection, &1))}
     end
   end
 
@@ -58,24 +68,26 @@ defmodule Vettore.Index.Flat do
   defp new_metric(:jaccard), do: {:ok, Nifs.flat_new_jaccard()}
   defp new_metric(metric), do: {:error, {:unsupported_flat_metric, metric}}
 
-  @spec to_result(Collection.t(), {String.t(), float()}) :: Result.t()
+  @spec to_result(Collection.t(), {String.t(), float()}) :: [Result.t()]
   defp to_result(collection, {id, raw}) do
-    embedding =
-      case Collection.get(collection, id) do
-        {:ok, embedding} -> embedding
-        {:error, _reason} -> %Embedding{id: id, value: id}
-      end
+    case Collection.get(collection, id) do
+      {:ok, %Embedding{} = embedding} ->
+        {score, distance} = Distance.result_values(collection.metric, raw, collection.score)
 
-    {score, distance} = Distance.result_values(collection.metric, raw, collection.score)
+        [
+          %Result{
+            id: id,
+            value: embedding.value,
+            score: score,
+            distance: distance,
+            metric: collection.metric,
+            metadata: embedding.metadata
+          }
+        ]
 
-    %Result{
-      id: id,
-      value: embedding.value,
-      score: score,
-      distance: distance,
-      metric: collection.metric,
-      metadata: embedding.metadata
-    }
+      {:error, _reason} ->
+        []
+    end
   end
 
   @spec normalize_ok(:ok | {:ok, {}} | {:error, term()}) :: :ok | {:error, term()}
@@ -84,6 +96,18 @@ defmodule Vettore.Index.Flat do
   defp normalize_ok(other), do: other
 
   @spec validate_limit(term()) :: :ok | {:error, :invalid_limit}
-  defp validate_limit(limit) when is_integer(limit) and limit > 0, do: :ok
+  defp validate_limit(limit)
+       when is_integer(limit) and limit > 0 and limit <= @max_nif_usize,
+       do: :ok
+
   defp validate_limit(_limit), do: {:error, :invalid_limit}
+
+  @spec validate_search_options(term()) :: :ok | {:error, :invalid_search_options}
+  defp validate_search_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and Enum.all?(Keyword.keys(opts), &(&1 == :limit)),
+      do: :ok,
+      else: {:error, :invalid_search_options}
+  end
+
+  defp validate_search_options(_opts), do: {:error, :invalid_search_options}
 end

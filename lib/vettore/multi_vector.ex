@@ -3,7 +3,7 @@ defmodule Vettore.MultiVector do
   Multi-vector scoring helpers.
   """
 
-  alias Vettore.Distance
+  alias Vettore.{Distance, Nifs}
 
   @type vector :: [number()]
   @type metric :: Distance.metric() | atom()
@@ -27,13 +27,20 @@ defmodule Vettore.MultiVector do
           {:ok, float()} | {:error, term()}
   def chamfer(query_vectors, document_vectors, opts \\ [])
 
-  def chamfer([], document_vectors, _opts) when is_list(document_vectors), do: {:ok, 0.0}
-  def chamfer(query_vectors, [], _opts) when is_list(query_vectors), do: {:ok, 0.0}
-
   def chamfer(query_vectors, document_vectors, opts)
-      when is_list(query_vectors) and is_list(document_vectors) do
-    metric = Keyword.get(opts, :metric, :inner_product)
-    sum_best_similarities(query_vectors, document_vectors, metric)
+      when is_list(query_vectors) and is_list(document_vectors) and is_list(opts) do
+    if Keyword.keyword?(opts) and Keyword.keys(opts) in [[], [:metric]] do
+      metric = normalize_metric(Keyword.get(opts, :metric, :inner_product))
+
+      with {:ok, metric_code} <- metric_code(metric),
+           {:ok, query_vectors} <- prepare_vectors(query_vectors),
+           {:ok, document_vectors} <- prepare_vectors(document_vectors) do
+        Nifs.multi_vector_score(query_vectors, document_vectors, metric_code)
+        |> normalize_native_error()
+      end
+    else
+      {:error, :invalid_options}
+    end
   end
 
   def chamfer(_query_vectors, _document_vectors, _opts), do: {:error, :invalid_multi_vector}
@@ -60,66 +67,57 @@ defmodule Vettore.MultiVector do
     chamfer(query_vectors, document_vectors, opts)
   end
 
-  @spec sum_best_similarities([vector()], [vector()], metric()) ::
-          {:ok, float()} | {:error, term()}
-  defp sum_best_similarities(query_vectors, document_vectors, metric) do
-    query_vectors
-    |> Enum.reduce_while(0.0, fn query_vector, acc ->
-      continue_with_best_similarity(query_vector, document_vectors, metric, acc)
-    end)
-    |> wrap_score()
-  end
+  @spec prepare_vectors(term()) :: {:ok, [[float()]]} | {:error, :invalid_multi_vector}
+  defp prepare_vectors([]), do: {:ok, []}
 
-  @spec continue_with_best_similarity(vector(), [vector()], metric(), float()) ::
-          {:cont, float()} | {:halt, {:error, term()}}
-  defp continue_with_best_similarity(query_vector, document_vectors, metric, acc) do
-    case best_similarity(query_vector, document_vectors, metric) do
-      {:ok, score} -> {:cont, acc + score}
-      {:error, reason} -> {:halt, {:error, reason}}
+  defp prepare_vectors([first | _] = vectors) when is_list(first) and first != [] do
+    dimensions = length(first)
+
+    if Enum.all?(vectors, fn vector ->
+         is_list(vector) and length(vector) == dimensions and Enum.all?(vector, &finite_f32?/1)
+       end) do
+      {:ok, Enum.map(vectors, fn vector -> Enum.map(vector, &(&1 / 1)) end)}
+    else
+      {:error, :invalid_multi_vector}
     end
   end
 
-  @spec best_similarity(vector(), [vector()], metric()) :: {:ok, float()} | {:error, term()}
-  defp best_similarity(query_vector, document_vectors, metric) do
-    document_vectors
-    |> Enum.reduce_while(nil, fn document_vector, best ->
-      case metric_value(metric, query_vector, document_vector) do
-        {:ok, value} ->
-          similarity = as_similarity(metric, value)
-          {:cont, if(best == nil, do: similarity, else: max(best, similarity))}
+  defp prepare_vectors(_vectors), do: {:error, :invalid_multi_vector}
 
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:error, reason} -> {:error, reason}
-      nil -> {:ok, 0.0}
-      best -> {:ok, best}
-    end
-  end
+  @spec metric_code(metric()) :: {:ok, 0..8} | {:error, {:unknown_metric, term()}}
+  defp metric_code(:l2), do: {:ok, 0}
+  defp metric_code(:l2_squared), do: {:ok, 1}
+  defp metric_code(:cosine), do: {:ok, 2}
+  defp metric_code(:inner_product), do: {:ok, 3}
+  defp metric_code(:negative_inner_product), do: {:ok, 4}
+  defp metric_code(:manhattan), do: {:ok, 5}
+  defp metric_code(:chebyshev), do: {:ok, 6}
+  defp metric_code(:hamming), do: {:ok, 7}
+  defp metric_code(:jaccard), do: {:ok, 8}
+  defp metric_code(metric), do: {:error, {:unknown_metric, metric}}
 
-  @spec metric_value(metric(), vector(), vector()) :: {:ok, float()} | {:error, term()}
-  defp metric_value(:l2, left, right), do: Distance.l2(left, right)
-  defp metric_value(:l2_squared, left, right), do: Distance.l2_squared(left, right)
-  defp metric_value(:cosine, left, right), do: Distance.cosine(left, right, normalize: :l2)
-  defp metric_value(:inner_product, left, right), do: Distance.inner_product(left, right)
-  defp metric_value(:dot, left, right), do: Distance.inner_product(left, right)
+  @spec normalize_metric(term()) :: term()
+  defp normalize_metric(:dot), do: :inner_product
+  defp normalize_metric(:dot_product), do: :inner_product
+  defp normalize_metric(:euclidean), do: :l2
+  defp normalize_metric(metric), do: metric
 
-  defp metric_value(:negative_inner_product, left, right),
-    do: Distance.negative_inner_product(left, right)
+  @spec normalize_native_error(term()) :: term()
+  defp normalize_native_error({:error, "dimension mismatch"}), do: {:error, :dimension_mismatch}
 
-  defp metric_value(:manhattan, left, right), do: Distance.manhattan(left, right)
-  defp metric_value(:chebyshev, left, right), do: Distance.chebyshev(left, right)
-  defp metric_value(:hamming, left, right), do: Distance.hamming(left, right)
-  defp metric_value(:jaccard, left, right), do: Distance.jaccard(left, right)
-  defp metric_value(metric, _left, _right), do: {:error, {:unknown_metric, metric}}
+  defp normalize_native_error({:error, "vector contains a non-finite value"}),
+    do: {:error, :invalid_multi_vector}
 
-  @spec wrap_score(float() | {:error, term()}) :: {:ok, float()} | {:error, term()}
-  defp wrap_score({:error, reason}), do: {:error, reason}
-  defp wrap_score(score), do: {:ok, score}
+  defp normalize_native_error({:error, "score overflow"}), do: {:error, :score_overflow}
 
-  @spec as_similarity(metric(), number()) :: float()
-  defp as_similarity(metric, value) when metric in [:cosine, :inner_product, :dot], do: value
-  defp as_similarity(_metric, distance), do: 1.0 / (1.0 + distance)
+  defp normalize_native_error(other), do: other
+
+  @spec finite_f32?(term()) :: boolean()
+  defp finite_f32?(value) when is_integer(value),
+    do: value >= -3.402_823_466_385_288_6e38 and value <= 3.402_823_466_385_288_6e38
+
+  defp finite_f32?(value) when is_float(value),
+    do: value >= -3.402_823_466_385_288_6e38 and value <= 3.402_823_466_385_288_6e38
+
+  defp finite_f32?(_value), do: false
 end

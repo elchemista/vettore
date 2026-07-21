@@ -46,7 +46,7 @@ Elixir systems, with Rust kept as acceleration rather than ownership.
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.3.1"}
+    {:vettore, "~> 0.3.2"}
   ]
 end
 ```
@@ -107,6 +107,7 @@ Vettore.multi_vector_search(collection, query_vectors, opts)
 Vettore.hybrid_search(collection, query, opts)
 Vettore.snapshot(collection, path)
 Vettore.load_snapshot(path, opts)
+Vettore.close(collection)
 ```
 
 `Vettore.new/1` creates a collection. `Vettore.new/0` still creates the older
@@ -185,6 +186,9 @@ Supported HNSW metrics:
 - `:cosine`
 - `:inner_product`
 
+HNSW results are hydrated from ETS, so they contain the same `value`,
+`metadata`, score, and distance fields as exact flat results.
+
 ## Adaptive Candidate Search
 
 These helpers first find a candidate set, then rerank with full stored vectors.
@@ -223,8 +227,11 @@ Vettore generates `binary_vector` at insert time:
 ```elixir
 {:ok, embedding} = Vettore.get(collection, "doc-1")
 embedding.binary_vector
-# [1, 0, 1, ...]
+# [7]
 ```
+
+Sign bits are packed into unsigned 64-bit words; they are not stored as one
+integer per vector dimension.
 
 ## Hybrid Search
 
@@ -361,7 +368,7 @@ Records are `%Vettore.Embedding{}` structs or maps with equivalent keys.
   value: "optional external value",
   vector: [0.1, 0.2, 0.3],
   vectors: [[0.1, 0.2, 0.3], [0.0, 0.5, 0.5]],
-  binary_vector: [1, 1, 1],
+  binary_vector: [7],
   metadata: %{source: "local"}
 }
 ```
@@ -377,6 +384,20 @@ Useful details:
   representative vector for ordinary search/indexing.
 - `binary_vector` is generated automatically for quantized candidate search.
 
+Each collection table is owned by a supervised Vettore worker, so it remains
+alive if the process that created the collection exits. Tables are `:protected`:
+all caller processes can read them directly and concurrently, with ETS
+`read_concurrency` enabled. Reads do not pass through the owner process. Perform
+writes through `Vettore.put/2`, `Vettore.put_many/2`, and `Vettore.delete/2` so
+ETS and the native index stay in sync. Release resources deterministically when
+they are no longer needed:
+
+```elixir
+:ok = Vettore.close(collection)
+```
+
+Closing is idempotent. Later operations return `{:error, :closed}`.
+
 ETS collections can be snapshotted:
 
 ```elixir
@@ -388,7 +409,10 @@ ETS collections can be snapshotted:
 
 Snapshots store the ETS table: records, metadata, normalized vectors, binary
 vectors, multi-vectors, and collection config. Native indexes are rebuilt from
-ETS when loaded.
+ETS when loaded. Snapshot writes use a same-directory temporary file followed
+by a rename and include ETS integrity metadata. Loads validate the table type,
+schema, and every stored record before rebuilding the index; legacy public
+tables are restored as protected tables.
 
 You can load the same data with a different index:
 
@@ -396,6 +420,14 @@ You can load the same data with a different index:
 {:ok, loaded} =
   Vettore.load_snapshot("priv/snapshots/docs.ets", index: :hnsw)
 ```
+
+Supported load overrides are `:name`, `:index`, `:index_options`, `:score`, and
+`:store`. Structural fields such as dimensions, metric, normalization, and
+compression cannot be changed because stored vectors were already prepared
+with those settings. Name, index, index options, and score overrides are written
+back to the collection config, so they persist through later snapshots. The
+`:store` option selects the loader for that call and must be supplied again for
+a custom snapshot format.
 
 ETS compression is available when you want to trade CPU for memory:
 
@@ -515,4 +547,25 @@ New code should prefer the collection-style top-level API: `Vettore.new/1`, `Vet
 ## Development
 
 The tests include a real `ex_fastembed` integration with
-`BAAI/bge-small-en-v1.5` over a small phrase corpus.
+`BAAI/bge-small-en-v1.5` over a small phrase corpus. It compares exact search,
+HNSW, and hybrid retrieval while checking canonical values and metadata.
+
+Build the Rust crate locally by setting `VETTORE_BUILD=1`:
+
+```bash
+VETTORE_BUILD=1 mix test --cover
+cargo test --manifest-path native/vettore/Cargo.toml
+```
+
+Run the deterministic latency-and-overlap matrix for every search mode with:
+
+```bash
+VETTORE_BUILD=1 mix run bench/search_modes_bench.exs
+```
+
+See `bench/performance.md` for the full search, metric, MUVERA, MaxSim, and ETS
+benchmark matrix.
+
+Without that variable, Vettore uses the published precompiled NIF for the
+current package version. See `RELEASE.md` for the full release verification and
+checksum workflow.

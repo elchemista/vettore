@@ -20,9 +20,9 @@ jobs:
           - { target: arm-unknown-linux-gnueabihf , os: ubuntu-22.04 , use-cross: true }
           - { target: aarch64-unknown-linux-gnu   , os: ubuntu-22.04 , use-cross: true }
           - { target: aarch64-unknown-linux-musl  , os: ubuntu-22.04 , use-cross: true }
-          - { target: aarch64-apple-darwin        , os: macos-14      }
+          - { target: aarch64-apple-darwin        , os: macos-15      }
           - { target: riscv64gc-unknown-linux-gnu , os: ubuntu-22.04 , use-cross: true }
-          - { target: x86_64-apple-darwin         , os: macos-14      }
+          - { target: x86_64-apple-darwin         , os: macos-15-intel }
           - { target: x86_64-unknown-linux-gnu    , os: ubuntu-22.04  }
           - { target: x86_64-unknown-linux-musl   , os: ubuntu-22.04 , use-cross: true }
           - { target: x86_64-pc-windows-gnu       , os: windows-2022  }
@@ -36,8 +36,15 @@ jobs:
       - name: Extract project version
         shell: bash
         run: |
-          # Get the project version from mix.exs
           echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> $GITHUB_ENV
+
+      - name: Verify tag matches project version
+        shell: bash
+        run: |
+          if [ "v${PROJECT_VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match mix.exs version v${PROJECT_VERSION}" >&2
+            exit 1
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -47,7 +54,7 @@ jobs:
 
       - name: Build the project
         id: build-crate
-        uses: philss/rustler-precompiled-action@v1.0.1
+        uses: philss/rustler-precompiled-action@v1.1.5
         with:
           project-name: vettore
           project-version: ${{ env.PROJECT_VERSION }}
@@ -70,15 +77,41 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
 
     steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
           merge-multiple: true
 
+      - name: Generate Rustler checksum file
+        shell: bash
+        run: |
+          checksum_file="checksum-Elixir.Vettore.Nifs.exs"
+          {
+            printf '%%{\n'
+            find release-artifacts -maxdepth 1 -type f -printf '%f\n' | sort | while read -r filename; do
+              checksum=$(sha256sum "release-artifacts/${filename}" | cut -d' ' -f1)
+              printf '  "%s" => "sha256:%s",\n' "${filename}" "${checksum}"
+            done
+            printf '}\n'
+          } > "${checksum_file}"
+
+      - name: Upload release checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustler-checksum
+          path: checksum-Elixir.Vettore.Nifs.exs
+          if-no-files-found: error
+
       - name: Publish archives and packages
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           overwrite_files: true
+          fail_on_unmatched_files: true
           files: |
             release-artifacts/*
+            checksum-Elixir.Vettore.Nifs.exs

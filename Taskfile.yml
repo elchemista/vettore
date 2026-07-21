@@ -8,7 +8,7 @@ tasks:
   compile:
     desc: Compile sources (with Rust)
     env:
-      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+      VETTORE_BUILD: 1
       RUSTFLAGS: "-C target-cpu=native -C opt-level=3"
     cmds:
       -  mix compile
@@ -21,7 +21,7 @@ tasks:
   console:
     desc: Open console
     env:
-      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+      VETTORE_BUILD: 1
     cmds:
       - cmd: iex -S mix
         ignore_error: true
@@ -29,9 +29,15 @@ tasks:
   test:
     desc: Run tests (with Rust)
     env:
-      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+      VETTORE_BUILD: 1
     cmds:
       - mix test --trace
+
+  test-coverage:
+    desc: Run Elixir integration tests and enforce coverage
+    env:
+      VETTORE_BUILD: 1
+    cmd: mix test --cover --warnings-as-errors
 
   test-using-precompiled-binaries:
     desc: Run tests (without Rust)
@@ -46,12 +52,19 @@ tasks:
 
   dialyzer:
     desc: Run dialyzer
+    env:
+      VETTORE_BUILD: 1
     cmd: mix dialyzer
 
   clippy:
     desc: Run clippy
     dir: "native/{{.PROJECT_DIR_NAME}}"
     cmd: cargo clippy
+
+  rust-coverage:
+    desc: Enforce Rust algorithm coverage (requires cargo-llvm-cov)
+    dir: "native/{{.PROJECT_DIR_NAME}}"
+    cmd: cargo llvm-cov --all-features --ignore-filename-regex 'src/nifs\.rs' --summary-only --fail-under-lines 98
 
   clean:
     desc: Clean up
@@ -62,12 +75,20 @@ tasks:
 
   benchmark:
     desc: Run benchmark
+    env:
+      VETTORE_BUILD: 1
     cmd: mix run bench/vettore_bench.exs
+
+  benchmark-search-modes:
+    desc: Benchmark and preflight every search mode
+    env:
+      VETTORE_BUILD: 1
+    cmd: mix run bench/search_modes_bench.exs
 
   rustler-precompiled-download:
     desc: Download precompiled files info
     env:
-      RUSTLER_PRECOMPILATION_EXAMPLE_BUILD: 1
+      VETTORE_BUILD: 1
     cmds:
       - "mix rustler_precompiled.download {{.PROJECT_NAME}} --all --print"
 
