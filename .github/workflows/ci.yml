@@ -66,6 +66,7 @@ jobs:
 
       - name: Preflight every search-mode benchmark
         env:
+          MIX_ENV: dev
           VETTORE_BENCH_DIMENSIONS: "16"
           VETTORE_BENCH_BATCH: "64"
           VETTORE_BENCH_LIMIT: "5"
