@@ -13,25 +13,41 @@ use crate::hnsw::{HnswIndex, HnswParams, HnswResource};
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes L2/Euclidean distance between two f32 vectors.
 fn l2_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(Metric::L2, &left, &right))
+    Ok(crate::distances::compute_checked(Metric::L2, &left, &right))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes squared L2 distance without the final square root.
 fn l2_squared_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(Metric::L2Squared, &left, &right))
+    Ok(crate::distances::compute_checked(
+        Metric::L2Squared,
+        &left,
+        &right,
+    ))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes raw cosine similarity; callers normalize vectors when required.
 fn cosine_similarity(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(Metric::Cosine, &left, &right))
+    Ok(crate::distances::compute_checked(
+        Metric::Cosine,
+        &left,
+        &right,
+    ))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes true cosine similarity without allocating normalized vectors.
+fn normalized_cosine_similarity(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
+    Ok(crate::distances::validate_finite_vector(&left)
+        .and_then(|()| crate::distances::validate_finite_vector(&right))
+        .and_then(|()| crate::distances::cosine(&left, &right)))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes raw inner product.
 fn inner_product(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(
+    Ok(crate::distances::compute_checked(
         Metric::InnerProduct,
         &left,
         &right,
@@ -41,7 +57,7 @@ fn inner_product(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, Strin
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes negative inner product for distance-style ordering.
 fn negative_inner_product(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(
+    Ok(crate::distances::compute_checked(
         Metric::NegativeInnerProduct,
         &left,
         &right,
@@ -51,25 +67,41 @@ fn negative_inner_product(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes Manhattan/L1 distance.
 fn manhattan_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(Metric::Manhattan, &left, &right))
+    Ok(crate::distances::compute_checked(
+        Metric::Manhattan,
+        &left,
+        &right,
+    ))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes Chebyshev/L-infinity distance.
 fn chebyshev_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(Metric::Chebyshev, &left, &right))
+    Ok(crate::distances::compute_checked(
+        Metric::Chebyshev,
+        &left,
+        &right,
+    ))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes Hamming distance over truthy/non-truthy coordinates.
 fn hamming_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(Metric::Hamming, &left, &right))
+    Ok(crate::distances::compute_checked(
+        Metric::Hamming,
+        &left,
+        &right,
+    ))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Computes Jaccard distance over truthy/non-truthy coordinates.
 fn jaccard_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
-    Ok(crate::distances::compute(Metric::Jaccard, &left, &right))
+    Ok(crate::distances::compute_checked(
+        Metric::Jaccard,
+        &left,
+        &right,
+    ))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -114,6 +146,55 @@ fn packed_jaccard_distance(
     dimensions: usize,
 ) -> NifResult<Result<f32, String>> {
     Ok(crate::distances::packed_jaccard(&left, &right, dimensions))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Scores a vector batch and returns only the best prefix-aware results.
+fn vector_top_k(
+    vectors: Vec<(String, Vec<f32>)>,
+    query: Vec<f32>,
+    metric_code: u8,
+    dimensions: usize,
+    limit: usize,
+) -> NifResult<Result<Vec<(String, f32)>, String>> {
+    Ok(Metric::from_code(metric_code)
+        .and_then(|metric| crate::search::vector_top_k(vectors, &query, metric, dimensions, limit)))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Runs a packed-Hamming top-k pass over a whole candidate batch.
+fn binary_top_k(
+    vectors: Vec<(String, Vec<u64>)>,
+    query: Vec<u64>,
+    dimensions: usize,
+    limit: usize,
+) -> NifResult<Result<Vec<(String, f32)>, String>> {
+    Ok(crate::search::binary_top_k(
+        vectors, &query, dimensions, limit,
+    ))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes one native MaxSim/ColBERT score.
+fn multi_vector_score(
+    query_vectors: Vec<Vec<f32>>,
+    document_vectors: Vec<Vec<f32>>,
+    metric_code: u8,
+) -> NifResult<Result<f32, String>> {
+    Ok(Metric::from_code(metric_code)
+        .and_then(|metric| crate::multi_vector::score(&query_vectors, &document_vectors, metric)))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Scores and selects a whole multi-vector document batch in one native call.
+fn multi_vector_top_k(
+    documents: Vec<(String, Vec<Vec<f32>>)>,
+    query_vectors: Vec<Vec<f32>>,
+    metric_code: u8,
+    limit: usize,
+) -> NifResult<Result<Vec<(String, f32)>, String>> {
+    Ok(Metric::from_code(metric_code)
+        .and_then(|metric| crate::multi_vector::top_k(documents, &query_vectors, metric, limit)))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -186,8 +267,7 @@ fn flat_insert(
         .0
         .write()
         .map_err(|_| "flat lock poisoned".to_string())?;
-    guard.insert(id, vector);
-    Ok(())
+    guard.insert(id, vector)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -200,8 +280,7 @@ fn flat_insert_many(
         .0
         .write()
         .map_err(|_| "flat lock poisoned".to_string())?;
-    guard.insert_many(vectors);
-    Ok(())
+    guard.insert_many(vectors)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -309,6 +388,19 @@ fn hnsw_insert(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
+/// Inserts a validated batch while acquiring the HNSW write lock once.
+fn hnsw_insert_many(
+    index: ResourceArc<HnswResource>,
+    vectors: Vec<(String, Vec<f32>)>,
+) -> Result<(), String> {
+    let mut guard = index
+        .0
+        .write()
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.insert_many(vectors)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 /// Removes one vector from the native HNSW graph.
 fn hnsw_delete(index: ResourceArc<HnswResource>, id: String) -> Result<(), String> {
     let mut guard = index
@@ -385,8 +477,9 @@ fn muvera_encode_document(
 
 /// Registers Rust resources with the BEAM VM when the NIF library loads.
 fn load(env: rustler::Env, _term: rustler::Term) -> bool {
-    let _ = rustler::resource!(FlatResource, env);
-    rustler::resource!(HnswResource, env)
+    let flat_loaded = rustler::resource!(FlatResource, env);
+    let hnsw_loaded = rustler::resource!(HnswResource, env);
+    flat_loaded && hnsw_loaded
 }
 
 rustler::init!("Elixir.Vettore.Nifs", load = load);

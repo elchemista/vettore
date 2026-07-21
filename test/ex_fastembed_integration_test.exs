@@ -54,6 +54,27 @@ defmodule VettoreExFastembedIntegrationTest do
                normalize: :l2
              )
 
+    assert {:ok, hnsw_collection} =
+             Collection.new(
+               name: :real_fastembed_hnsw,
+               dimensions: dimensions,
+               metric: :cosine,
+               normalize: :l2,
+               index: :hnsw,
+               index_options: [
+                 m: 8,
+                 m0: 16,
+                 ef_construction: 200,
+                 ef_search: 200,
+                 max_level: 12
+               ]
+             )
+
+    on_exit(fn ->
+      Vettore.close(collection)
+      Vettore.close(hnsw_collection)
+    end)
+
     embeddings =
       @phrases
       |> Enum.zip(vectors)
@@ -62,9 +83,11 @@ defmodule VettoreExFastembedIntegrationTest do
       end)
 
     assert :ok = Collection.put_many(collection, embeddings)
+    assert :ok = Collection.put_many(hnsw_collection, embeddings)
 
     assert_category_search(
       collection,
+      hnsw_collection,
       dimensions,
       "How does OTP restart failed Elixir workers?",
       :elixir
@@ -72,6 +95,7 @@ defmodule VettoreExFastembedIntegrationTest do
 
     assert_category_search(
       collection,
+      hnsw_collection,
       dimensions,
       "Which document talks about vector similarity search?",
       :vectors
@@ -79,23 +103,51 @@ defmodule VettoreExFastembedIntegrationTest do
 
     assert_category_search(
       collection,
+      hnsw_collection,
       dimensions,
       "Find text about a kitten or house cat.",
       :cats
     )
   end
 
-  defp assert_category_search(collection, dimensions, query, expected_category) do
+  defp assert_category_search(collection, hnsw_collection, dimensions, query, expected_category) do
     assert {:ok, [query_vector]} = ExFastembed.embed_text([query])
 
     assert {:ok, exact_results} = Collection.search(collection, query_vector, limit: 5)
     assert [%Result{} = exact_top | _] = exact_results
 
     assert_new_search_matches_exact_top(collection, dimensions, query_vector, exact_top)
+    assert_hnsw_matches_exact_top(hnsw_collection, query_vector, exact_top)
 
     top_categories = Enum.map(exact_results, & &1.metadata.category)
 
     assert expected_category in Enum.take(top_categories, 3)
+  end
+
+  defp assert_hnsw_matches_exact_top(collection, query_vector, exact_top) do
+    exact_top_id = exact_top.id
+
+    assert {:ok,
+            [
+              %Result{
+                id: ^exact_top_id,
+                value: value,
+                metadata: %{category: category}
+              }
+              | _
+            ]} = Collection.search(collection, query_vector, limit: 5)
+
+    assert is_binary(value)
+    assert is_atom(category)
+
+    assert {:ok, [%Result{id: ^exact_top_id} | _]} =
+             Collection.hybrid_search(collection, query_vector,
+               generators: [
+                 hnsw: [candidates: length(@phrases)],
+                 quantized: [candidates: length(@phrases)]
+               ],
+               limit: 5
+             )
   end
 
   defp assert_new_search_matches_exact_top(collection, dimensions, query_vector, exact_top) do

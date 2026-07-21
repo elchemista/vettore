@@ -19,16 +19,32 @@ defmodule Vettore do
   """
   @spec new() :: Vettore.DB.t()
   def new do
-    table =
-      :ets.new(:vettore_db, [
+    {:ok, {owner, table}} =
+      Vettore.ETSOwner.start_table(:vettore_db, [
         :set,
-        :public,
-        read_concurrency: true,
-        write_concurrency: true
+        :protected,
+        read_concurrency: true
       ])
 
-    %Vettore.DB{table: table}
+    %Vettore.DB{table: table, owner: owner}
   end
+
+  @doc """
+  Closes a collection or compatibility database and releases its ETS tables.
+
+  Closing is idempotent. Further operations return `{:error, :closed}`.
+  """
+  @spec close(Collection.t() | Vettore.DB.t()) :: :ok | {:error, term()}
+  def close(%Collection{} = collection), do: Collection.close(collection)
+
+  def close(%Vettore.DB{} = db) do
+    collections = compatibility_collections(Vettore.ETSOwner.drain_and_close(db.owner))
+
+    Enum.each(collections, &Collection.close/1)
+    :ok
+  end
+
+  def close(_resource), do: {:error, :invalid_resource}
 
   @doc """
   Creates an ETS-backed vector collection.
@@ -54,6 +70,7 @@ defmodule Vettore do
   """
   @spec new(keyword()) :: {:ok, Collection.t()} | {:error, term()}
   def new(opts) when is_list(opts), do: Collection.new(opts)
+  def new(_opts), do: {:error, :invalid_options}
 
   @doc """
   Saves a collection snapshot.
@@ -72,7 +89,7 @@ defmodule Vettore do
   """
   @spec snapshot(Collection.t(), Path.t()) :: :ok | {:error, term()}
   def snapshot(%Collection{} = collection, path) when is_binary(path) do
-    collection.store_mod.snapshot(collection.store_state, path)
+    Collection.snapshot(collection, path)
   end
 
   def snapshot(_collection, _path), do: {:error, :invalid_snapshot}
@@ -152,9 +169,7 @@ defmodule Vettore do
   """
   @spec delete(Collection.t(), String.t()) :: :ok | {:error, term()}
   def delete(%Collection{} = collection, id) when is_binary(id) do
-    with :ok <- collection.store_mod.delete(collection.store_state, id) do
-      collection.index_mod.delete(collection, id)
-    end
+    Collection.delete(collection, id)
   end
 
   @doc """
@@ -182,7 +197,7 @@ defmodule Vettore do
   """
   @spec search(Collection.t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
   def search(%Collection{} = collection, query, opts \\ []) do
-    collection.index_mod.search(collection, query, opts)
+    Collection.search(collection, query, opts)
   end
 
   @doc """
@@ -316,7 +331,19 @@ defmodule Vettore do
   def create_collection(db, name, dimensions, metric, opts \\ [])
 
   def create_collection(%Vettore.DB{} = db, name, dimensions, metric, opts)
-      when is_binary(name) and is_integer(dimensions) and dimensions > 0 do
+      when is_binary(name) and is_integer(dimensions) and dimensions > 0 and is_list(opts) do
+    if valid_options?(opts, [:index, :store, :normalize, :score, :index_options, :compressed]) do
+      do_create_collection(db, name, dimensions, metric, opts)
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  def create_collection(_db, _name, _dimensions, _metric, _opts), do: {:error, :invalid_arguments}
+
+  @spec do_create_collection(Vettore.DB.t(), String.t(), pos_integer(), atom(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  defp do_create_collection(db, name, dimensions, metric, opts) do
     metric = normalize_metric(metric)
     index = Keyword.get(opts, :index, if(metric == :hnsw, do: :hnsw, else: :flat))
     metric = if metric == :hnsw, do: :l2, else: metric
@@ -328,16 +355,32 @@ defmodule Vettore do
       index: index,
       store: Keyword.get(opts, :store, :ets),
       normalize: Keyword.get(opts, :normalize, default_normalize(metric)),
-      score: Keyword.get(opts, :score, :similarity)
+      score: Keyword.get(opts, :score, :similarity),
+      index_options: Keyword.get(opts, :index_options, []),
+      compressed: Keyword.get(opts, :compressed, false)
     ]
 
     with {:ok, collection} <- Collection.new(collection_opts) do
-      true = :ets.insert(db.table, {{:collection, name}, collection})
-      {:ok, name}
+      try do
+        case Vettore.ETSOwner.insert_new(db.owner, {{:collection, name}, collection}) do
+          true ->
+            {:ok, name}
+
+          false ->
+            :ok = Collection.close(collection)
+            {:error, :collection_already_exists}
+
+          {:error, :closed} ->
+            :ok = Collection.close(collection)
+            {:error, :closed}
+        end
+      rescue
+        ArgumentError ->
+          :ok = Collection.close(collection)
+          {:error, :closed}
+      end
     end
   end
-
-  def create_collection(_db, _name, _dimensions, _metric, _opts), do: {:error, :invalid_arguments}
 
   @doc """
   Deletes a compatibility collection.
@@ -353,11 +396,21 @@ defmodule Vettore do
       {:error, :invalid_arguments}
   """
   @spec delete_collection(Vettore.DB.t(), String.t()) ::
-          {:ok, String.t()} | {:error, :invalid_arguments}
+          {:ok, String.t()} | {:error, term()}
   def delete_collection(%Vettore.DB{} = db, name) when is_binary(name) do
-    with true <- :ets.delete(db.table, {:collection, name}) do
-      {:ok, name}
+    case Vettore.ETSOwner.take(db.owner, {:collection, name}) do
+      [{{:collection, ^name}, %Collection{} = collection}] ->
+        :ok = Collection.close(collection)
+        {:ok, name}
+
+      [] ->
+        {:error, :collection_not_found}
+
+      {:error, :closed} ->
+        {:error, :closed}
     end
+  rescue
+    ArgumentError -> {:error, :closed}
   end
 
   def delete_collection(_db, _name), do: {:error, :invalid_arguments}
@@ -402,7 +455,7 @@ defmodule Vettore do
       iex> Vettore.batch(db, "docs", embeddings)
       {:ok, ["a", "b"]}
 
-      iex> Vettore.batch(:bad_db, "docs", embeddings)
+      iex> Vettore.batch(:bad_db, "docs", [])
       {:error, :invalid_arguments}
   """
   @spec batch(Vettore.DB.t(), String.t(), [Embedding.t()]) ::
@@ -426,7 +479,6 @@ defmodule Vettore do
       iex> {:ok, "docs"} = Vettore.create_collection(db, "docs", 2, :cosine)
       iex> {:ok, "a"} = Vettore.insert(db, "docs", %Vettore.Embedding{id: "a", vector: [1.0, 0.0]})
       iex> {:ok, %Vettore.Embedding{id: "a"}} = Vettore.get_by_value(db, "docs", "a")
-
       iex> Vettore.get_by_value(db, "docs", "missing")
       {:error, :not_found}
   """
@@ -450,7 +502,6 @@ defmodule Vettore do
       iex> {:ok, "docs"} = Vettore.create_collection(db, "docs", 2, :cosine)
       iex> {:ok, "a"} = Vettore.insert(db, "docs", %Vettore.Embedding{id: "a", vector: [1.0, 0.0]})
       iex> {:ok, %Vettore.Embedding{id: "a"}} = Vettore.get_by_vector(db, "docs", [1.0, 0.0])
-
       iex> Vettore.get_by_vector(db, "docs", [0.0, 1.0])
       {:error, :not_found}
   """
@@ -506,7 +557,9 @@ defmodule Vettore do
       iex> db = Vettore.new()
       iex> {:ok, "docs"} = Vettore.create_collection(db, "docs", 2, :l2)
       iex> {:ok, "a"} = Vettore.insert(db, "docs", %Vettore.Embedding{id: "a", vector: [0.0, 0.0], metadata: %{kind: :origin}})
-      iex> {:ok, [{"a", [0.0, 0.0], %{kind: :origin}}]} = Vettore.get_all(db, "docs")
+      iex> {:ok, records} = Vettore.get_all(db, "docs")
+      iex> records == [{"a", [0.0, 0.0], %{kind: :origin}}]
+      true
 
       iex> Vettore.get_all(:bad_db, "docs")
       {:error, :invalid_arguments}
@@ -572,13 +625,17 @@ defmodule Vettore do
 
   def rerank(%Vettore.DB{} = db, collection_name, initial, opts)
       when is_binary(collection_name) and is_list(initial) and is_list(opts) do
-    limit = Keyword.get(opts, :limit, 10)
-    alpha = Keyword.get(opts, :alpha, 0.5)
+    if valid_options?(opts, [:limit, :alpha]) do
+      limit = Keyword.get(opts, :limit, 10)
+      alpha = Keyword.get(opts, :alpha, 0.5)
 
-    with {:ok, collection} <- fetch_collection(db, collection_name),
-         {:ok, embeddings} <- all(collection) do
-      pairs = Enum.map(embeddings, &{&1.id, &1.vector})
-      Distance.mmr_rerank(initial, pairs, collection.metric, alpha, limit)
+      with {:ok, collection} <- fetch_collection(db, collection_name),
+           {:ok, embeddings} <- all(collection) do
+        pairs = Enum.map(embeddings, &{&1.id, &1.vector})
+        Distance.mmr_rerank(initial, pairs, collection.metric, alpha, limit)
+      end
+    else
+      {:error, :invalid_options}
     end
   end
 
@@ -590,6 +647,28 @@ defmodule Vettore do
     case :ets.lookup(db.table, {:collection, name}) do
       [{{:collection, ^name}, collection}] -> {:ok, collection}
       [] -> {:error, :collection_not_found}
+    end
+  rescue
+    ArgumentError -> {:error, :closed}
+  end
+
+  @spec compatibility_collections([tuple()] | {:error, :closed}) :: [Collection.t()]
+  defp compatibility_collections(rows) when is_list(rows) do
+    Enum.flat_map(rows, fn
+      {{:collection, _name}, %Collection{} = collection} -> [collection]
+      _row -> []
+    end)
+  end
+
+  defp compatibility_collections({:error, :closed}), do: []
+
+  @spec valid_options?(term(), [atom()]) :: boolean()
+  defp valid_options?(opts, allowed_keys) do
+    if Keyword.keyword?(opts) do
+      keys = Keyword.keys(opts)
+      Enum.all?(keys, &(&1 in allowed_keys)) and length(keys) == MapSet.size(MapSet.new(keys))
+    else
+      false
     end
   end
 

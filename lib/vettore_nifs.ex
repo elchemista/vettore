@@ -3,9 +3,7 @@ defmodule Vettore.Nifs do
 
   version = Mix.Project.config()[:version]
 
-  force_build? =
-    Mix.env() in [:dev, :test] or
-      System.get_env("RUSTLER_PRECOMPILATION_EXAMPLE_BUILD") in ["1", "true"]
+  force_build? = System.get_env("VETTORE_BUILD") in ["1", "true"]
 
   use RustlerPrecompiled,
     otp_app: :vettore,
@@ -26,6 +24,11 @@ defmodule Vettore.Nifs do
   @doc false
   @spec cosine_similarity([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
   def cosine_similarity(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec normalized_cosine_similarity([float()], [float()]) ::
+          {:ok, float()} | {:error, String.t()}
+  def normalized_cosine_similarity(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec inner_product([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
@@ -77,6 +80,43 @@ defmodule Vettore.Nifs do
   @spec packed_jaccard_distance([non_neg_integer()], [non_neg_integer()], pos_integer()) ::
           {:ok, float()} | {:error, String.t()}
   def packed_jaccard_distance(_left, _right, _dimensions),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec vector_top_k(
+          [{String.t(), [float()]}],
+          [float()],
+          non_neg_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def vector_top_k(_vectors, _query, _metric_code, _dimensions, _limit),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec binary_top_k(
+          [{String.t(), [non_neg_integer()]}],
+          [non_neg_integer()],
+          pos_integer(),
+          non_neg_integer()
+        ) :: {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def binary_top_k(_vectors, _query, _dimensions, _limit),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec multi_vector_score([[float()]], [[float()]], non_neg_integer()) ::
+          {:ok, float()} | {:error, String.t()}
+  def multi_vector_score(_query_vectors, _document_vectors, _metric_code),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec multi_vector_top_k(
+          [{String.t(), [[float()]]}],
+          [[float()]],
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def multi_vector_top_k(_documents, _query_vectors, _metric_code, _limit),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
@@ -160,6 +200,11 @@ defmodule Vettore.Nifs do
   @doc false
   @spec hnsw_insert(reference(), String.t(), [float()]) :: :ok | {:ok, {}} | {:error, String.t()}
   def hnsw_insert(_index, _id, _vector), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_insert_many(reference(), [{String.t(), [float()]}]) ::
+          :ok | {:ok, {}} | {:error, String.t()}
+  def hnsw_insert_many(_index, _vectors), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec hnsw_delete(reference(), String.t()) :: :ok | {:ok, {}} | {:error, String.t()}

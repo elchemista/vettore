@@ -4,7 +4,7 @@ defmodule Vettore.Embedding do
 
   ## Fields
 
-    * `:id` - Stable identifier for this embedding. Preferred in vNext.
+    * `:id` - Stable identifier for this embedding. Preferred by the collection API.
     * `:value` - A string or content identifier for this embedding can be Id, or Text (e.g. "this is text data").
     * `:vector` - A list of floating‑point numbers representing the embedding (e.g. `[1.0, 2.0, 3.0]`).
     * `:vectors` - Optional token/document vectors for late interaction search.
