@@ -12,7 +12,7 @@ defmodule Vettore.Store.ETS do
   @type t :: %__MODULE__{table: :ets.tid(), owner: pid()}
 
   @spec new(map()) :: {:ok, t()}
-  @impl true
+  @impl Vettore.Store
   def new(config) when is_map(config) do
     with {:ok, {owner, table}} <-
            Vettore.ETSOwner.start_table(
@@ -25,7 +25,7 @@ defmodule Vettore.Store.ETS do
   end
 
   @spec snapshot(t(), Path.t()) :: :ok | {:error, term()}
-  @impl true
+  @impl Vettore.Store
   def snapshot(%__MODULE__{} = state, path) when is_binary(path) and path != "" do
     temporary_path = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
@@ -47,7 +47,7 @@ defmodule Vettore.Store.ETS do
   def snapshot(_state, _path), do: {:error, :invalid_snapshot_path}
 
   @spec load_snapshot(Path.t()) :: {:ok, {t(), map()}} | {:error, term()}
-  @impl true
+  @impl Vettore.Store
   def load_snapshot(path) when is_binary(path) and path != "" do
     case Vettore.ETSOwner.load_table(path) do
       {:ok, {owner, table}} -> load_config_or_close(owner, table)
@@ -59,7 +59,7 @@ defmodule Vettore.Store.ETS do
 
   @spec put(t(), Embedding.t()) ::
           :ok | {:error, :closed | :duplicate_id | :invalid_id | :missing_id}
-  @impl true
+  @impl Vettore.Store
   def put(%__MODULE__{} = state, %Embedding{} = embedding) do
     with {:ok, id} <- embedding_id(embedding) do
       record = {{:record, id}, normalize_value(embedding, id)}
@@ -84,7 +84,7 @@ defmodule Vettore.Store.ETS do
   end
 
   @spec configure(t(), map()) :: :ok | {:error, :closed}
-  @impl true
+  @impl Vettore.Store
   def configure(%__MODULE__{} = state, config) when is_map(config) do
     safe_owner_call(state, fn owner ->
       case Vettore.ETSOwner.insert(owner, {:__config__, config}) do
@@ -95,13 +95,13 @@ defmodule Vettore.Store.ETS do
   end
 
   @spec close(t()) :: :ok
-  @impl true
+  @impl Vettore.Store
   def close(%__MODULE__{owner: owner}) do
     Vettore.ETSOwner.close(owner)
   end
 
   @spec alive?(t()) :: boolean()
-  @impl true
+  @impl Vettore.Store
   def alive?(%__MODULE__{table: table, owner: owner}) do
     Vettore.ETSOwner.alive?(owner) and :ets.info(table) != :undefined
   rescue
@@ -112,7 +112,7 @@ defmodule Vettore.Store.ETS do
 
   @spec put_many(t(), [Embedding.t()]) ::
           :ok | {:error, :closed | :duplicate_id | :invalid_id | :missing_id}
-  @impl true
+  @impl Vettore.Store
   def put_many(%__MODULE__{} = state, embeddings) when is_list(embeddings) do
     result =
       Enum.reduce_while(embeddings, {[], MapSet.new()}, &collect_insert_row/2)
@@ -144,7 +144,7 @@ defmodule Vettore.Store.ETS do
   end
 
   @spec get(t(), String.t()) :: {:ok, Embedding.t()} | {:error, :closed | :not_found}
-  @impl true
+  @impl Vettore.Store
   def get(%__MODULE__{} = state, id) when is_binary(id) do
     with :ok <- Identifier.validate_utf8(id) do
       safe_table_call(state, &lookup_embedding(&1, id))
@@ -152,7 +152,7 @@ defmodule Vettore.Store.ETS do
   end
 
   @spec delete(t(), String.t()) :: :ok | {:error, :closed}
-  @impl true
+  @impl Vettore.Store
   def delete(%__MODULE__{} = state, id) when is_binary(id) do
     with :ok <- Identifier.validate_utf8(id) do
       safe_owner_call(state, &delete_record(&1, id))
@@ -169,7 +169,7 @@ defmodule Vettore.Store.ETS do
   end
 
   @spec all(t()) :: {:ok, [Embedding.t()]} | {:error, :closed}
-  @impl true
+  @impl Vettore.Store
   def all(%__MODULE__{} = state) do
     safe_table_call(state, fn table ->
       rows =
@@ -187,7 +187,7 @@ defmodule Vettore.Store.ETS do
   @spec fold(t(), acc, (Embedding.t(), acc -> acc)) ::
           {:ok, acc} | {:error, :closed}
         when acc: term()
-  @impl true
+  @impl Vettore.Store
   def fold(%__MODULE__{} = state, acc, fun) when is_function(fun, 2) do
     safe_table_call(state, fn table ->
       folded =
@@ -205,7 +205,7 @@ defmodule Vettore.Store.ETS do
   end
 
   @spec count(t()) :: non_neg_integer()
-  @impl true
+  @impl Vettore.Store
   def count(%__MODULE__{} = state) do
     case safe_table_call(state, &:ets.info(&1, :size)) do
       size when is_integer(size) -> max(size - 1, 0)

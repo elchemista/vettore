@@ -34,6 +34,13 @@ defmodule Vettore.Distance do
     :hamming,
     :jaccard
   ]
+  @f32_max 3.402_823_466_385_288_6e38
+  @u64_max 18_446_744_073_709_551_615
+  @native_error_reasons %{
+    "metric overflow" => :metric_overflow,
+    "vector contains a non-finite value" => :invalid_vector
+  }
+  @mmr_error_reasons %{"invalid mmr arguments" => :invalid_mmr_args}
 
   @doc """
   Normalizes a vector.
@@ -420,10 +427,10 @@ defmodule Vettore.Distance do
 
   @spec finite_number?(term()) :: boolean()
   defp finite_number?(value) when is_integer(value),
-    do: value >= -3.402_823_466_385_288_6e38 and value <= 3.402_823_466_385_288_6e38
+    do: value >= -@f32_max and value <= @f32_max
 
   defp finite_number?(value) when is_float(value),
-    do: value >= -3.402_823_466_385_288_6e38 and value <= 3.402_823_466_385_288_6e38
+    do: value >= -@f32_max and value <= @f32_max
 
   defp finite_number?(_value), do: false
 
@@ -438,8 +445,7 @@ defmodule Vettore.Distance do
     case Nifs.mmr_rerank(native_initial, native_vectors, metric_code(metric), alpha / 1, native_k)
          |> normalize_native_error() do
       {:ok, ids} -> {:ok, Enum.map(ids, &{&1, Map.fetch!(scores, &1)})}
-      {:error, "invalid mmr arguments"} -> {:error, :invalid_mmr_args}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, Map.get(@mmr_error_reasons, reason, reason)}
     end
   end
 
@@ -499,14 +505,13 @@ defmodule Vettore.Distance do
     words = if dimensions > 0, do: div(dimensions + 63, 64), else: 0
 
     if dimensions > 0 and length(left) == words and length(right) == words and
-         Enum.all?(left ++ right, &valid_u64?/1),
+         Enum.all?(left, &valid_u64?/1) and Enum.all?(right, &valid_u64?/1),
        do: :ok,
        else: {:error, :invalid_vector}
   end
 
   @spec valid_u64?(term()) :: boolean()
-  defp valid_u64?(value),
-    do: is_integer(value) and value >= 0 and value <= 18_446_744_073_709_551_615
+  defp valid_u64?(value), do: is_integer(value) and value >= 0 and value <= @u64_max
 
   @spec validate_metric(term()) :: :ok | {:error, {:unknown_metric, term()}}
   defp validate_metric(metric) when metric in @similarity_metrics or metric in @distance_metrics,
@@ -584,12 +589,9 @@ defmodule Vettore.Distance do
 
   @spec normalize_native_error({:error, String.t()} | {:ok, term()} | term()) ::
           {:error, String.t()} | {:ok, term()} | term()
-  defp normalize_native_error({:error, "metric overflow"}), do: {:error, :metric_overflow}
+  defp normalize_native_error({:error, reason}) when is_binary(reason),
+    do: {:error, Map.get(@native_error_reasons, reason, reason)}
 
-  defp normalize_native_error({:error, "vector contains a non-finite value"}),
-    do: {:error, :invalid_vector}
-
-  defp normalize_native_error({:error, reason}) when is_binary(reason), do: {:error, reason}
   defp normalize_native_error(other), do: other
 
   @spec float_vector(vector()) :: normalized_vector()

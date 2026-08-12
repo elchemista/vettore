@@ -521,6 +521,17 @@ defmodule VettoreHardeningTest do
                  ETS.put_indexed(collection.store_state, embedding, callback, fn -> :ok end)
       end
 
+      indexed = %Embedding{id: "delete-indexed", value: "delete-indexed", vector: [1.0]}
+      assert :ok = ETS.put_indexed(collection.store_state, indexed, fn -> :ok end, fn -> :ok end)
+
+      assert {:error, :forced_delete_failure} =
+               ETS.delete_indexed(collection.store_state, indexed.id, fn ->
+                 {:error, :forced_delete_failure}
+               end)
+
+      assert {:ok, ^indexed} = ETS.get(collection.store_state, indexed.id)
+      assert :ok = ETS.delete_indexed(collection.store_state, indexed.id, fn -> :ok end)
+
       assert {:ok, []} = Collection.all(collection)
       assert Process.alive?(owner)
       assert :ok = Vettore.close(collection)

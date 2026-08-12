@@ -5,7 +5,7 @@ defmodule Vettore.Collection do
   This module provides functions for creating, managing, and querying vector collections.
   """
 
-  alias Vettore.{Distance, Embedding, Identifier, Nifs, Result}
+  alias Vettore.{Distance, Embedding, Identifier, Index, Nifs, Result}
   alias Vettore.Store.ETS
 
   @type t :: %__MODULE__{
@@ -60,6 +60,11 @@ defmodule Vettore.Collection do
   @hybrid_option_keys ~w(limit generators rerank)a
   @max_nif_usize 4_294_967_295
   @f32_max 3.402_823_466_385_288_6e38
+  @multi_vector_error_reasons %{
+    "score overflow" => :score_overflow,
+    "dimension mismatch" => :dimension_mismatch,
+    "vector contains a non-finite value" => :invalid_multi_vector
+  }
   @store_callbacks [
     new: 1,
     put: 2,
@@ -238,11 +243,10 @@ defmodule Vettore.Collection do
          :ok <- validate_candidates(candidates, limit),
          :ok <- validate_funnel_stages(stages, collection.dimensions),
          {:ok, query} <- prepare_query(collection, query),
-         {:ok, embeddings} <- collection.store_mod.all(collection.store_state) do
-      with {:ok, stage_embeddings} <-
-             funnel_stage_embeddings(collection, embeddings, query, stages, candidates) do
-        exact_rerank(collection, query, stage_embeddings, limit)
-      end
+         {:ok, embeddings} <- collection.store_mod.all(collection.store_state),
+         {:ok, stage_embeddings} <-
+           funnel_stage_embeddings(collection, embeddings, query, stages, candidates) do
+      exact_rerank(collection, query, stage_embeddings, limit)
     end
   end
 
@@ -267,11 +271,10 @@ defmodule Vettore.Collection do
     with :ok <- validate_limit(limit),
          :ok <- validate_candidates(candidates, limit),
          {:ok, query} <- prepare_query(collection, query),
-         {:ok, embeddings} <- collection.store_mod.all(collection.store_state) do
-      with {:ok, stage_embeddings} <-
-             quantized_stage_embeddings(collection, embeddings, query, candidates) do
-        exact_rerank(collection, query, stage_embeddings, limit)
-      end
+         {:ok, embeddings} <- collection.store_mod.all(collection.store_state),
+         {:ok, stage_embeddings} <-
+           quantized_stage_embeddings(collection, embeddings, query, candidates) do
+      exact_rerank(collection, query, stage_embeddings, limit)
     end
   end
 
@@ -330,12 +333,9 @@ defmodule Vettore.Collection do
 
   @doc false
   @spec prepare_query(t(), [number()]) :: {:ok, [float()]} | {:error, term()}
-  def prepare_query(%__MODULE__{} = collection, query) do
-    with :ok <- ensure_open(collection),
-         :ok <- validate_vector(query, collection.dimensions) do
-      Distance.normalize(query, collection.normalize)
-    end
-  end
+  def prepare_query(%__MODULE__{store_mod: store_mod} = collection, query)
+      when is_atom(store_mod),
+      do: Index.prepare_query(collection, query)
 
   @doc false
   @spec close(t()) :: :ok | {:error, term()}
@@ -343,31 +343,22 @@ defmodule Vettore.Collection do
     index_result = close_index(collection)
     store_result = close_store(collection.store_mod, collection.store_state)
 
-    case {index_result, store_result} do
-      {:ok, :ok} ->
-        :ok
-
-      {{:error, reason}, :ok} ->
-        {:error, reason}
-
-      {:ok, {:error, reason}} ->
-        {:error, reason}
-
-      {{:error, index_reason}, {:error, store_reason}} ->
-        {:error, {:close_failed, index_reason, store_reason}}
-    end
+    close_result(index_result, store_result)
   end
 
   @doc false
   @spec ensure_open(t()) :: :ok | {:error, :closed}
-  def ensure_open(%__MODULE__{} = collection) do
-    if function_exported?(collection.store_mod, :alive?, 1) and
-         not collection.store_mod.alive?(collection.store_state) do
-      {:error, :closed}
-    else
-      :ok
-    end
-  end
+  def ensure_open(%__MODULE__{store_mod: store_mod} = collection) when is_atom(store_mod),
+    do: Index.ensure_open(collection)
+
+  @spec close_result(:ok | {:error, term()}, :ok | {:error, term()}) ::
+          :ok | {:error, term()}
+  defp close_result(:ok, :ok), do: :ok
+  defp close_result({:error, reason}, :ok), do: {:error, reason}
+  defp close_result(:ok, {:error, reason}), do: {:error, reason}
+
+  defp close_result({:error, index_reason}, {:error, store_reason}),
+    do: {:error, {:close_failed, index_reason, store_reason}}
 
   @spec restore_collection(module(), term(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   defp restore_collection(store_mod, store_state, config, opts) when is_map(config) do
@@ -880,13 +871,8 @@ defmodule Vettore.Collection do
   end
 
   @spec normalize_multi_vector_error(term()) :: term()
-  defp normalize_multi_vector_error({:error, "score overflow"}), do: {:error, :score_overflow}
-
-  defp normalize_multi_vector_error({:error, "dimension mismatch"}),
-    do: {:error, :dimension_mismatch}
-
-  defp normalize_multi_vector_error({:error, "vector contains a non-finite value"}),
-    do: {:error, :invalid_multi_vector}
+  defp normalize_multi_vector_error({:error, reason}) when is_binary(reason),
+    do: {:error, Map.get(@multi_vector_error_reasons, reason, reason)}
 
   defp normalize_multi_vector_error(other), do: other
 
@@ -1229,7 +1215,7 @@ defmodule Vettore.Collection do
 
   defp validate_keyword(_value, reason), do: {:error, reason}
 
-  @spec validate_options(term(), [atom()]) :: :ok | {:error, term()}
+  @spec validate_options(keyword(), [atom()]) :: :ok | {:error, term()}
   defp validate_options(opts, allowed_keys) when is_list(opts) do
     cond do
       not Keyword.keyword?(opts) ->
@@ -1245,8 +1231,6 @@ defmodule Vettore.Collection do
         :ok
     end
   end
-
-  defp validate_options(_opts, _allowed_keys), do: {:error, :invalid_options}
 
   @spec validate_generator_options(atom(), term()) :: :ok | {:error, term()}
   defp validate_generator_options(:funnel, opts),

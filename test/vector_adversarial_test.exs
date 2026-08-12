@@ -223,6 +223,8 @@ defmodule VettoreAdversarialTest do
 
       assert {:error, :forced_get_failure} =
                Collection.hybrid_search(failed, [0.0], generators: [:search], limit: 1)
+
+      assert {:error, :forced_get_failure} = Collection.delete(failed, "broken")
     end
 
     test "adaptive paths reject malformed custom-store records without raising" do
@@ -324,11 +326,22 @@ defmodule VettoreAdversarialTest do
                  limit: 1
                )
 
+      assert {:error, {:invalid_generator, {:search, :not_options}}} =
+               Collection.hybrid_search(collection, [0.0],
+                 generators: [{:search, :not_options}],
+                 limit: 1
+               )
+
       assert {:error, :dimension_mismatch} =
                Collection.multi_vector_search(collection, [[0.0], [0.0, 1.0]], limit: 1)
 
       assert {:error, :invalid_vector} =
                Collection.put(collection, %{id: "bad", vector: :not_a_vector})
+
+      non_list_store = scripted_collection({:all, :not_embeddings})
+
+      assert {:error, :invalid_embedding} =
+               Collection.quantized_search(non_list_store, [0.0], candidates: 1, limit: 1)
     end
   end
 

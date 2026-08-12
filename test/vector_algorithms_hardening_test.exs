@@ -91,6 +91,24 @@ defmodule VettoreAlgorithmsHardeningTest do
     end
   end
 
+  describe "shared index boundary" do
+    test "validates malformed contexts, vectors, and native return shapes" do
+      context = %{
+        dimensions: 2,
+        normalize: :none,
+        store_mod: String,
+        store_state: nil
+      }
+
+      assert {:ok, [1.0, 2.0]} = Vettore.Index.prepare_query(context, [1, 2])
+      assert {:error, :invalid_vector} = Vettore.Index.prepare_query(context, [1.0, :bad])
+      assert {:error, :invalid_vector} = Vettore.Index.prepare_query(context, :bad)
+      assert {:error, :closed} = Vettore.Index.ensure_open(%{})
+      assert :ok = Vettore.Index.normalize_write_result(:ok)
+      assert [] = Vettore.Index.hydrate_results(%{}, [{"stale", 0.0}])
+    end
+  end
+
   describe "HNSW boundary errors" do
     test "defaults, invalid direct options, and stale native ids are safe" do
       assert HNSW.defaults()[:m] == 16
