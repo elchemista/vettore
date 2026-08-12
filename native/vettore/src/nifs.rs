@@ -27,10 +27,10 @@ fn l2_squared_distance(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32,
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-/// Computes raw cosine similarity; callers normalize vectors when required.
+/// Computes the raw dot-product compatibility helper used by `normalize: :none`.
 fn cosine_similarity(left: Vec<f32>, right: Vec<f32>) -> NifResult<Result<f32, String>> {
     Ok(crate::distances::compute_checked(
-        Metric::Cosine,
+        Metric::InnerProduct,
         &left,
         &right,
     ))
@@ -175,6 +175,19 @@ fn binary_top_k(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
+/// Runs a complete MMR pass without repeated BEAM/native transitions.
+fn mmr_rerank(
+    initial: Vec<(String, f64)>,
+    embeddings: Vec<(String, Vec<f32>)>,
+    metric_code: u8,
+    alpha: f64,
+    final_k: usize,
+) -> NifResult<Result<Vec<String>, String>> {
+    Ok(Metric::from_code(metric_code)
+        .and_then(|metric| crate::search::mmr_rerank(initial, embeddings, metric, alpha, final_k)))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 /// Computes one native MaxSim/ColBERT score.
 fn multi_vector_score(
     query_vectors: Vec<Vec<f32>>,
@@ -295,6 +308,17 @@ fn flat_delete(index: ResourceArc<FlatResource>, id: String) -> Result<(), Strin
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
+/// Releases all vectors retained by a native flat index.
+fn flat_clear(index: ResourceArc<FlatResource>) -> Result<(), String> {
+    let mut guard = index
+        .0
+        .write()
+        .map_err(|_| "flat lock poisoned".to_string())?;
+    guard.clear();
+    Ok(())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 /// Searches the native flat index and returns external ids plus raw metric values.
 fn flat_search(
     index: ResourceArc<FlatResource>,
@@ -408,6 +432,17 @@ fn hnsw_delete(index: ResourceArc<HnswResource>, id: String) -> Result<(), Strin
         .write()
         .map_err(|_| "hnsw lock poisoned".to_string())?;
     guard.delete(&id);
+    Ok(())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Releases all nodes and edges retained by a native HNSW index.
+fn hnsw_clear(index: ResourceArc<HnswResource>) -> Result<(), String> {
+    let mut guard = index
+        .0
+        .write()
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.clear();
     Ok(())
 }
 

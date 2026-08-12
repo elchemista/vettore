@@ -8,6 +8,12 @@ defmodule Vettore.MultiVector do
   @type vector :: [number()]
   @type metric :: Distance.metric() | atom()
 
+  @native_error_reasons %{
+    "dimension mismatch" => :dimension_mismatch,
+    "vector contains a non-finite value" => :invalid_multi_vector,
+    "score overflow" => :score_overflow
+  }
+
   @doc """
   Computes Chamfer/MaxSim similarity.
 
@@ -103,12 +109,8 @@ defmodule Vettore.MultiVector do
   defp normalize_metric(metric), do: metric
 
   @spec normalize_native_error(term()) :: term()
-  defp normalize_native_error({:error, "dimension mismatch"}), do: {:error, :dimension_mismatch}
-
-  defp normalize_native_error({:error, "vector contains a non-finite value"}),
-    do: {:error, :invalid_multi_vector}
-
-  defp normalize_native_error({:error, "score overflow"}), do: {:error, :score_overflow}
+  defp normalize_native_error({:error, reason}) when is_binary(reason),
+    do: {:error, Map.get(@native_error_reasons, reason, reason)}
 
   defp normalize_native_error(other), do: other
 

@@ -5,7 +5,8 @@ defmodule Vettore.Collection do
   This module provides functions for creating, managing, and querying vector collections.
   """
 
-  alias Vettore.{Distance, Embedding, Nifs, Result}
+  alias Vettore.{Distance, Embedding, Identifier, Index, Nifs, Result}
+  alias Vettore.Store.ETS
 
   @type t :: %__MODULE__{
           name: atom() | String.t(),
@@ -59,6 +60,11 @@ defmodule Vettore.Collection do
   @hybrid_option_keys ~w(limit generators rerank)a
   @max_nif_usize 4_294_967_295
   @f32_max 3.402_823_466_385_288_6e38
+  @multi_vector_error_reasons %{
+    "score overflow" => :score_overflow,
+    "dimension mismatch" => :dimension_mismatch,
+    "vector contains a non-finite value" => :invalid_multi_vector
+  }
   @store_callbacks [
     new: 1,
     put: 2,
@@ -166,25 +172,16 @@ defmodule Vettore.Collection do
   @doc false
   @spec put(t(), Embedding.t() | map()) :: :ok | {:error, term()}
   def put(%__MODULE__{} = collection, embedding) do
-    with {:ok, embedding} <- prepare_embedding(collection, embedding),
-         :ok <- collection.store_mod.put(collection.store_state, embedding) do
-      case collection.index_mod.put(collection, embedding) do
-        :ok ->
-          :ok
-
-        {:error, reason} ->
-          rollback_insert(collection, [embedding])
-          {:error, reason}
-      end
+    with {:ok, embedding} <- prepare_embedding(collection, embedding) do
+      put_prepared(collection, embedding)
     end
   end
 
   @doc false
   @spec put_many(t(), [Embedding.t() | map()]) :: :ok | {:error, term()}
   def put_many(%__MODULE__{} = collection, embeddings) when is_list(embeddings) do
-    with {:ok, prepared} <- prepare_embeddings(collection, embeddings),
-         :ok <- collection.store_mod.put_many(collection.store_state, prepared) do
-      put_many_index(collection, prepared)
+    with {:ok, prepared} <- prepare_embeddings(collection, embeddings) do
+      put_many_prepared(collection, prepared)
     end
   end
 
@@ -193,21 +190,16 @@ defmodule Vettore.Collection do
   @doc false
   @spec get(t(), String.t()) :: {:ok, Embedding.t()} | {:error, term()}
   def get(%__MODULE__{} = collection, id) when is_binary(id) do
-    collection.store_mod.get(collection.store_state, id)
+    with :ok <- Identifier.validate_utf8(id) do
+      collection.store_mod.get(collection.store_state, id)
+    end
   end
 
   @doc false
   @spec delete(t(), String.t()) :: :ok | {:error, term()}
   def delete(%__MODULE__{} = collection, id) when is_binary(id) do
-    case collection.store_mod.get(collection.store_state, id) do
-      {:ok, embedding} ->
-        delete_existing(collection, id, embedding)
-
-      {:error, :not_found} ->
-        collection.index_mod.delete(collection, id)
-
-      {:error, reason} ->
-        {:error, reason}
+    with :ok <- Identifier.validate_utf8(id) do
+      delete_id(collection, id)
     end
   end
 
@@ -251,11 +243,10 @@ defmodule Vettore.Collection do
          :ok <- validate_candidates(candidates, limit),
          :ok <- validate_funnel_stages(stages, collection.dimensions),
          {:ok, query} <- prepare_query(collection, query),
-         {:ok, embeddings} <- collection.store_mod.all(collection.store_state) do
-      with {:ok, stage_embeddings} <-
-             funnel_stage_embeddings(collection, embeddings, query, stages, candidates) do
-        exact_rerank(collection, query, stage_embeddings, limit)
-      end
+         {:ok, embeddings} <- collection.store_mod.all(collection.store_state),
+         {:ok, stage_embeddings} <-
+           funnel_stage_embeddings(collection, embeddings, query, stages, candidates) do
+      exact_rerank(collection, query, stage_embeddings, limit)
     end
   end
 
@@ -280,17 +271,10 @@ defmodule Vettore.Collection do
     with :ok <- validate_limit(limit),
          :ok <- validate_candidates(candidates, limit),
          {:ok, query} <- prepare_query(collection, query),
-         {:ok, query_bits} <- compress_vector(query),
-         {:ok, embeddings} <- collection.store_mod.all(collection.store_state) do
-      with {:ok, stage_embeddings} <-
-             binary_candidate_embeddings(
-               embeddings,
-               query_bits,
-               collection.dimensions,
-               candidates
-             ) do
-        exact_rerank(collection, query, stage_embeddings, limit)
-      end
+         {:ok, embeddings} <- collection.store_mod.all(collection.store_state),
+         {:ok, stage_embeddings} <-
+           quantized_stage_embeddings(collection, embeddings, query, candidates) do
+      exact_rerank(collection, query, stage_embeddings, limit)
     end
   end
 
@@ -349,29 +333,32 @@ defmodule Vettore.Collection do
 
   @doc false
   @spec prepare_query(t(), [number()]) :: {:ok, [float()]} | {:error, term()}
-  def prepare_query(%__MODULE__{} = collection, query) do
-    with :ok <- ensure_open(collection),
-         :ok <- validate_vector(query, collection.dimensions) do
-      Distance.normalize(query, collection.normalize)
-    end
-  end
+  def prepare_query(%__MODULE__{store_mod: store_mod} = collection, query)
+      when is_atom(store_mod),
+      do: Index.prepare_query(collection, query)
 
   @doc false
   @spec close(t()) :: :ok | {:error, term()}
   def close(%__MODULE__{} = collection) do
-    close_store(collection.store_mod, collection.store_state)
+    index_result = close_index(collection)
+    store_result = close_store(collection.store_mod, collection.store_state)
+
+    close_result(index_result, store_result)
   end
 
   @doc false
   @spec ensure_open(t()) :: :ok | {:error, :closed}
-  def ensure_open(%__MODULE__{} = collection) do
-    if function_exported?(collection.store_mod, :alive?, 1) and
-         not collection.store_mod.alive?(collection.store_state) do
-      {:error, :closed}
-    else
-      :ok
-    end
-  end
+  def ensure_open(%__MODULE__{store_mod: store_mod} = collection) when is_atom(store_mod),
+    do: Index.ensure_open(collection)
+
+  @spec close_result(:ok | {:error, term()}, :ok | {:error, term()}) ::
+          :ok | {:error, term()}
+  defp close_result(:ok, :ok), do: :ok
+  defp close_result({:error, reason}, :ok), do: {:error, reason}
+  defp close_result(:ok, {:error, reason}), do: {:error, reason}
+
+  defp close_result({:error, index_reason}, {:error, store_reason}),
+    do: {:error, {:close_failed, index_reason, store_reason}}
 
   @spec restore_collection(module(), term(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   defp restore_collection(store_mod, store_state, config, opts) when is_map(config) do
@@ -466,6 +453,65 @@ defmodule Vettore.Collection do
     :ok
   end
 
+  @spec put_prepared(t(), Embedding.t()) :: :ok | {:error, term()}
+  defp put_prepared(%__MODULE__{store_mod: ETS} = collection, embedding) do
+    ETS.put_indexed(
+      collection.store_state,
+      embedding,
+      fn -> collection.index_mod.put(collection, embedding) end,
+      fn -> collection.index_mod.delete(collection, embedding.id) end
+    )
+  end
+
+  defp put_prepared(%__MODULE__{} = collection, embedding) do
+    with :ok <- collection.store_mod.put(collection.store_state, embedding) do
+      case collection.index_mod.put(collection, embedding) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          rollback_insert(collection, [embedding])
+          {:error, reason}
+      end
+    end
+  end
+
+  @spec put_many_prepared(t(), [Embedding.t()]) :: :ok | {:error, term()}
+  defp put_many_prepared(%__MODULE__{store_mod: ETS} = collection, embeddings) do
+    ETS.put_many_indexed(
+      collection.store_state,
+      embeddings,
+      fn -> collection.index_mod.put_many(collection, embeddings) end,
+      fn -> Enum.each(embeddings, &collection.index_mod.delete(collection, &1.id)) end
+    )
+  end
+
+  defp put_many_prepared(%__MODULE__{} = collection, embeddings) do
+    with :ok <- collection.store_mod.put_many(collection.store_state, embeddings) do
+      put_many_index(collection, embeddings)
+    end
+  end
+
+  @spec delete_id(t(), String.t()) :: :ok | {:error, term()}
+  defp delete_id(%__MODULE__{store_mod: ETS} = collection, id) do
+    ETS.delete_indexed(collection.store_state, id, fn ->
+      collection.index_mod.delete(collection, id)
+    end)
+  end
+
+  defp delete_id(%__MODULE__{} = collection, id) do
+    case collection.store_mod.get(collection.store_state, id) do
+      {:ok, embedding} ->
+        delete_existing(collection, id, embedding)
+
+      {:error, :not_found} ->
+        collection.index_mod.delete(collection, id)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @spec put_many_index(t(), [Embedding.t()]) :: :ok | {:error, term()}
   defp put_many_index(%__MODULE__{} = collection, embeddings) do
     case collection.index_mod.put_many(collection, embeddings) do
@@ -506,6 +552,13 @@ defmodule Vettore.Collection do
     if function_exported?(store_mod, :close, 1), do: store_mod.close(store_state), else: :ok
   end
 
+  @spec close_index(t()) :: :ok | {:error, term()}
+  defp close_index(%__MODULE__{} = collection) do
+    if function_exported?(collection.index_mod, :close, 1),
+      do: collection.index_mod.close(collection),
+      else: :ok
+  end
+
   @spec candidate_count(keyword(), pos_integer()) :: pos_integer()
   defp candidate_count(opts, limit), do: Keyword.get(opts, :candidates, max(limit * 10, limit))
 
@@ -517,66 +570,97 @@ defmodule Vettore.Collection do
           {:ok, [Embedding.t()]} | {:error, term()}
   defp hybrid_candidates(%__MODULE__{} = collection, query, generators, limit)
        when is_list(generators) and generators != [] do
-    Enum.reduce_while(generators, {:ok, []}, fn generator, {:ok, acc} ->
-      case run_hybrid_generator(collection, query, generator, limit) do
-        {:ok, embeddings} -> {:cont, {:ok, acc ++ embeddings}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, embeddings} -> {:ok, unique_embeddings(embeddings)}
-      {:error, reason} -> {:error, reason}
+    with {:ok, cached_embeddings} <- hybrid_store_snapshot(collection, generators),
+         {:ok, groups} <-
+           collect_hybrid_groups(collection, query, generators, limit, cached_embeddings) do
+      embeddings = groups |> Enum.reverse() |> List.flatten()
+      {:ok, unique_embeddings(embeddings)}
     end
   end
 
   defp hybrid_candidates(_collection, _query, _generators, _limit),
     do: {:error, :invalid_generators}
 
-  @spec run_hybrid_generator(t(), [float()], hybrid_generator(), pos_integer()) ::
-          {:ok, [Embedding.t()]} | {:error, term()}
-  defp run_hybrid_generator(collection, query, generator, limit) when is_atom(generator) do
-    run_hybrid_generator(collection, query, {generator, []}, limit)
+  @spec collect_hybrid_groups(
+          t(),
+          [float()],
+          [hybrid_generator()],
+          pos_integer(),
+          [Embedding.t()] | nil
+        ) :: {:ok, [[Embedding.t()]]} | {:error, term()}
+  defp collect_hybrid_groups(collection, query, generators, limit, cached_embeddings) do
+    Enum.reduce_while(generators, {:ok, []}, fn generator, {:ok, acc} ->
+      case run_hybrid_generator(collection, query, generator, limit, cached_embeddings) do
+        {:ok, embeddings} -> {:cont, {:ok, [embeddings | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
-  defp run_hybrid_generator(collection, query, {name, opts}, limit)
+  @spec hybrid_store_snapshot(t(), [hybrid_generator()]) ::
+          {:ok, [Embedding.t()] | nil} | {:error, term()}
+  defp hybrid_store_snapshot(collection, generators) do
+    needs_snapshot? =
+      Enum.any?(generators, fn
+        name when name in [:funnel, :quantized] -> true
+        {name, _opts} when name in [:funnel, :quantized] -> true
+        _generator -> false
+      end)
+
+    if needs_snapshot?,
+      do: collection.store_mod.all(collection.store_state),
+      else: {:ok, nil}
+  end
+
+  @spec run_hybrid_generator(
+          t(),
+          [float()],
+          hybrid_generator(),
+          pos_integer(),
+          [Embedding.t()] | nil
+        ) ::
+          {:ok, [Embedding.t()]} | {:error, term()}
+  defp run_hybrid_generator(collection, query, generator, limit, embeddings)
+       when is_atom(generator) do
+    run_hybrid_generator(collection, query, {generator, []}, limit, embeddings)
+  end
+
+  defp run_hybrid_generator(collection, query, {name, opts}, limit, embeddings)
        when is_atom(name) and is_list(opts) do
     with :ok <- validate_generator_options(name, opts) do
       opts = Keyword.put_new(opts, :candidates, max(limit * 10, limit))
 
       case name do
-        :funnel -> funnel_candidates(collection, query, opts, limit)
-        :quantized -> quantized_candidates(collection, query, opts, limit)
+        :funnel -> funnel_candidates(collection, query, opts, limit, embeddings)
+        :quantized -> quantized_candidates(collection, query, opts, limit, embeddings)
         :search -> index_candidates(collection, query, opts, limit)
         :hnsw -> hnsw_candidates(collection, query, opts, limit)
       end
     end
   end
 
-  defp run_hybrid_generator(_collection, _query, generator, _limit),
+  defp run_hybrid_generator(_collection, _query, generator, _limit, _embeddings),
     do: {:error, {:invalid_generator, generator}}
 
-  @spec funnel_candidates(t(), [float()], keyword(), pos_integer()) ::
+  @spec funnel_candidates(t(), [float()], keyword(), pos_integer(), [Embedding.t()]) ::
           {:ok, [Embedding.t()]} | {:error, term()}
-  defp funnel_candidates(collection, query, opts, limit) do
+  defp funnel_candidates(collection, query, opts, limit, embeddings) do
     candidates = candidate_count(opts, limit)
     stages = funnel_stages(collection, opts)
 
     with :ok <- validate_generator_candidates(candidates),
-         :ok <- validate_funnel_stages(stages, collection.dimensions),
-         {:ok, embeddings} <- collection.store_mod.all(collection.store_state) do
+         :ok <- validate_funnel_stages(stages, collection.dimensions) do
       funnel_stage_embeddings(collection, embeddings, query, stages, candidates)
     end
   end
 
-  @spec quantized_candidates(t(), [float()], keyword(), pos_integer()) ::
+  @spec quantized_candidates(t(), [float()], keyword(), pos_integer(), [Embedding.t()]) ::
           {:ok, [Embedding.t()]} | {:error, term()}
-  defp quantized_candidates(collection, query, opts, limit) do
+  defp quantized_candidates(collection, query, opts, limit, embeddings) do
     candidates = candidate_count(opts, limit)
 
-    with :ok <- validate_generator_candidates(candidates),
-         {:ok, query_bits} <- compress_vector(query),
-         {:ok, embeddings} <- collection.store_mod.all(collection.store_state) do
-      binary_candidate_embeddings(embeddings, query_bits, collection.dimensions, candidates)
+    with :ok <- validate_generator_candidates(candidates) do
+      quantized_stage_embeddings(collection, embeddings, query, candidates)
     end
   end
 
@@ -674,8 +758,14 @@ defmodule Vettore.Collection do
   @spec funnel_stage_embeddings(t(), [Embedding.t()], [float()], [pos_integer()], pos_integer()) ::
           {:ok, [Embedding.t()]} | {:error, term()}
   defp funnel_stage_embeddings(collection, embeddings, query, stages, candidates) do
-    Enum.reduce_while(stages, {:ok, embeddings}, fn dimensions, {:ok, acc} ->
-      case funnel_stage(collection, acc, query, dimensions, candidates) do
+    stage_count = length(stages)
+
+    stages
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, embeddings}, fn {dimensions, index}, {:ok, acc} ->
+      stage_candidates = min(candidates * (stage_count - index), @max_nif_usize)
+
+      case funnel_stage(collection, acc, query, dimensions, stage_candidates) do
         {:ok, next} -> {:cont, {:ok, next}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -687,6 +777,27 @@ defmodule Vettore.Collection do
   defp funnel_stage(collection, embeddings, query, dimensions, candidates) do
     with {:ok, scored} <- score_embeddings(collection, embeddings, query, candidates, dimensions) do
       {:ok, Enum.map(scored, fn {_result, embedding} -> embedding end)}
+    end
+  end
+
+  @spec quantized_stage_embeddings(t(), [Embedding.t()], [float()], pos_integer()) ::
+          {:ok, [Embedding.t()]} | {:error, term()}
+  defp quantized_stage_embeddings(
+         %__MODULE__{metric: metric} = collection,
+         embeddings,
+         query,
+         candidates
+       )
+       when metric in [:hamming, :jaccard] do
+    # Sign compression encodes negative/positive values, whereas these metrics
+    # treat every non-zero coordinate as true. Use their exact native top-k so
+    # candidate pruning cannot discard the real nearest record.
+    funnel_stage(collection, embeddings, query, collection.dimensions, candidates)
+  end
+
+  defp quantized_stage_embeddings(collection, embeddings, query, candidates) do
+    with {:ok, query_bits} <- compress_vector(query) do
+      binary_candidate_embeddings(embeddings, query_bits, collection.dimensions, candidates)
     end
   end
 
@@ -760,13 +871,8 @@ defmodule Vettore.Collection do
   end
 
   @spec normalize_multi_vector_error(term()) :: term()
-  defp normalize_multi_vector_error({:error, "score overflow"}), do: {:error, :score_overflow}
-
-  defp normalize_multi_vector_error({:error, "dimension mismatch"}),
-    do: {:error, :dimension_mismatch}
-
-  defp normalize_multi_vector_error({:error, "vector contains a non-finite value"}),
-    do: {:error, :invalid_multi_vector}
+  defp normalize_multi_vector_error({:error, reason}) when is_binary(reason),
+    do: {:error, Map.get(@multi_vector_error_reasons, reason, reason)}
 
   defp normalize_multi_vector_error(other), do: other
 
@@ -1066,13 +1172,9 @@ defmodule Vettore.Collection do
 
   defp to_embedding(_embedding), do: {:error, :invalid_embedding}
 
-  @spec embedding_id(Embedding.t()) :: {:ok, String.t()} | {:error, :missing_id}
-  defp embedding_id(%Embedding{id: id}) when is_binary(id) and id != "", do: {:ok, id}
-
-  defp embedding_id(%Embedding{value: value}) when is_binary(value) and value != "",
-    do: {:ok, value}
-
-  defp embedding_id(_embedding), do: {:error, :missing_id}
+  @spec embedding_id(Embedding.t()) ::
+          {:ok, String.t()} | {:error, :missing_id | :invalid_id}
+  defp embedding_id(%Embedding{} = embedding), do: Identifier.embedding_id(embedding)
 
   @spec validate_dimensions(term()) :: :ok | {:error, :invalid_dimensions}
   defp validate_dimensions(dimensions) when is_integer(dimensions) and dimensions > 0, do: :ok
@@ -1113,7 +1215,7 @@ defmodule Vettore.Collection do
 
   defp validate_keyword(_value, reason), do: {:error, reason}
 
-  @spec validate_options(term(), [atom()]) :: :ok | {:error, term()}
+  @spec validate_options(keyword(), [atom()]) :: :ok | {:error, term()}
   defp validate_options(opts, allowed_keys) when is_list(opts) do
     cond do
       not Keyword.keyword?(opts) ->
@@ -1129,8 +1231,6 @@ defmodule Vettore.Collection do
         :ok
     end
   end
-
-  defp validate_options(_opts, _allowed_keys), do: {:error, :invalid_options}
 
   @spec validate_generator_options(atom(), term()) :: :ok | {:error, term()}
   defp validate_generator_options(:funnel, opts),
@@ -1203,14 +1303,14 @@ defmodule Vettore.Collection do
   defp validate_snapshot_embeddings(_collection, _embeddings), do: {:error, :invalid_snapshot}
 
   @spec validate_runtime_embeddings(term()) ::
-          :ok | {:error, :duplicate_id | :invalid_embedding}
+          :ok | {:error, :duplicate_id | :invalid_embedding | :invalid_id}
   defp validate_runtime_embeddings(embeddings) when is_list(embeddings) do
     Enum.reduce_while(embeddings, {:ok, MapSet.new()}, fn
       %Embedding{id: id}, {:ok, seen} when is_binary(id) and id != "" ->
-        if MapSet.member?(seen, id) do
-          {:halt, {:error, :duplicate_id}}
-        else
-          {:cont, {:ok, MapSet.put(seen, id)}}
+        cond do
+          String.valid?(id) == false -> {:halt, {:error, :invalid_id}}
+          MapSet.member?(seen, id) -> {:halt, {:error, :duplicate_id}}
+          true -> {:cont, {:ok, MapSet.put(seen, id)}}
         end
 
       _embedding, _acc ->

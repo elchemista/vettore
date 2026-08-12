@@ -1,7 +1,7 @@
 //! Batched top-k helpers used by adaptive Elixir search paths.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::distances::Metric;
 
@@ -53,11 +53,7 @@ pub fn vector_top_k(
             return Err("dimension mismatch".to_string());
         }
         crate::distances::validate_finite_vector(&vector[..dimensions])?;
-        let raw = if metric == Metric::Cosine {
-            crate::distances::cosine(&query[..dimensions], &vector[..dimensions])?
-        } else {
-            crate::distances::compute(metric, &query[..dimensions], &vector[..dimensions])?
-        };
+        let raw = crate::distances::compute(metric, &query[..dimensions], &vector[..dimensions])?;
         push_top_k(
             &mut heap,
             Hit {
@@ -89,6 +85,78 @@ pub fn binary_top_k(
         push_top_k(&mut heap, Hit { id, raw, rank: raw }, limit);
     }
     sorted_hits(heap)
+}
+
+/// Runs Maximal Marginal Relevance in one native call and returns selected ids.
+pub fn mmr_rerank(
+    initial: Vec<(String, f64)>,
+    embeddings: Vec<(String, Vec<f32>)>,
+    metric: Metric,
+    alpha: f64,
+    final_k: usize,
+) -> Result<Vec<String>, String> {
+    if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) || final_k == 0 {
+        return Err("invalid mmr arguments".to_string());
+    }
+
+    let mut vectors = HashMap::with_capacity(embeddings.len());
+    let mut dimension = None;
+    for (id, vector) in embeddings {
+        if id.is_empty() || vector.is_empty() || vectors.contains_key(&id) {
+            return Err("invalid mmr arguments".to_string());
+        }
+        if dimension.is_some_and(|expected| vector.len() != expected) {
+            return Err("invalid mmr arguments".to_string());
+        }
+        crate::distances::validate_finite_vector(&vector)?;
+        dimension = Some(vector.len());
+        vectors.insert(id, vector);
+    }
+
+    let mut seen = HashSet::with_capacity(initial.len());
+    for (id, score) in &initial {
+        if id.is_empty() || !score.is_finite() || !vectors.contains_key(id) || !seen.insert(id) {
+            return Err("invalid mmr arguments".to_string());
+        }
+    }
+
+    let mut remaining: Vec<usize> = (0..initial.len()).collect();
+    let mut selected: Vec<usize> = Vec::with_capacity(usize::min(final_k, initial.len()));
+
+    while selected.len() < final_k && !remaining.is_empty() {
+        let mut best_position = 0usize;
+        let mut best_score = f64::NEG_INFINITY;
+
+        for (position, candidate_index) in remaining.iter().copied().enumerate() {
+            let (candidate_id, query_score) = &initial[candidate_index];
+            let candidate_vector = &vectors[candidate_id];
+            let mut redundancy = 0.0f64;
+
+            if !selected.is_empty() {
+                redundancy = f64::NEG_INFINITY;
+                for selected_index in &selected {
+                    let selected_id = &initial[*selected_index].0;
+                    let raw =
+                        crate::distances::compute(metric, candidate_vector, &vectors[selected_id])?;
+                    redundancy =
+                        redundancy.max(f64::from(crate::distances::similarity_value(metric, raw)));
+                }
+            }
+
+            let score = alpha * query_score - (1.0 - alpha) * redundancy;
+            if position == 0 || score > best_score {
+                best_position = position;
+                best_score = score;
+            }
+        }
+
+        selected.push(remaining.remove(best_position));
+    }
+
+    Ok(selected
+        .into_iter()
+        .map(|index| initial[index].0.clone())
+        .collect())
 }
 
 fn push_top_k(heap: &mut BinaryHeap<Hit>, hit: Hit, limit: usize) {
@@ -199,6 +267,80 @@ mod tests {
         assert_eq!(
             binary_top_k(vectors, &query, 3, 2).unwrap(),
             vec![("a".into(), 0.0), ("b".into(), 1.0)]
+        );
+    }
+
+    #[test]
+    fn mmr_rerank_preserves_input_ties_and_selects_diverse_vectors() {
+        let initial = vec![("a".into(), 0.9), ("b".into(), 0.8), ("c".into(), 0.1)];
+        let embeddings = vec![
+            ("a".into(), vec![1.0, 0.0]),
+            ("b".into(), vec![1.0, 0.0]),
+            ("c".into(), vec![0.0, 1.0]),
+        ];
+        assert_eq!(
+            mmr_rerank(initial, embeddings, Metric::Cosine, 0.5, 2).unwrap(),
+            vec!["a", "c"]
+        );
+
+        let tied = vec![("first".into(), 1.0), ("second".into(), 1.0)];
+        let tied_vectors = vec![("first".into(), vec![1.0]), ("second".into(), vec![1.0])];
+        assert_eq!(
+            mmr_rerank(tied, tied_vectors, Metric::L2, 1.0, 1).unwrap(),
+            vec!["first"]
+        );
+    }
+
+    #[test]
+    fn mmr_rerank_rejects_every_malformed_boundary() {
+        let valid_initial = vec![("a".into(), 1.0)];
+        let valid_vectors = vec![("a".into(), vec![1.0])];
+
+        for alpha in [f64::NAN, -0.1, 1.1] {
+            assert!(mmr_rerank(
+                valid_initial.clone(),
+                valid_vectors.clone(),
+                Metric::L2,
+                alpha,
+                1
+            )
+            .is_err());
+        }
+        assert!(mmr_rerank(
+            valid_initial.clone(),
+            valid_vectors.clone(),
+            Metric::L2,
+            0.5,
+            0
+        )
+        .is_err());
+
+        for malformed_vectors in [
+            vec![("".into(), vec![1.0])],
+            vec![("a".into(), vec![])],
+            vec![("a".into(), vec![1.0]), ("a".into(), vec![1.0])],
+            vec![("a".into(), vec![1.0]), ("b".into(), vec![1.0, 2.0])],
+            vec![("a".into(), vec![f32::NAN])],
+        ] {
+            assert!(
+                mmr_rerank(valid_initial.clone(), malformed_vectors, Metric::L2, 0.5, 1).is_err()
+            );
+        }
+
+        for malformed_initial in [
+            vec![("".into(), 1.0)],
+            vec![("missing".into(), 1.0)],
+            vec![("a".into(), f64::NAN)],
+            vec![("a".into(), 1.0), ("a".into(), 0.5)],
+        ] {
+            assert!(
+                mmr_rerank(malformed_initial, valid_vectors.clone(), Metric::L2, 0.5, 1).is_err()
+            );
+        }
+
+        assert_eq!(
+            mmr_rerank(vec![], valid_vectors, Metric::L2, 0.5, 10).unwrap(),
+            Vec::<String>::new()
         );
     }
 

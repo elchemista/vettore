@@ -104,6 +104,17 @@ defmodule Vettore.Nifs do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  @spec mmr_rerank(
+          [{String.t(), float()}],
+          [{String.t(), [float()]}],
+          non_neg_integer(),
+          float(),
+          pos_integer()
+        ) :: {:ok, [String.t()]} | {:error, String.t()}
+  def mmr_rerank(_initial, _embeddings, _metric_code, _alpha, _final_k),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   @spec multi_vector_score([[float()]], [[float()]], non_neg_integer()) ::
           {:ok, float()} | {:error, String.t()}
   def multi_vector_score(_query_vectors, _document_vectors, _metric_code),
@@ -169,6 +180,10 @@ defmodule Vettore.Nifs do
   def flat_delete(_index, _id), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  @spec flat_clear(reference()) :: :ok | {:ok, {}} | {:error, String.t()}
+  def flat_clear(_index), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   @spec flat_search(reference(), [float()], pos_integer()) ::
           {:ok, [{String.t(), float()}]} | {:error, String.t()}
   def flat_search(_index, _query, _limit), do: :erlang.nif_error(:nif_not_loaded)
@@ -209,6 +224,10 @@ defmodule Vettore.Nifs do
   @doc false
   @spec hnsw_delete(reference(), String.t()) :: :ok | {:ok, {}} | {:error, String.t()}
   def hnsw_delete(_index, _id), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_clear(reference()) :: :ok | {:ok, {}} | {:error, String.t()}
+  def hnsw_clear(_index), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec hnsw_search(reference(), [float()], pos_integer()) ::

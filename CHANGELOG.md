@@ -3,6 +3,30 @@
 All notable changes to Vettore are documented here. The project follows
 Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Rejected non-UTF-8 ids before ETS writes and Rustler decoding, preventing a
+  failed insert from leaving the canonical store and native index inconsistent.
+- Made cosine collection ranking compute true cosine even when normalization is
+  explicitly disabled or uses a non-L2 transform.
+- Kept quantized Hamming and Jaccard candidate selection consistent with their
+  non-zero truth semantics.
+- Serialized ETS-backed store/index mutations so concurrent puts and deletes of
+  the same id cannot leave phantom native entries.
+- Corrected compatibility insert and batch return ids when an empty `id` falls
+  back to `value`.
+
+### Changed
+
+- Added reverse HNSW edges, diversified pruning, local reconnection after
+  deletes, and fresh search bounds to improve recall and deletion cost.
+- MMR now runs in one native batch instead of one NIF transition per pair.
+- Hybrid search reuses one ETS snapshot across adaptive generators, multi-stage
+  funnel search narrows candidates progressively, and `close/1` clears native
+  index memory immediately.
+
 ## [0.3.2] - 2026-07-21
 
 ### Fixed

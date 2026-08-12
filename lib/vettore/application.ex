@@ -3,7 +3,8 @@ defmodule Vettore.Application do
 
   use Application
 
-  @impl true
+  @spec start(Application.start_type(), term()) :: Supervisor.on_start()
+  @impl Application
   def start(_type, _args) do
     children = [
       {DynamicSupervisor, strategy: :one_for_one, name: Vettore.ETSSupervisor}

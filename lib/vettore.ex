@@ -6,7 +6,7 @@ defmodule Vettore do
   `Vettore.new/0` database-style API remains available for compatibility.
   """
 
-  alias Vettore.{Collection, Distance, Embedding, Result}
+  alias Vettore.{Collection, Distance, Embedding, Identifier, Result}
 
   @doc """
   Creates a lightweight ETS-backed compatibility database.
@@ -118,6 +118,9 @@ defmodule Vettore do
   @doc """
   Inserts one embedding into a collection.
 
+  IDs are insert-only: an existing id returns `{:error, :duplicate_id}`. To
+  replace a record, delete it first and then insert the new embedding.
+
   ## Examples
 
       iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :l2)
@@ -129,6 +132,8 @@ defmodule Vettore do
 
   @doc """
   Inserts many embeddings into a collection.
+
+  The batch is insert-only and atomic with respect to duplicate ids.
 
   ## Examples
 
@@ -435,7 +440,7 @@ defmodule Vettore do
       when is_binary(collection_name) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
          :ok <- put(collection, embedding) do
-      {:ok, embedding.id || embedding.value}
+      {:ok, compatibility_embedding_id(embedding)}
     end
   end
 
@@ -464,7 +469,7 @@ defmodule Vettore do
       when is_binary(collection_name) and is_list(embeddings) do
     with {:ok, collection} <- fetch_collection(db, collection_name),
          :ok <- put_many(collection, embeddings) do
-      {:ok, Enum.map(embeddings, &(&1.id || &1.value))}
+      {:ok, Enum.map(embeddings, &compatibility_embedding_id/1)}
     end
   end
 
@@ -640,6 +645,12 @@ defmodule Vettore do
   end
 
   def rerank(_db, _collection_name, _initial, _opts), do: {:error, :invalid_arguments}
+
+  @spec compatibility_embedding_id(Embedding.t()) :: String.t()
+  defp compatibility_embedding_id(%Embedding{} = embedding) do
+    {:ok, id} = Identifier.embedding_id(embedding)
+    id
+  end
 
   @spec fetch_collection(Vettore.DB.t(), String.t()) ::
           {:ok, Collection.t()} | {:error, :collection_not_found}

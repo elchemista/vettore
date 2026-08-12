@@ -377,7 +377,9 @@ Useful details:
 
 - `id` is the preferred unique identifier.
 - If `id` is missing, a non-empty string `value` can be used as the id.
-- Duplicate ids are rejected.
+- IDs must be non-empty valid UTF-8 strings. Duplicate ids are rejected;
+  `put/2` is insert-only, so replace a record with `delete/2` followed by
+  `put/2`.
 - Duplicate vectors are allowed.
 - Vectors are normalized at insertion according to the collection config.
 - If `vectors` is present but `vector` is omitted, Vettore stores an averaged
@@ -396,7 +398,8 @@ they are no longer needed:
 :ok = Vettore.close(collection)
 ```
 
-Closing is idempotent. Later operations return `{:error, :closed}`.
+Closing is idempotent, releases both ETS and mirrored native index memory, and
+makes later operations return `{:error, :closed}`.
 
 ETS collections can be snapshotted:
 
@@ -413,6 +416,9 @@ ETS when loaded. Snapshot writes use a same-directory temporary file followed
 by a rename and include ETS integrity metadata. Loads validate the table type,
 schema, and every stored record before rebuilding the index; legacy public
 tables are restored as protected tables.
+
+Snapshot integrity metadata detects accidental corruption; it is not an
+authentication mechanism. Load snapshots only from trusted sources.
 
 You can load the same data with a different index:
 
@@ -546,14 +552,24 @@ New code should prefer the collection-style top-level API: `Vettore.new/1`, `Vet
 
 ## Development
 
-CI includes a real `ex_fastembed` integration with `BAAI/bge-small-en-v1.5`
-over a small phrase corpus. It compares exact search, HNSW, and hybrid
-retrieval while checking canonical values and metadata. Enable that test
-locally without adding its older Rustler constraint to the published package:
+The test-only `ex_fastembed` dependency generates the committed
+`BAAI/bge-small-en-v1.5` fixture under `test/fixtures`. The normal suite uses
+those real vectors offline to exercise exact search, HNSW, funnel search,
+quantized search, multi-vector search, hybrid search, and snapshot reloads.
+
+CI additionally runs fresh model inference and checks it against the committed
+artifact. Enable that slower check locally with:
 
 ```bash
-MIX_ENV=test VETTORE_TEST_EX_FASTEMBED=1 mix deps.get --locked
-VETTORE_BUILD=1 VETTORE_TEST_EX_FASTEMBED=1 mix test --cover
+VETTORE_BUILD=1 VETTORE_TEST_EX_FASTEMBED=1 \
+  mix test test/ex_fastembed_integration_test.exs
+```
+
+Regenerate the fixture after an intentional model or dependency update with:
+
+```bash
+MIX_ENV=test VETTORE_BUILD=1 \
+  mix run test/support/generate_fastembed_fixture.exs
 ```
 
 Build the Rust crate locally with Rust 1.91 or newer by setting

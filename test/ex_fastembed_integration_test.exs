@@ -1,183 +1,148 @@
+Code.require_file("support/fastembed_fixture.ex", __DIR__)
+
 defmodule VettoreExFastembedIntegrationTest do
   use ExUnit.Case, async: false
 
-  @compile {:no_warn_undefined, ExFastembed}
-  @moduletag skip: System.get_env("VETTORE_TEST_EX_FASTEMBED") != "1"
+  alias Vettore.{Collection, Distance, Embedding, Result}
+  alias Vettore.Test.FastembedFixture
 
-  alias Vettore.{Collection, Embedding, Result}
+  setup_all do
+    {:ok, fixture: FastembedFixture.load!()}
+  end
 
-  @model "BAAI/bge-small-en-v1.5"
+  test "the committed artifact contains real, normalized FastEmbed vectors", %{fixture: fixture} do
+    assert fixture.model == "BAAI/bge-small-en-v1.5"
+    assert fixture.dimensions == 384
+    assert length(fixture.documents) == 30
+    assert length(fixture.queries) == 3
 
-  @phrases [
-    {"cat_1", "A small kitten is sleeping on a warm blanket.", :cats},
-    {"cat_2", "The cat is chasing a toy mouse across the floor.", :cats},
-    {"cat_3", "A tabby cat curls up beside the sunny window.", :cats},
-    {"cat_4", "The kitten drinks milk from a shallow bowl.", :cats},
-    {"cat_5", "A quiet house cat watches birds from the sofa.", :cats},
-    {"cat_6", "The feline stretches and purrs after a nap.", :cats},
-    {"dog_1", "A golden retriever runs after a tennis ball.", :dogs},
-    {"dog_2", "The puppy learns to sit and stay in the park.", :dogs},
-    {"dog_3", "A loyal dog guards the front porch at night.", :dogs},
-    {"dog_4", "The border collie herds sheep across the field.", :dogs},
-    {"dog_5", "A wet dog shakes water after swimming in the lake.", :dogs},
-    {"dog_6", "The hound follows a scent along the forest trail.", :dogs},
-    {"elixir_1", "Elixir processes exchange messages on the BEAM VM.", :elixir},
-    {"elixir_2", "Phoenix renders a LiveView page without custom JavaScript.", :elixir},
-    {"elixir_3", "Pattern matching makes Elixir function clauses expressive.", :elixir},
-    {"elixir_4", "Supervisors restart crashed workers in an OTP application.", :elixir},
-    {"elixir_5", "Mix compiles dependencies and runs the test suite.", :elixir},
-    {"elixir_6", "ETS tables can store fast in-memory state for Elixir systems.", :elixir},
-    {"vector_1", "Approximate nearest neighbor search retrieves similar embeddings.", :vectors},
-    {"vector_2", "Cosine similarity compares the direction of two dense vectors.", :vectors},
-    {"vector_3", "A vector database indexes embeddings for semantic retrieval.", :vectors},
-    {"vector_4", "HNSW graphs trade exact recall for lower search latency.", :vectors},
-    {"vector_5", "Binary quantization compresses vectors for cheaper candidate search.",
-     :vectors},
-    {"vector_6", "Reranking exact vectors improves the final search results.", :vectors},
-    {"food_1", "Fresh pasta is tossed with basil pesto and olive oil.", :food},
-    {"food_2", "The baker pulls a loaf of sourdough from the oven.", :food},
-    {"food_3", "A spicy curry simmers with coconut milk and vegetables.", :food},
-    {"food_4", "The chef slices ripe tomatoes for a summer salad.", :food},
-    {"food_5", "Dark chocolate melts into a rich dessert sauce.", :food},
-    {"food_6", "A bowl of soup warms the table on a cold evening.", :food}
-  ]
+    for %{vector: vector} <- fixture.documents ++ fixture.queries do
+      assert length(vector) == fixture.dimensions
+      assert_in_delta vector_norm(vector), 1.0, 1.0e-5
+    end
+  end
 
-  test "Vettore searches real ex_fastembed vectors from a small phrase corpus" do
-    texts = Enum.map(@phrases, fn {_id, text, _category} -> text end)
+  test "all search modes retrieve semantic neighbors from real embeddings", %{fixture: fixture} do
+    {flat, hnsw} = indexed_collections(fixture)
 
-    assert {:ok, dimensions} = ExFastembed.load(@model)
-    assert {:ok, vectors} = ExFastembed.embed_text(texts)
-    assert length(vectors) == length(@phrases)
+    on_exit(fn ->
+      Vettore.close(flat)
+      Vettore.close(hnsw)
+    end)
 
-    assert {:ok, collection} =
-             Collection.new(
-               name: :real_fastembed_phrases,
-               dimensions: dimensions,
-               metric: :cosine,
-               normalize: :l2
-             )
+    for query <- fixture.queries do
+      assert_category_search(flat, hnsw, fixture, query)
+    end
+  end
 
-    assert {:ok, hnsw_collection} =
-             Collection.new(
-               name: :real_fastembed_hnsw,
-               dimensions: dimensions,
-               metric: :cosine,
-               normalize: :l2,
-               index: :hnsw,
-               index_options: [
-                 m: 8,
-                 m0: 16,
-                 ef_construction: 200,
-                 ef_search: 200,
-                 max_level: 12
-               ]
-             )
+  test "snapshot round trips preserve rankings for real embeddings", %{fixture: fixture} do
+    path = temporary_path("fastembed-snapshot")
+    {:ok, collection} = build_collection(:fastembed_snapshot, fixture.dimensions)
+    :ok = Collection.put_many(collection, embeddings(fixture))
+    :ok = Collection.snapshot(collection, path)
+    {:ok, restored} = Collection.load_snapshot(path)
 
     on_exit(fn ->
       Vettore.close(collection)
-      Vettore.close(hnsw_collection)
+      Vettore.close(restored)
+      File.rm(path)
     end)
 
-    embeddings =
-      @phrases
-      |> Enum.zip(vectors)
-      |> Enum.map(fn {{id, text, category}, vector} ->
-        %Embedding{id: id, value: text, vector: vector, metadata: %{category: category}}
-      end)
+    for %{vector: query_vector} <- fixture.queries do
+      assert {:ok, original} = Collection.search(collection, query_vector, limit: 5)
+      assert {:ok, reloaded} = Collection.search(restored, query_vector, limit: 5)
+      assert Enum.map(reloaded, & &1.id) == Enum.map(original, & &1.id)
+    end
+  end
 
-    assert :ok = Collection.put_many(collection, embeddings)
-    assert :ok = Collection.put_many(hnsw_collection, embeddings)
+  @tag skip: System.get_env("VETTORE_TEST_EX_FASTEMBED") != "1"
+  test "fresh ex_fastembed inference matches the committed artifact", %{fixture: fixture} do
+    generated = FastembedFixture.generate!()
 
-    assert_category_search(
-      collection,
-      hnsw_collection,
-      dimensions,
-      "How does OTP restart failed Elixir workers?",
-      :elixir
-    )
+    assert generated.model == fixture.model
+    assert generated.dimensions == fixture.dimensions
 
-    assert_category_search(
-      collection,
-      hnsw_collection,
-      dimensions,
-      "Which document talks about vector similarity search?",
-      :vectors
-    )
+    fixture_vectors = Enum.map(fixture.documents ++ fixture.queries, & &1.vector)
+    generated_vectors = Enum.map(generated.documents ++ generated.queries, & &1.vector)
 
-    assert_category_search(
-      collection,
-      hnsw_collection,
-      dimensions,
-      "Find text about a kitten or house cat.",
-      :cats
+    for {expected, actual} <- Enum.zip(fixture_vectors, generated_vectors) do
+      assert {:ok, similarity} = Distance.cosine(expected, actual)
+      assert similarity > 0.999_9
+    end
+  end
+
+  defp indexed_collections(fixture) do
+    {:ok, flat} = build_collection(:real_fastembed_flat, fixture.dimensions)
+
+    {:ok, hnsw} =
+      build_collection(:real_fastembed_hnsw, fixture.dimensions,
+        index: :hnsw,
+        index_options: [
+          m: 8,
+          m0: 16,
+          ef_construction: 200,
+          ef_search: 200,
+          max_level: 12
+        ]
+      )
+
+    values = embeddings(fixture)
+    :ok = Collection.put_many(flat, values)
+    :ok = Collection.put_many(hnsw, values)
+    {flat, hnsw}
+  end
+
+  defp build_collection(name, dimensions, options \\ []) do
+    Collection.new(
+      [name: name, dimensions: dimensions, metric: :cosine, normalize: :l2] ++ options
     )
   end
 
-  defp assert_category_search(collection, hnsw_collection, dimensions, query, expected_category) do
-    assert {:ok, [query_vector]} = ExFastembed.embed_text([query])
-
-    assert {:ok, exact_results} = Collection.search(collection, query_vector, limit: 5)
-    assert [%Result{} = exact_top | _] = exact_results
-
-    assert_new_search_matches_exact_top(collection, dimensions, query_vector, exact_top)
-    assert_hnsw_matches_exact_top(hnsw_collection, query_vector, exact_top)
-
-    top_categories = Enum.map(exact_results, & &1.metadata.category)
-
-    assert expected_category in Enum.take(top_categories, 3)
+  defp embeddings(fixture) do
+    Enum.map(fixture.documents, fn document ->
+      %Embedding{
+        id: document.id,
+        value: document.text,
+        vector: document.vector,
+        metadata: %{category: document.category}
+      }
+    end)
   end
 
-  defp assert_hnsw_matches_exact_top(collection, query_vector, exact_top) do
-    exact_top_id = exact_top.id
+  defp assert_category_search(flat, hnsw, fixture, query) do
+    candidates = length(fixture.documents)
+    dimensions = fixture.dimensions
 
-    assert {:ok,
-            [
-              %Result{
-                id: ^exact_top_id,
-                value: value,
-                metadata: %{category: category}
-              }
-              | _
-            ]} = Collection.search(collection, query_vector, limit: 5)
+    assert {:ok, [%Result{} = exact_top | _] = exact_results} =
+             Collection.search(flat, query.vector, limit: 5)
 
-    assert is_binary(value)
-    assert is_atom(category)
+    assert query.category in (exact_results
+                              |> Enum.take(3)
+                              |> Enum.map(& &1.metadata.category))
 
-    assert {:ok, [%Result{id: ^exact_top_id} | _]} =
-             Collection.hybrid_search(collection, query_vector,
-               generators: [
-                 hnsw: [candidates: length(@phrases)],
-                 quantized: [candidates: length(@phrases)]
-               ],
-               limit: 5
-             )
-  end
-
-  defp assert_new_search_matches_exact_top(collection, dimensions, query_vector, exact_top) do
-    candidates = length(@phrases)
     exact_top_id = exact_top.id
 
     assert {:ok, [%Result{id: ^exact_top_id} | _]} =
-             Collection.funnel_search(collection, query_vector,
+             Collection.search(hnsw, query.vector, limit: 5)
+
+    assert {:ok, [%Result{id: ^exact_top_id} | _]} =
+             Collection.funnel_search(flat, query.vector,
                stages: [min(128, dimensions), dimensions],
                candidates: candidates,
                limit: 5
              )
 
     assert {:ok, [%Result{id: ^exact_top_id} | _]} =
-             Collection.quantized_search(collection, query_vector,
+             Collection.quantized_search(flat, query.vector,
                candidates: candidates,
                limit: 5
              )
 
     assert {:ok, [%Result{id: ^exact_top_id} | _]} =
-             Collection.multi_vector_search(collection, [query_vector],
-               metric: :cosine,
-               limit: 5
-             )
+             Collection.multi_vector_search(flat, [query.vector], metric: :cosine, limit: 5)
 
     assert {:ok, [%Result{id: ^exact_top_id} | _]} =
-             Collection.hybrid_search(collection, query_vector,
+             Collection.hybrid_search(flat, query.vector,
                generators: [
                  funnel: [stages: [min(128, dimensions), dimensions], candidates: candidates],
                  quantized: [candidates: candidates]
@@ -185,5 +150,25 @@ defmodule VettoreExFastembedIntegrationTest do
                rerank: :exact,
                limit: 5
              )
+
+    assert {:ok, [%Result{id: ^exact_top_id} | _]} =
+             Collection.hybrid_search(hnsw, query.vector,
+               generators: [
+                 hnsw: [candidates: candidates],
+                 quantized: [candidates: candidates]
+               ],
+               limit: 5
+             )
+  end
+
+  defp vector_norm(vector) do
+    vector
+    |> Enum.reduce(0.0, fn value, sum -> sum + value * value end)
+    |> :math.sqrt()
+  end
+
+  defp temporary_path(name) do
+    unique = System.unique_integer([:positive, :monotonic])
+    Path.join(System.tmp_dir!(), "vettore-#{name}-#{unique}.ets")
   end
 end

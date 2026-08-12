@@ -157,6 +157,15 @@ defmodule VettoreAdversarialTest do
       assert {:error, :invalid_mmr_args} =
                Distance.mmr_rerank([:bad], [{"a", [1.0]}], :l2, 0.5, 1)
 
+      assert {:ok, [{"a", 1.0}]} =
+               Distance.mmr_rerank(
+                 [{"a", 1.0}],
+                 [{"a", [1.0]}],
+                 :l2,
+                 0.5,
+                 1_267_650_600_228_229_401_496_703_205_376
+               )
+
       initial = [{"a", 1.0}, {"b", 0.5}]
       huge = [{"a", [@max_f32]}, {"b", [-@max_f32]}]
 
@@ -167,6 +176,9 @@ defmodule VettoreAdversarialTest do
 
       assert {:error, :metric_overflow} =
                Distance.mmr_rerank(initial, huge_product, :inner_product, 0.5, 2)
+
+      assert {:error, :invalid_mmr_args} =
+               Distance.mmr_rerank([{<<255>>, 1.0}], [{<<255>>, [1.0]}], :l2, 0.5, 1)
     end
   end
 
@@ -211,6 +223,8 @@ defmodule VettoreAdversarialTest do
 
       assert {:error, :forced_get_failure} =
                Collection.hybrid_search(failed, [0.0], generators: [:search], limit: 1)
+
+      assert {:error, :forced_get_failure} = Collection.delete(failed, "broken")
     end
 
     test "adaptive paths reject malformed custom-store records without raising" do
@@ -271,6 +285,36 @@ defmodule VettoreAdversarialTest do
                Collection.multi_vector_search(duplicate_ids, [[1.0]], limit: 1)
     end
 
+    test "non-UTF-8 ids are tagged before ETS or native state is mutated" do
+      invalid_id = <<255>>
+      assert {:ok, collection} = Collection.new(dimensions: 2, metric: :l2)
+
+      assert {:error, :invalid_id} =
+               Collection.put(collection, %{id: invalid_id, vector: [0.0, 0.0]})
+
+      assert {:error, :invalid_id} =
+               Collection.put_many(collection, [
+                 %{id: "valid", vector: [0.0, 0.0]},
+                 %{id: invalid_id, vector: [1.0, 1.0]}
+               ])
+
+      assert {:error, :invalid_id} =
+               ETS.put(collection.store_state, %Embedding{id: invalid_id, vector: [0.0, 0.0]})
+
+      assert {:error, :invalid_id} = Collection.get(collection, invalid_id)
+      assert {:error, :invalid_id} = Collection.delete(collection, invalid_id)
+      assert {:ok, []} = Collection.all(collection)
+
+      poisoned =
+        scripted_collection({:all, [%Embedding{id: invalid_id, vector: [0.0]}]})
+
+      assert {:error, :invalid_id} = Collection.funnel_search(poisoned, [0.0])
+      assert {:error, :invalid_id} = Collection.quantized_search(poisoned, [0.0])
+      assert {:error, :invalid_id} = Collection.multi_vector_search(poisoned, [[0.0]])
+      assert {:error, :invalid_id} = Collection.hybrid_search(poisoned, [0.0])
+      assert :ok = Vettore.close(collection)
+    end
+
     test "adaptive option and nested-vector failures are tagged" do
       collection = scripted_collection({:all, []})
 
@@ -282,11 +326,22 @@ defmodule VettoreAdversarialTest do
                  limit: 1
                )
 
+      assert {:error, {:invalid_generator, {:search, :not_options}}} =
+               Collection.hybrid_search(collection, [0.0],
+                 generators: [{:search, :not_options}],
+                 limit: 1
+               )
+
       assert {:error, :dimension_mismatch} =
                Collection.multi_vector_search(collection, [[0.0], [0.0, 1.0]], limit: 1)
 
       assert {:error, :invalid_vector} =
                Collection.put(collection, %{id: "bad", vector: :not_a_vector})
+
+      non_list_store = scripted_collection({:all, :not_embeddings})
+
+      assert {:error, :invalid_embedding} =
+               Collection.quantized_search(non_list_store, [0.0], candidates: 1, limit: 1)
     end
   end
 

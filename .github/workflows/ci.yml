@@ -44,8 +44,6 @@ jobs:
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/vettore/Cargo.lock') }}
 
       - name: Install Mix tooling and dependencies
-        env:
-          VETTORE_TEST_EX_FASTEMBED: "1"
         run: |
           mix local.hex --force
           mix local.rebar --force
@@ -55,8 +53,6 @@ jobs:
         run: mix format --check-formatted
 
       - name: Compile project
-        env:
-          VETTORE_TEST_EX_FASTEMBED: "1"
         run: mix compile
 
       - name: Run tests and enforce coverage

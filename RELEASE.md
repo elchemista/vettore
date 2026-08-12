@@ -1,9 +1,8 @@
 # Releasing Vettore 0.3.2
 
-The Elixir project, Rust crate, lockfile, README, and changelog are prepared for
-`0.3.2`. The checked-in checksum file still describes `0.3.1` artifacts until
-the new cross-platform archives exist; never publish the Hex package with that
-old checksum map.
+The checked-in checksum map describes the currently published `0.3.2` native
+artifacts. Any later native-code change requires rebuilding the complete target
+matrix and replacing that map before the next package release.
 
 ## 1. Verify the source release
 

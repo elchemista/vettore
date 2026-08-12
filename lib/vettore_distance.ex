@@ -34,6 +34,13 @@ defmodule Vettore.Distance do
     :hamming,
     :jaccard
   ]
+  @f32_max 3.402_823_466_385_288_6e38
+  @u64_max 18_446_744_073_709_551_615
+  @native_error_reasons %{
+    "metric overflow" => :metric_overflow,
+    "vector contains a non-finite value" => :invalid_vector
+  }
+  @mmr_error_reasons %{"invalid mmr arguments" => :invalid_mmr_args}
 
   @doc """
   Normalizes a vector.
@@ -337,7 +344,7 @@ defmodule Vettore.Distance do
     with :ok <- validate_metric(metric),
          {:ok, vectors} <- validate_mmr_embeddings(embeddings),
          :ok <- validate_mmr_initial(initial, vectors) do
-      do_mmr(initial, vectors, metric, alpha, final_k, [])
+      native_mmr(initial, vectors, metric, alpha, final_k)
     end
   end
 
@@ -365,7 +372,20 @@ defmodule Vettore.Distance do
   @spec validate_mmr_embedding(term(), map(), pos_integer() | nil) ::
           {:ok, map(), pos_integer()} | {:error, :invalid_mmr_args}
   defp validate_mmr_embedding({id, vector}, vectors, expected_dimensions)
-       when is_binary(id) and id != "" and is_list(vector) and vector != [] do
+       when is_binary(id) and is_list(vector) do
+    if id != "" and vector != [] do
+      validate_mmr_embedding_values(id, vector, vectors, expected_dimensions)
+    else
+      {:error, :invalid_mmr_args}
+    end
+  end
+
+  defp validate_mmr_embedding(_embedding, _vectors, _expected_dimensions),
+    do: {:error, :invalid_mmr_args}
+
+  @spec validate_mmr_embedding_values(String.t(), vector(), map(), pos_integer() | nil) ::
+          {:ok, map(), pos_integer()} | {:error, :invalid_mmr_args}
+  defp validate_mmr_embedding_values(id, vector, vectors, expected_dimensions) do
     dimensions = length(vector)
 
     cond do
@@ -378,20 +398,21 @@ defmodule Vettore.Distance do
       not Enum.all?(vector, &finite_number?/1) ->
         {:error, :invalid_mmr_args}
 
+      not String.valid?(id) ->
+        {:error, :invalid_mmr_args}
+
       true ->
         {:ok, Map.put(vectors, id, vector), expected_dimensions || dimensions}
     end
   end
-
-  defp validate_mmr_embedding(_embedding, _vectors, _expected_dimensions),
-    do: {:error, :invalid_mmr_args}
 
   @spec validate_mmr_initial(term(), map()) :: :ok | {:error, :invalid_mmr_args}
   defp validate_mmr_initial(initial, vectors) do
     {valid?, _ids} =
       Enum.reduce_while(initial, {true, MapSet.new()}, fn
         {id, score}, {true, ids} when is_binary(id) and id != "" ->
-          if finite_number?(score) and Map.has_key?(vectors, id) and not MapSet.member?(ids, id) do
+          if String.valid?(id) and finite_number?(score) and Map.has_key?(vectors, id) and
+               not MapSet.member?(ids, id) do
             {:cont, {true, MapSet.put(ids, id)}}
           else
             {:halt, {false, ids}}
@@ -406,117 +427,27 @@ defmodule Vettore.Distance do
 
   @spec finite_number?(term()) :: boolean()
   defp finite_number?(value) when is_integer(value),
-    do: value >= -3.402_823_466_385_288_6e38 and value <= 3.402_823_466_385_288_6e38
+    do: value >= -@f32_max and value <= @f32_max
 
   defp finite_number?(value) when is_float(value),
-    do: value >= -3.402_823_466_385_288_6e38 and value <= 3.402_823_466_385_288_6e38
+    do: value >= -@f32_max and value <= @f32_max
 
   defp finite_number?(_value), do: false
 
-  @spec do_mmr(
-          [{String.t(), number()}],
-          %{String.t() => vector()},
-          metric(),
-          number(),
-          non_neg_integer(),
-          [{String.t(), number()}]
-        ) :: {:ok, [{String.t(), number()}]} | {:error, term()}
-  defp do_mmr(_remaining, _vectors, _metric, _alpha, 0, selected),
-    do: {:ok, Enum.reverse(selected)}
+  @spec native_mmr([{String.t(), number()}], map(), metric(), number(), pos_integer()) ::
+          {:ok, [{String.t(), number()}]} | {:error, term()}
+  defp native_mmr(initial, vectors, metric, alpha, final_k) do
+    native_initial = Enum.map(initial, fn {id, score} -> {id, score / 1} end)
+    native_vectors = Enum.map(vectors, fn {id, vector} -> {id, float_vector(vector)} end)
+    native_k = min(final_k, max(length(initial), 1))
+    scores = Map.new(initial)
 
-  defp do_mmr([], _vectors, _metric, _alpha, _left, selected),
-    do: {:ok, Enum.reverse(selected)}
-
-  defp do_mmr(remaining, vectors, metric, alpha, left, selected) do
-    with {:ok, scored} <- score_mmr_candidates(remaining, selected, vectors, metric, alpha) do
-      {chosen, index, _mmr_score} = Enum.max_by(scored, &elem(&1, 2))
-      rest = List.delete_at(remaining, index)
-      do_mmr(rest, vectors, metric, alpha, left - 1, [chosen | selected])
+    case Nifs.mmr_rerank(native_initial, native_vectors, metric_code(metric), alpha / 1, native_k)
+         |> normalize_native_error() do
+      {:ok, ids} -> {:ok, Enum.map(ids, &{&1, Map.fetch!(scores, &1)})}
+      {:error, reason} -> {:error, Map.get(@mmr_error_reasons, reason, reason)}
     end
   end
-
-  @spec score_mmr_candidates(
-          [{String.t(), number()}],
-          [{String.t(), number()}],
-          %{String.t() => vector()},
-          metric(),
-          number()
-        ) :: {:ok, [{{String.t(), number()}, non_neg_integer(), float()}]} | {:error, term()}
-  defp score_mmr_candidates(remaining, selected, vectors, metric, alpha) do
-    remaining
-    |> Enum.with_index()
-    |> Enum.reduce_while({:ok, []}, fn {{id, query_score} = candidate, index}, {:ok, acc} ->
-      case maximum_redundancy(id, selected, vectors, metric) do
-        {:ok, redundancy} ->
-          score = alpha * query_score - (1.0 - alpha) * redundancy
-          {:cont, {:ok, [{candidate, index, score / 1} | acc]}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, scored} -> {:ok, Enum.reverse(scored)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @spec maximum_redundancy(
-          String.t(),
-          [{String.t(), number()}],
-          %{String.t() => vector()},
-          metric()
-        ) :: {:ok, float()} | {:error, term()}
-  defp maximum_redundancy(_id, [], _vectors, _metric), do: {:ok, 0.0}
-
-  defp maximum_redundancy(id, selected, vectors, metric) do
-    Enum.reduce_while(selected, {:ok, nil}, fn {selected_id, _score}, {:ok, maximum} ->
-      case pair_similarity(metric, Map.fetch!(vectors, id), Map.fetch!(vectors, selected_id)) do
-        {:ok, similarity} ->
-          maximum = maximum_similarity(maximum, similarity)
-          {:cont, {:ok, maximum}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  @spec maximum_similarity(float() | nil, float()) :: float()
-  defp maximum_similarity(nil, similarity), do: similarity
-  defp maximum_similarity(maximum, similarity), do: max(maximum, similarity)
-
-  @spec pair_similarity(metric(), vector(), vector()) :: {:ok, float()} | {:error, term()}
-  defp pair_similarity(:cosine, left, right), do: cosine(left, right)
-
-  defp pair_similarity(:inner_product, left, right),
-    do: inner_product(left, right)
-
-  defp pair_similarity(:l2, left, right), do: distance_similarity(l2(left, right))
-
-  defp pair_similarity(:l2_squared, left, right),
-    do: distance_similarity(l2_squared(left, right))
-
-  defp pair_similarity(:negative_inner_product, left, right) do
-    with {:ok, raw} <- negative_inner_product(left, right), do: {:ok, -raw / 1}
-  end
-
-  defp pair_similarity(:manhattan, left, right),
-    do: distance_similarity(manhattan(left, right))
-
-  defp pair_similarity(:chebyshev, left, right),
-    do: distance_similarity(chebyshev(left, right))
-
-  defp pair_similarity(:hamming, left, right),
-    do: distance_similarity(hamming(left, right))
-
-  defp pair_similarity(:jaccard, left, right),
-    do: distance_similarity(jaccard(left, right))
-
-  @spec distance_similarity({:ok, number()} | {:error, term()}) ::
-          {:ok, float()} | {:error, term()}
-  defp distance_similarity({:ok, raw}), do: {:ok, 1.0 / (1.0 + raw)}
-  defp distance_similarity({:error, reason}), do: {:error, reason}
 
   @spec similarity_distance(metric(), number()) :: float() | nil
   defp similarity_distance(:cosine, raw), do: 1.0 - raw
@@ -574,20 +505,30 @@ defmodule Vettore.Distance do
     words = if dimensions > 0, do: div(dimensions + 63, 64), else: 0
 
     if dimensions > 0 and length(left) == words and length(right) == words and
-         Enum.all?(left ++ right, &valid_u64?/1),
+         Enum.all?(left, &valid_u64?/1) and Enum.all?(right, &valid_u64?/1),
        do: :ok,
        else: {:error, :invalid_vector}
   end
 
   @spec valid_u64?(term()) :: boolean()
-  defp valid_u64?(value),
-    do: is_integer(value) and value >= 0 and value <= 18_446_744_073_709_551_615
+  defp valid_u64?(value), do: is_integer(value) and value >= 0 and value <= @u64_max
 
   @spec validate_metric(term()) :: :ok | {:error, {:unknown_metric, term()}}
   defp validate_metric(metric) when metric in @similarity_metrics or metric in @distance_metrics,
     do: :ok
 
   defp validate_metric(metric), do: {:error, {:unknown_metric, metric}}
+
+  @spec metric_code(metric()) :: non_neg_integer()
+  defp metric_code(:l2), do: 0
+  defp metric_code(:l2_squared), do: 1
+  defp metric_code(:cosine), do: 2
+  defp metric_code(:inner_product), do: 3
+  defp metric_code(:negative_inner_product), do: 4
+  defp metric_code(:manhattan), do: 5
+  defp metric_code(:chebyshev), do: 6
+  defp metric_code(:hamming), do: 7
+  defp metric_code(:jaccard), do: 8
 
   @spec native_metric(metric(), vector(), vector()) :: {:ok, float()} | {:error, term()}
   defp native_metric(metric, left, right) do
@@ -648,12 +589,9 @@ defmodule Vettore.Distance do
 
   @spec normalize_native_error({:error, String.t()} | {:ok, term()} | term()) ::
           {:error, String.t()} | {:ok, term()} | term()
-  defp normalize_native_error({:error, "metric overflow"}), do: {:error, :metric_overflow}
+  defp normalize_native_error({:error, reason}) when is_binary(reason),
+    do: {:error, Map.get(@native_error_reasons, reason, reason)}
 
-  defp normalize_native_error({:error, "vector contains a non-finite value"}),
-    do: {:error, :invalid_vector}
-
-  defp normalize_native_error({:error, reason}) when is_binary(reason), do: {:error, reason}
   defp normalize_native_error(other), do: other
 
   @spec float_vector(vector()) :: normalized_vector()

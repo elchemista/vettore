@@ -426,5 +426,26 @@ defmodule VettoreDBTest do
 
       assert score == 1.0
     end
+
+    test "legacy insert and batch return the fallback value id when id is empty" do
+      db = Vettore.new()
+
+      assert {:ok, "legacy-fallback"} =
+               Vettore.create_collection(db, "legacy-fallback", 1, :l2)
+
+      assert {:ok, "actual-id"} =
+               Vettore.insert(db, "legacy-fallback", %Embedding{
+                 id: "",
+                 value: "actual-id",
+                 vector: [0.0]
+               })
+
+      assert {:ok, ["batch-id"]} =
+               Vettore.batch(db, "legacy-fallback", [
+                 %Embedding{id: "", value: "batch-id", vector: [1.0]}
+               ])
+
+      assert :ok = Vettore.close(db)
+    end
   end
 end

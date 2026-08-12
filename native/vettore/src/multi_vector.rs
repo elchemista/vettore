@@ -71,11 +71,7 @@ fn score_validated(
     for query in query_vectors {
         let mut best = f32::NEG_INFINITY;
         for document in document_vectors {
-            let raw = if metric == Metric::Cosine {
-                crate::distances::cosine(query, document)?
-            } else {
-                crate::distances::compute(metric, query, document)?
-            };
+            let raw = crate::distances::compute(metric, query, document)?;
             best = best.max(crate::distances::similarity_value(metric, raw));
         }
         total += best;

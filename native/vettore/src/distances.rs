@@ -47,7 +47,7 @@ pub fn compute(metric: Metric, left: &[f32], right: &[f32]) -> Result<f32, Strin
     let value = match metric {
         Metric::L2 => l2(left, right),
         Metric::L2Squared => l2_squared(left, right),
-        Metric::Cosine => dot(left, right),
+        Metric::Cosine => return cosine(left, right),
         Metric::InnerProduct => dot(left, right),
         Metric::NegativeInnerProduct => -dot(left, right),
         Metric::Manhattan => manhattan(left, right),
@@ -71,7 +71,8 @@ fn recover_metric_overflow(metric: Metric, left: &[f32], right: &[f32]) -> Optio
     let recovered = match metric {
         Metric::L2 => f64_l2_squared(left, right).sqrt(),
         Metric::L2Squared => f64_l2_squared(left, right),
-        Metric::Cosine | Metric::InnerProduct => f64_dot(left, right),
+        Metric::Cosine => return None,
+        Metric::InnerProduct => f64_dot(left, right),
         Metric::NegativeInnerProduct => -f64_dot(left, right),
         Metric::Manhattan => left
             .iter()
@@ -499,7 +500,7 @@ mod tests {
 
         assert_eq!(compute(Metric::L2Squared, &left, &right), Ok(2.0));
         assert!((compute(Metric::L2, &left, &right).unwrap() - 2.0_f32.sqrt()).abs() < 1e-6);
-        assert_eq!(compute(Metric::Cosine, &left, &right), Ok(1.0));
+        assert_eq!(compute(Metric::Cosine, &left, &right), Ok(0.5));
         assert_eq!(compute(Metric::InnerProduct, &left, &right), Ok(1.0));
         assert_eq!(
             compute(Metric::NegativeInnerProduct, &left, &right),

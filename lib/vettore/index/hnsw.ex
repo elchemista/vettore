@@ -8,7 +8,7 @@ defmodule Vettore.Index.HNSW do
 
   @behaviour Vettore.Index
 
-  alias Vettore.{Collection, Distance, Embedding, Nifs, Result}
+  alias Vettore.{Embedding, Identifier, Index, Nifs, Result}
 
   @default_options [
     m: 16,
@@ -23,11 +23,11 @@ defmodule Vettore.Index.HNSW do
   @max_m0 2_048
   @max_ef 1_000_000
   @max_level 64
-  @max_nif_usize 4_294_967_295
+  @type new_error ::
+          :invalid_hnsw_options | {:unsupported_hnsw_metric, atom()} | String.t()
 
-  @spec new(:l2 | :cosine | :inner_product | atom(), keyword()) ::
-          {:ok, reference()} | {:error, {:unsupported_hnsw_metric, atom()}}
-  @impl true
+  @spec new(atom(), term()) :: {:ok, reference()} | {:error, new_error()}
+  @impl Vettore.Index
   def new(metric, opts \\ []) do
     with {:ok, options} <- normalize_options(opts) do
       new_metric(metric, options)
@@ -37,69 +37,48 @@ defmodule Vettore.Index.HNSW do
   @spec defaults() :: keyword(pos_integer())
   def defaults, do: @default_options
 
-  @spec put(Collection.t(), Vettore.Embedding.t()) :: :ok | {:error, String.t()}
-  @impl true
-  def put(%Collection{} = collection, embedding) do
-    normalize_ok(Nifs.hnsw_insert(collection.index_state, embedding.id, embedding.vector))
+  @spec put(Index.context(), Embedding.t()) :: :ok | {:error, term()}
+  @impl Vettore.Index
+  def put(%{index_state: index_state}, %Embedding{} = embedding) do
+    with :ok <- Identifier.validate(embedding.id) do
+      Index.normalize_write_result(Nifs.hnsw_insert(index_state, embedding.id, embedding.vector))
+    end
   end
 
-  @spec put_many(Collection.t(), [Vettore.Embedding.t()]) :: :ok | {:error, String.t()}
-  @impl true
-  def put_many(%Collection{} = collection, embeddings) do
-    vectors = Enum.map(embeddings, &{&1.id, &1.vector})
-    normalize_ok(Nifs.hnsw_insert_many(collection.index_state, vectors))
+  @spec put_many(Index.context(), [Embedding.t()]) :: :ok | {:error, term()}
+  @impl Vettore.Index
+  def put_many(%{index_state: index_state}, embeddings) do
+    with :ok <- Identifier.validate_embeddings(embeddings) do
+      vectors = Enum.map(embeddings, &{&1.id, &1.vector})
+      Index.normalize_write_result(Nifs.hnsw_insert_many(index_state, vectors))
+    end
   end
 
-  @spec delete(Collection.t(), String.t()) :: :ok | {:error, String.t()}
-  @impl true
-  def delete(%Collection{} = collection, id),
-    do: normalize_ok(Nifs.hnsw_delete(collection.index_state, id))
+  @spec delete(Index.context(), String.t()) :: :ok | {:error, term()}
+  @impl Vettore.Index
+  def delete(%{index_state: index_state}, id) do
+    with :ok <- Identifier.validate_utf8(id) do
+      Index.normalize_write_result(Nifs.hnsw_delete(index_state, id))
+    end
+  end
 
-  @spec search(Collection.t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
-  @impl true
-  def search(%Collection{} = collection, query, opts) do
-    with :ok <- validate_search_options(opts),
+  @spec close(Index.context()) :: :ok | {:error, term()}
+  @impl Vettore.Index
+  def close(%{index_state: index_state}),
+    do: Index.normalize_write_result(Nifs.hnsw_clear(index_state))
+
+  @spec search(Index.context(), [number()], keyword()) ::
+          {:ok, [Result.t()]} | {:error, term()}
+  @impl Vettore.Index
+  def search(%{index_state: index_state} = context, query, opts) do
+    with :ok <- Index.validate_search_options(opts),
          limit = Keyword.get(opts, :limit, 10),
-         :ok <- validate_limit(limit),
-         {:ok, query} <- Collection.prepare_query(collection, query),
-         {:ok, hits} <- Nifs.hnsw_search(collection.index_state, query, limit) do
-      {:ok, Enum.flat_map(hits, &to_result(collection, &1))}
+         :ok <- Index.validate_limit(limit),
+         {:ok, query} <- Index.prepare_query(context, query),
+         {:ok, hits} <- Nifs.hnsw_search(index_state, query, limit) do
+      {:ok, Index.hydrate_results(context, hits)}
     end
   end
-
-  @spec to_result(Collection.t(), {String.t(), float()}) :: [Result.t()]
-  defp to_result(collection, {id, raw}) do
-    case Collection.get(collection, id) do
-      {:ok, %Embedding{} = embedding} ->
-        {score, distance} = Distance.result_values(collection.metric, raw, collection.score)
-
-        [
-          %Result{
-            id: id,
-            value: embedding.value,
-            score: score,
-            distance: distance,
-            metric: collection.metric,
-            metadata: embedding.metadata
-          }
-        ]
-
-      {:error, _reason} ->
-        []
-    end
-  end
-
-  @spec validate_limit(term()) :: :ok | {:error, :invalid_limit}
-  defp validate_limit(limit)
-       when is_integer(limit) and limit > 0 and limit <= @max_nif_usize,
-       do: :ok
-
-  defp validate_limit(_limit), do: {:error, :invalid_limit}
-
-  @spec normalize_ok(:ok | {:ok, {}} | {:error, String.t()}) :: :ok | {:error, String.t()}
-  defp normalize_ok({:ok, {}}), do: :ok
-  defp normalize_ok(:ok), do: :ok
-  defp normalize_ok(other), do: other
 
   @spec new_metric(atom(), keyword()) ::
           {:ok, reference()} | {:error, {:unsupported_hnsw_metric, atom()} | String.t()}
@@ -119,7 +98,7 @@ defmodule Vettore.Index.HNSW do
     )
   end
 
-  @spec normalize_options(keyword()) :: {:ok, keyword()} | {:error, :invalid_hnsw_options}
+  @spec normalize_options(term()) :: {:ok, keyword()} | {:error, :invalid_hnsw_options}
   defp normalize_options(opts) when is_list(opts) do
     with true <- Keyword.keyword?(opts),
          true <- Enum.all?(Keyword.keys(opts), &(&1 in @option_keys)),
@@ -171,13 +150,4 @@ defmodule Vettore.Index.HNSW do
     keys = Keyword.keys(opts)
     length(keys) == MapSet.size(MapSet.new(keys))
   end
-
-  @spec validate_search_options(term()) :: :ok | {:error, :invalid_search_options}
-  defp validate_search_options(opts) when is_list(opts) do
-    if Keyword.keyword?(opts) and Enum.all?(Keyword.keys(opts), &(&1 == :limit)),
-      do: :ok,
-      else: {:error, :invalid_search_options}
-  end
-
-  defp validate_search_options(_opts), do: {:error, :invalid_search_options}
 end
