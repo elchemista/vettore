@@ -127,6 +127,7 @@ pub struct HnswIndex {
     params: HnswParams,
     nodes: HashMap<usize, Node>,
     external_to_internal: HashMap<String, usize>,
+    incoming: HashMap<(usize, usize), HashSet<usize>>,
     entry: Option<usize>,
     next: usize,
     dimension: Option<usize>,
@@ -142,6 +143,7 @@ impl HnswIndex {
             params,
             nodes: HashMap::new(),
             external_to_internal: HashMap::new(),
+            incoming: HashMap::new(),
             entry: None,
             next: 0,
             dimension: None,
@@ -189,13 +191,14 @@ impl HnswIndex {
         for layer in (0..=usize::min(node_level, top_layer)).rev() {
             let mut candidates =
                 self.search_layer(entry, &vector, layer, self.params.ef_construction)?;
-            candidates.sort_by(|a, b| a.dist.total_cmp(&b.dist).then_with(|| a.id.cmp(&b.id)));
-            candidates.dedup_by_key(|neighbor| neighbor.id);
-            candidates.truncate(if layer == 0 {
-                self.params.m0
-            } else {
-                self.params.m
-            });
+            candidates = self.select_neighbors(
+                candidates,
+                if layer == 0 {
+                    self.params.m0
+                } else {
+                    self.params.m
+                },
+            )?;
 
             for candidate in &candidates {
                 new_connections[layer].push(candidate.id);
@@ -211,27 +214,29 @@ impl HnswIndex {
             Node {
                 external_id: external_id.clone(),
                 vector,
-                connections: new_connections,
+                connections: vec![Vec::new(); node_level + 1],
                 layer: node_level,
             },
         );
         self.external_to_internal.insert(external_id, internal_id);
         self.dimension = Some(self.nodes[&internal_id].vector.len());
 
+        for (layer, neighbors) in new_connections.into_iter().enumerate() {
+            self.replace_connections(internal_id, layer, neighbors);
+        }
+
         // The new node must exist before reciprocal neighbors are pruned. If it
         // is added afterwards, `prune` cannot score it and silently removes
         // every incoming edge, leaving later inserts unreachable from `entry`.
         let reciprocal_connections = self.nodes[&internal_id].connections.clone();
         for (layer, neighbors) in reciprocal_connections.into_iter().enumerate() {
-            for neighbor_id in neighbors {
-                if let Some(node) = self.nodes.get_mut(&neighbor_id) {
-                    if layer < node.connections.len()
-                        && !node.connections[layer].contains(&internal_id)
-                    {
-                        node.connections[layer].push(internal_id);
-                    }
+            for (position, neighbor_id) in neighbors.into_iter().enumerate() {
+                self.add_connection(neighbor_id, layer, internal_id);
+                if layer == 0 && position == 0 {
+                    self.prune_retaining(neighbor_id, layer, Some(internal_id))?;
+                } else {
+                    self.prune(neighbor_id, layer)?;
                 }
-                self.prune(neighbor_id, layer)?;
             }
         }
 
@@ -259,16 +264,92 @@ impl HnswIndex {
         Ok(())
     }
 
-    /// Deletes an external id and removes incoming graph edges.
+    /// Deletes an external id, removes its edges, and reconnects local neighbors.
     pub fn delete(&mut self, external_id: &str) {
         let Some(internal_id) = self.external_to_internal.remove(external_id) else {
             return;
         };
-        self.nodes.remove(&internal_id);
+        let Some(removed) = self.nodes.remove(&internal_id) else {
+            return;
+        };
 
-        for node in self.nodes.values_mut() {
-            for layer in &mut node.connections {
-                layer.retain(|id| *id != internal_id);
+        let mut incoming_by_layer = vec![HashSet::new(); removed.connections.len()];
+
+        for (layer, targets) in removed.connections.iter().enumerate() {
+            for target in targets {
+                self.remove_incoming(*target, layer, internal_id);
+            }
+        }
+
+        let incoming_keys: Vec<_> = self
+            .incoming
+            .keys()
+            .filter(|(target, _layer)| *target == internal_id)
+            .copied()
+            .collect();
+
+        for (_target, layer) in incoming_keys {
+            let sources = self
+                .incoming
+                .remove(&(internal_id, layer))
+                .unwrap_or_default();
+            if layer >= incoming_by_layer.len() {
+                incoming_by_layer.resize_with(layer + 1, HashSet::new);
+            }
+            for source in sources {
+                incoming_by_layer[layer].insert(source);
+                self.remove_connection(source, layer, internal_id);
+            }
+        }
+
+        // Redirect each incoming edge toward the deleted node's bounded
+        // outgoing neighborhood. This repairs the same traversal direction in
+        // O(in_degree * M) additions rather than scanning the whole graph or
+        // building an unbounded clique around a popular node.
+        for (layer, sources) in incoming_by_layer.into_iter().enumerate() {
+            let mut sources: Vec<_> = sources.into_iter().collect();
+            sources.sort_unstable();
+
+            let mut anchors: Vec<_> = removed
+                .connections
+                .get(layer)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| {
+                    self.nodes
+                        .get(id)
+                        .is_some_and(|node| layer < node.connections.len())
+                })
+                .collect();
+
+            if anchors.is_empty() {
+                let limit = if layer == 0 {
+                    self.params.m0
+                } else {
+                    self.params.m
+                };
+                let mut scored: Vec<_> = sources
+                    .iter()
+                    .filter_map(|id| {
+                        self.nodes.get(id).and_then(|node| {
+                            self.rank_distance(&removed.vector, &node.vector)
+                                .ok()
+                                .map(|dist| (*id, dist))
+                        })
+                    })
+                    .collect();
+                scored.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+                anchors.extend(scored.into_iter().take(limit).map(|(id, _dist)| id));
+            }
+
+            for source in sources {
+                if let Some(node) = self.nodes.get(&source) {
+                    let mut connections = node.connections[layer].clone();
+                    connections.extend(anchors.iter().copied());
+                    self.replace_connections(source, layer, connections);
+                }
+                let _ = self.prune(source, layer);
             }
         }
 
@@ -286,6 +367,16 @@ impl HnswIndex {
         if self.nodes.is_empty() {
             self.dimension = None;
         }
+    }
+
+    /// Releases all graph state while keeping the resource reusable.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.external_to_internal.clear();
+        self.incoming.clear();
+        self.entry = None;
+        self.next = 0;
+        self.dimension = None;
     }
 
     /// Searches the graph and returns external ids with raw metric values.
@@ -416,6 +507,9 @@ impl HnswIndex {
                     continue;
                 };
                 let dist = self.rank_distance(&neighbor.vector, query)?;
+                let worst = results
+                    .peek()
+                    .map_or(f32::INFINITY, |neighbor| neighbor.0.dist);
                 if results.len() < ef || dist < worst {
                     let candidate = ScoredNode {
                         id: *neighbor_id,
@@ -435,6 +529,16 @@ impl HnswIndex {
 
     /// Keeps each node's neighbor list bounded by the configured HNSW degree.
     fn prune(&mut self, node_id: usize, layer: usize) -> Result<(), String> {
+        self.prune_retaining(node_id, layer, None)
+    }
+
+    /// Prunes with the standard diversified HNSW neighbor heuristic.
+    fn prune_retaining(
+        &mut self,
+        node_id: usize,
+        layer: usize,
+        required: Option<usize>,
+    ) -> Result<(), String> {
         let limit = if layer == 0 {
             self.params.m0
         } else {
@@ -447,21 +551,166 @@ impl HnswIndex {
             return Ok(());
         }
 
-        let vector = node.vector.clone();
         let connections = node.connections[layer].clone();
         let mut scored = Vec::with_capacity(connections.len());
         for neighbor_id in connections {
             if let Some(neighbor) = self.nodes.get(&neighbor_id) {
-                scored.push((neighbor_id, self.rank_distance(&vector, &neighbor.vector)?));
+                scored.push(ScoredNode {
+                    id: neighbor_id,
+                    dist: self.rank_distance(&node.vector, &neighbor.vector)?,
+                });
             }
         }
-        scored.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        scored.truncate(limit);
 
-        if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.connections[layer] = scored.into_iter().map(|(id, _)| id).collect();
-        }
+        let selected = self.select_neighbors_retaining(scored, limit, required)?;
+        self.replace_connections(
+            node_id,
+            layer,
+            selected.into_iter().map(|neighbor| neighbor.id).collect(),
+        );
         Ok(())
+    }
+
+    /// Selects close but mutually diverse neighbors, filling unused capacity
+    /// with the closest rejected nodes to keep sparse graphs connected.
+    fn select_neighbors(
+        &self,
+        candidates: Vec<ScoredNode>,
+        limit: usize,
+    ) -> Result<Vec<ScoredNode>, String> {
+        self.select_neighbors_retaining(candidates, limit, None)
+    }
+
+    fn select_neighbors_retaining(
+        &self,
+        mut candidates: Vec<ScoredNode>,
+        limit: usize,
+        required: Option<usize>,
+    ) -> Result<Vec<ScoredNode>, String> {
+        candidates.sort_by(|a, b| a.dist.total_cmp(&b.dist).then_with(|| a.id.cmp(&b.id)));
+        candidates.dedup_by_key(|neighbor| neighbor.id);
+
+        let mut selected = Vec::with_capacity(usize::min(limit, candidates.len()));
+        if let Some(required_id) = required {
+            if let Some(position) = candidates
+                .iter()
+                .position(|candidate| candidate.id == required_id)
+            {
+                selected.push(candidates.remove(position));
+            }
+        }
+
+        let mut rejected = Vec::new();
+        for candidate in candidates {
+            if selected.len() == limit {
+                rejected.push(candidate);
+                continue;
+            }
+
+            let candidate_vector = &self.nodes[&candidate.id].vector;
+            let mut diverse = true;
+            for retained in &selected {
+                let retained_vector = &self.nodes[&retained.id].vector;
+                if self.rank_distance(candidate_vector, retained_vector)? <= candidate.dist {
+                    diverse = false;
+                    break;
+                }
+            }
+
+            if diverse {
+                selected.push(candidate);
+            } else {
+                rejected.push(candidate);
+            }
+        }
+
+        if selected.len() < limit {
+            rejected.sort_by(|a, b| a.dist.total_cmp(&b.dist).then_with(|| a.id.cmp(&b.id)));
+            selected.extend(rejected.into_iter().take(limit - selected.len()));
+        }
+
+        selected.sort_by(|a, b| a.dist.total_cmp(&b.dist).then_with(|| a.id.cmp(&b.id)));
+        Ok(selected)
+    }
+
+    /// Replaces an adjacency list and keeps the reverse-edge map in sync.
+    fn replace_connections(&mut self, source: usize, layer: usize, mut targets: Vec<usize>) {
+        if self
+            .nodes
+            .get(&source)
+            .is_none_or(|node| layer >= node.connections.len())
+        {
+            return;
+        }
+
+        let mut seen = HashSet::new();
+        targets.retain(|target| {
+            *target != source
+                && self
+                    .nodes
+                    .get(target)
+                    .is_some_and(|node| layer < node.connections.len())
+                && seen.insert(*target)
+        });
+
+        let old = self
+            .nodes
+            .get(&source)
+            .and_then(|node| node.connections.get(layer))
+            .cloned()
+            .unwrap_or_default();
+        let old_set: HashSet<_> = old.iter().copied().collect();
+        let new_set: HashSet<_> = targets.iter().copied().collect();
+
+        for target in old_set.difference(&new_set) {
+            self.remove_incoming(*target, layer, source);
+        }
+        for target in new_set.difference(&old_set) {
+            self.incoming
+                .entry((*target, layer))
+                .or_default()
+                .insert(source);
+        }
+
+        if let Some(node) = self.nodes.get_mut(&source) {
+            if layer < node.connections.len() {
+                node.connections[layer] = targets;
+            }
+        }
+    }
+
+    fn add_connection(&mut self, source: usize, layer: usize, target: usize) {
+        let Some(node) = self.nodes.get(&source) else {
+            return;
+        };
+        if layer >= node.connections.len() || node.connections[layer].contains(&target) {
+            return;
+        }
+        let mut connections = node.connections[layer].clone();
+        connections.push(target);
+        self.replace_connections(source, layer, connections);
+    }
+
+    fn remove_connection(&mut self, source: usize, layer: usize, target: usize) {
+        let Some(node) = self.nodes.get(&source) else {
+            return;
+        };
+        if layer >= node.connections.len() {
+            return;
+        }
+        let mut connections = node.connections[layer].clone();
+        connections.retain(|neighbor| *neighbor != target);
+        self.replace_connections(source, layer, connections);
+    }
+
+    fn remove_incoming(&mut self, target: usize, layer: usize, source: usize) {
+        let key = (target, layer);
+        if let Some(sources) = self.incoming.get_mut(&key) {
+            sources.remove(&source);
+            if sources.is_empty() {
+                self.incoming.remove(&key);
+            }
+        }
     }
 
     /// Computes the ascending distance used internally by HNSW.
@@ -605,6 +854,15 @@ mod tests {
         index.delete("a");
         assert!(index.search(&[0.0, 1.0], 1).unwrap().is_empty());
         assert_eq!(index.dimension, None);
+
+        index.insert("clear-me".into(), vec![1.0, 0.0]).unwrap();
+        index.clear();
+        assert!(index.nodes.is_empty());
+        assert!(index.external_to_internal.is_empty());
+        assert!(index.incoming.is_empty());
+        assert_eq!(index.entry, None);
+        assert_eq!(index.next, 0);
+        assert_eq!(index.dimension, None);
     }
 
     #[test]
@@ -738,6 +996,19 @@ mod tests {
                 );
                 assert!(!connections.contains(node_id));
                 assert!(connections.iter().all(|id| index.nodes.contains_key(id)));
+                for target in connections {
+                    assert!(index
+                        .incoming
+                        .get(&(*target, layer))
+                        .is_some_and(|sources| sources.contains(node_id)));
+                }
+            }
+        }
+
+        for ((target, layer), sources) in &index.incoming {
+            assert!(index.nodes.contains_key(target));
+            for source in sources {
+                assert!(index.nodes[source].connections[*layer].contains(target));
             }
         }
 
@@ -747,6 +1018,82 @@ mod tests {
             hits.iter().map(|(id, _)| id).collect::<HashSet<_>>().len(),
             hits.len()
         );
+    }
+
+    #[test]
+    fn sparse_graph_stays_reachable_after_heavy_deletion() {
+        let sparse_params = HnswParams {
+            m: 4,
+            m0: 8,
+            ef_construction: 256,
+            ef_search: 1_000,
+            max_level: 12,
+        };
+        let vectors: Vec<_> = (0..200)
+            .map(|value| {
+                (
+                    format!("id-{value:03}"),
+                    vec![(value as f32 * 0.73).sin(), (value as f32 * 0.37).cos()],
+                )
+            })
+            .collect();
+        let mut index = HnswIndex::new(Metric::L2, sparse_params).unwrap();
+        index.insert_many(vectors.clone()).unwrap();
+
+        assert_eq!(
+            index.search(&vectors[0].1, vectors.len()).unwrap().len(),
+            200
+        );
+        for (id, vector) in &vectors {
+            assert_eq!(index.search(vector, 1).unwrap()[0].0, *id);
+        }
+
+        for (id, _vector) in vectors.iter().take(160) {
+            index.delete(id);
+        }
+
+        assert_eq!(index.search(&vectors[199].1, 40).unwrap().len(), 40);
+        for (id, vector) in vectors.iter().skip(160) {
+            assert_eq!(index.search(vector, 1).unwrap()[0].0, *id);
+        }
+    }
+
+    #[test]
+    fn delete_repairs_nodes_even_without_outgoing_anchors() {
+        let mut index = HnswIndex::new(Metric::L2, params()).unwrap();
+        index
+            .insert_many(
+                (0..20)
+                    .map(|value| (format!("id-{value:02}"), vec![value as f32]))
+                    .collect(),
+            )
+            .unwrap();
+
+        let target = index
+            .incoming
+            .iter()
+            .find(|((_, layer), sources)| *layer == 0 && !sources.is_empty())
+            .map(|((target, _layer), _sources)| *target)
+            .unwrap();
+        let external_id = index.nodes[&target].external_id.clone();
+        index.replace_connections(target, 0, vec![]);
+        index.delete(&external_id);
+
+        assert!(!index.nodes.contains_key(&target));
+        assert!(index.nodes.values().all(|node| node
+            .connections
+            .iter()
+            .flatten()
+            .all(|id| *id != target)));
+
+        let source = *index.nodes.keys().next().unwrap();
+        index.replace_connections(usize::MAX, 0, vec![source]);
+        index.add_connection(usize::MAX, 0, source);
+        index.remove_connection(usize::MAX, 0, source);
+        index.add_connection(source, usize::MAX, target);
+        index.remove_connection(source, usize::MAX, target);
+        index.replace_connections(source, 0, vec![source, usize::MAX]);
+        assert!(index.nodes[&source].connections[0].is_empty());
     }
 
     #[test]

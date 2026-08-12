@@ -8,7 +8,7 @@ defmodule Vettore.Index.Flat do
 
   @behaviour Vettore.Index
 
-  alias Vettore.{Collection, Distance, Embedding, Nifs, Result}
+  alias Vettore.{Collection, Distance, Embedding, Identifier, Nifs, Result}
 
   @max_nif_usize 4_294_967_295
 
@@ -27,22 +27,31 @@ defmodule Vettore.Index.Flat do
   @spec put(Collection.t(), Embedding.t()) :: :ok | {:error, term()}
   @impl true
   def put(%Collection{} = collection, %Embedding{} = embedding) do
-    normalize_ok(Nifs.flat_insert(collection.index_state, embedding.id, embedding.vector))
+    with :ok <- Identifier.validate(embedding.id) do
+      normalize_ok(Nifs.flat_insert(collection.index_state, embedding.id, embedding.vector))
+    end
   end
 
   @spec put_many(Collection.t(), [Embedding.t()]) :: :ok | {:error, term()}
   @impl true
   def put_many(%Collection{} = collection, embeddings) do
-    vectors = Enum.map(embeddings, &{&1.id, &1.vector})
-
-    normalize_ok(Nifs.flat_insert_many(collection.index_state, vectors))
+    with :ok <- Identifier.validate_embeddings(embeddings) do
+      vectors = Enum.map(embeddings, &{&1.id, &1.vector})
+      normalize_ok(Nifs.flat_insert_many(collection.index_state, vectors))
+    end
   end
 
   @spec delete(Collection.t(), String.t()) :: :ok | {:error, term()}
   @impl true
   def delete(%Collection{} = collection, id) do
-    normalize_ok(Nifs.flat_delete(collection.index_state, id))
+    with :ok <- Identifier.validate_utf8(id) do
+      normalize_ok(Nifs.flat_delete(collection.index_state, id))
+    end
   end
+
+  @spec close(Collection.t()) :: :ok | {:error, term()}
+  @impl true
+  def close(%Collection{} = collection), do: normalize_ok(Nifs.flat_clear(collection.index_state))
 
   @spec search(Collection.t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
   @impl true

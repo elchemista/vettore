@@ -15,4 +15,7 @@ defmodule Vettore.Index do
   @callback delete(Collection.t(), String.t()) :: :ok | {:error, term()}
   @callback search(Collection.t(), [number()], keyword()) ::
               {:ok, [Result.t()]} | {:error, term()}
+  @callback close(Collection.t()) :: :ok | {:error, term()}
+
+  @optional_callbacks close: 1
 end

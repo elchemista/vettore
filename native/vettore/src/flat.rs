@@ -92,6 +92,12 @@ impl FlatIndex {
         }
     }
 
+    /// Releases all mirrored vectors while keeping the resource reusable.
+    pub fn clear(&mut self) {
+        self.vectors.clear();
+        self.dimension = None;
+    }
+
     /// Searches every stored vector and returns ids with raw metric values.
     pub fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>, String> {
         if limit == 0 {
@@ -264,6 +270,9 @@ mod tests {
         index.insert("two".into(), vec![1.0, 2.0]).unwrap();
         assert_eq!(index.dimension, Some(2));
         assert_eq!(index.search(&[1.0, 2.0], usize::MAX).unwrap().len(), 1);
+        index.clear();
+        assert!(index.vectors.is_empty());
+        assert_eq!(index.dimension, None);
     }
 
     #[test]

@@ -8,7 +8,7 @@ defmodule Vettore.Index.HNSW do
 
   @behaviour Vettore.Index
 
-  alias Vettore.{Collection, Distance, Embedding, Nifs, Result}
+  alias Vettore.{Collection, Distance, Embedding, Identifier, Nifs, Result}
 
   @default_options [
     m: 16,
@@ -37,23 +37,35 @@ defmodule Vettore.Index.HNSW do
   @spec defaults() :: keyword(pos_integer())
   def defaults, do: @default_options
 
-  @spec put(Collection.t(), Vettore.Embedding.t()) :: :ok | {:error, String.t()}
+  @spec put(Collection.t(), Vettore.Embedding.t()) :: :ok | {:error, term()}
   @impl true
   def put(%Collection{} = collection, embedding) do
-    normalize_ok(Nifs.hnsw_insert(collection.index_state, embedding.id, embedding.vector))
+    with :ok <- Identifier.validate(embedding.id) do
+      normalize_ok(Nifs.hnsw_insert(collection.index_state, embedding.id, embedding.vector))
+    end
   end
 
-  @spec put_many(Collection.t(), [Vettore.Embedding.t()]) :: :ok | {:error, String.t()}
+  @spec put_many(Collection.t(), [Vettore.Embedding.t()]) :: :ok | {:error, term()}
   @impl true
   def put_many(%Collection{} = collection, embeddings) do
-    vectors = Enum.map(embeddings, &{&1.id, &1.vector})
-    normalize_ok(Nifs.hnsw_insert_many(collection.index_state, vectors))
+    with :ok <- Identifier.validate_embeddings(embeddings) do
+      vectors = Enum.map(embeddings, &{&1.id, &1.vector})
+      normalize_ok(Nifs.hnsw_insert_many(collection.index_state, vectors))
+    end
   end
 
-  @spec delete(Collection.t(), String.t()) :: :ok | {:error, String.t()}
+  @spec delete(Collection.t(), String.t()) :: :ok | {:error, term()}
   @impl true
-  def delete(%Collection{} = collection, id),
-    do: normalize_ok(Nifs.hnsw_delete(collection.index_state, id))
+  def delete(%Collection{} = collection, id) do
+    with :ok <- Identifier.validate_utf8(id) do
+      normalize_ok(Nifs.hnsw_delete(collection.index_state, id))
+    end
+  end
+
+  @spec close(Collection.t()) :: :ok | {:error, term()}
+  @impl true
+  def close(%Collection{} = collection),
+    do: normalize_ok(Nifs.hnsw_clear(collection.index_state))
 
   @spec search(Collection.t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
   @impl true

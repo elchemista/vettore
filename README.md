@@ -377,7 +377,9 @@ Useful details:
 
 - `id` is the preferred unique identifier.
 - If `id` is missing, a non-empty string `value` can be used as the id.
-- Duplicate ids are rejected.
+- IDs must be non-empty valid UTF-8 strings. Duplicate ids are rejected;
+  `put/2` is insert-only, so replace a record with `delete/2` followed by
+  `put/2`.
 - Duplicate vectors are allowed.
 - Vectors are normalized at insertion according to the collection config.
 - If `vectors` is present but `vector` is omitted, Vettore stores an averaged
@@ -396,7 +398,8 @@ they are no longer needed:
 :ok = Vettore.close(collection)
 ```
 
-Closing is idempotent. Later operations return `{:error, :closed}`.
+Closing is idempotent, releases both ETS and mirrored native index memory, and
+makes later operations return `{:error, :closed}`.
 
 ETS collections can be snapshotted:
 
@@ -413,6 +416,9 @@ ETS when loaded. Snapshot writes use a same-directory temporary file followed
 by a rename and include ETS integrity metadata. Loads validate the table type,
 schema, and every stored record before rebuilding the index; legacy public
 tables are restored as protected tables.
+
+Snapshot integrity metadata detects accidental corruption; it is not an
+authentication mechanism. Load snapshots only from trusted sources.
 
 You can load the same data with a different index:
 

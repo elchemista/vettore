@@ -58,6 +58,37 @@ defmodule VettoreAlgorithmsHardeningTest do
 
       assert :ok = Vettore.close(collection)
     end
+
+    test "cosine ranking stays mathematical with normalize none" do
+      for index <- [:flat, :hnsw] do
+        index_options =
+          if index == :hnsw,
+            do: [m: 4, m0: 8, ef_construction: 16, ef_search: 16],
+            else: []
+
+        assert {:ok, collection} =
+                 Collection.new(
+                   dimensions: 2,
+                   metric: :cosine,
+                   normalize: :none,
+                   index: index,
+                   index_options: index_options
+                 )
+
+        assert :ok =
+                 Collection.put_many(collection, [
+                   %{id: "aligned", vector: [2.0, 0.0]},
+                   %{id: "larger-dot", vector: [3.0, 3.0]}
+                 ])
+
+        assert {:ok, [%Result{id: "aligned", score: score, distance: distance} | _]} =
+                 Collection.search(collection, [1.0, 0.0], limit: 2)
+
+        assert_in_delta score, 1.0, 1.0e-6
+        assert_in_delta distance, 0.0, 1.0e-6
+        assert :ok = Vettore.close(collection)
+      end
+    end
   end
 
   describe "HNSW boundary errors" do
@@ -118,6 +149,31 @@ defmodule VettoreAlgorithmsHardeningTest do
 
       assert {:error, "unknown metric"} =
                Nifs.multi_vector_score([[1.0]], [[1.0]], 99)
+    end
+  end
+
+  describe "quantized candidate semantics" do
+    test "hamming and jaccard use non-zero truth semantics for candidate pruning" do
+      for metric <- [:hamming, :jaccard] do
+        assert {:ok, collection} =
+                 Collection.new(dimensions: 4, metric: metric, normalize: :none)
+
+        assert :ok =
+                 Collection.put_many(collection, [
+                   %{id: "a-opposite", vector: [1.0, 1.0, 1.0, 1.0]},
+                   %{id: "z-match", vector: [0.0, 0.0, 0.0, 0.0]}
+                 ])
+
+        assert {:ok, [%Result{id: "z-match", distance: distance}]} =
+                 Collection.quantized_search(collection, [0.0, 0.0, 0.0, 0.0],
+                   candidates: 1,
+                   limit: 1
+                 )
+
+        assert distance == 0.0
+
+        assert :ok = Vettore.close(collection)
+      end
     end
   end
 

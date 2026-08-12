@@ -49,6 +49,10 @@ defmodule Vettore.ETSOwner do
   @spec take(pid(), term()) :: [tuple()] | {:error, :closed}
   def take(owner, key), do: call(owner, {:take, key})
 
+  @spec transaction(pid(), (:ets.tid() -> result)) :: result | {:error, :closed}
+        when result: term()
+  def transaction(owner, fun) when is_function(fun, 1), do: call(owner, {:transaction, fun})
+
   @spec drain_and_close(pid()) :: [tuple()] | {:error, :closed}
   def drain_and_close(owner), do: call(owner, :drain_and_close)
 
@@ -93,6 +97,19 @@ defmodule Vettore.ETSOwner do
 
   def handle_call({:delete, key}, _from, table), do: {:reply, :ets.delete(table, key), table}
   def handle_call({:take, key}, _from, table), do: {:reply, :ets.take(table, key), table}
+
+  def handle_call({:transaction, fun}, _from, table) do
+    result =
+      try do
+        fun.(table)
+      rescue
+        exception -> {:error, {:transaction_exception, exception}}
+      catch
+        kind, reason -> {:error, {:transaction_exception, {kind, reason}}}
+      end
+
+    {:reply, result, table}
+  end
 
   def handle_call(:drain_and_close, _from, table) do
     rows = :ets.tab2list(table)

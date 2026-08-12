@@ -8,6 +8,39 @@ defmodule Vettore.Test.FailingIndex do
   def search(_collection, _query, _opts), do: {:ok, []}
 end
 
+defmodule Vettore.Test.PausingFlatIndex do
+  @moduledoc false
+
+  alias Vettore.Index.Flat
+
+  def new(metric, opts) do
+    with {:ok, native} <- Flat.new(metric) do
+      {:ok, {native, Keyword.fetch!(opts, :controller)}}
+    end
+  end
+
+  def put(collection, embedding) do
+    {_native, controller} = collection.index_state
+    send(controller, {:flat_insert_waiting, self()})
+
+    receive do
+      :continue_flat_insert -> Flat.put(native_collection(collection), embedding)
+    end
+  end
+
+  def put_many(collection, embeddings),
+    do: Flat.put_many(native_collection(collection), embeddings)
+
+  def delete(collection, id), do: Flat.delete(native_collection(collection), id)
+  def search(collection, query, opts), do: Flat.search(native_collection(collection), query, opts)
+  def close(collection), do: Flat.close(native_collection(collection))
+
+  defp native_collection(collection) do
+    {native, _controller} = collection.index_state
+    %{collection | index_mod: Flat, index_state: native}
+  end
+end
+
 defmodule Vettore.Test.FailingDeleteStore do
   @moduledoc false
 
@@ -26,10 +59,44 @@ defmodule Vettore.Test.FailingDeleteStore do
   def alive?(state), do: ETS.alive?(state)
 end
 
+defmodule Vettore.Test.DelegatingETSStore do
+  @moduledoc false
+
+  alias Vettore.Store.ETS
+
+  def new(config), do: ETS.new(config)
+  def put(state, embedding), do: ETS.put(state, embedding)
+  def put_many(state, embeddings), do: ETS.put_many(state, embeddings)
+  def get(state, id), do: ETS.get(state, id)
+  def delete(state, id), do: ETS.delete(state, id)
+  def all(state), do: ETS.all(state)
+  def snapshot(state, path), do: ETS.snapshot(state, path)
+  def load_snapshot(path), do: ETS.load_snapshot(path)
+  def configure(state, config), do: ETS.configure(state, config)
+  def close(state), do: ETS.close(state)
+  def alive?(state), do: ETS.alive?(state)
+end
+
+defmodule Vettore.Test.CloseOk do
+  @moduledoc false
+  def close(_state), do: :ok
+end
+
+defmodule Vettore.Test.CloseIndexError do
+  @moduledoc false
+  def close(_collection), do: {:error, :index_close_failed}
+end
+
+defmodule Vettore.Test.CloseStoreError do
+  @moduledoc false
+  def close(_state), do: {:error, :store_close_failed}
+end
+
 defmodule VettoreHardeningTest do
   use ExUnit.Case, async: false
 
-  alias Vettore.{Collection, Embedding, Result}
+  alias Vettore.{Collection, Embedding, Identifier, Result}
+  alias Vettore.Store.ETS
 
   @hnsw_options [m: 8, m0: 16, ef_construction: 200, ef_search: 200, max_level: 12]
 
@@ -166,6 +233,83 @@ defmodule VettoreHardeningTest do
       assert {:error, :closed} = Collection.delete(collection, "a")
       assert {:error, :closed} = Collection.search(collection, [0.0, 0.0], limit: 1)
       assert {:error, :closed} = Collection.snapshot(collection, temporary_path("closed"))
+    end
+
+    test "put and delete of the same id are serialized across store and index" do
+      assert {:ok, collection} =
+               Collection.new(
+                 dimensions: 1,
+                 metric: :l2,
+                 index: Vettore.Test.PausingFlatIndex,
+                 index_options: [controller: self()]
+               )
+
+      put_task = Task.async(fn -> Collection.put(collection, %{id: "race", vector: [0.0]}) end)
+      assert_receive {:flat_insert_waiting, put_pid}
+      parent = self()
+
+      delete_task =
+        Task.async(fn ->
+          send(parent, :delete_started)
+          Collection.delete(collection, "race")
+        end)
+
+      assert_receive :delete_started
+
+      assert Enum.any?(1..100, fn _attempt ->
+               case Process.info(collection.store_state.owner, :message_queue_len) do
+                 {:message_queue_len, length} when length > 0 ->
+                   true
+
+                 _other ->
+                   Process.sleep(1)
+                   false
+               end
+             end)
+
+      send(put_pid, :continue_flat_insert)
+      assert :ok = Task.await(put_task)
+      assert :ok = Task.await(delete_task)
+      assert {:error, :not_found} = Collection.get(collection, "race")
+
+      {native, _controller} = collection.index_state
+      assert {:ok, []} = Vettore.Nifs.flat_search(native, [0.0], 1)
+      assert :ok = Vettore.close(collection)
+    end
+
+    test "close releases vectors held by the native resource" do
+      assert {:ok, collection} = Collection.new(dimensions: 1, metric: :l2)
+      assert :ok = Collection.put(collection, %{id: "held", vector: [1.0]})
+      native = collection.index_state
+      assert {:ok, [{"held", raw}]} = Vettore.Nifs.flat_search(native, [1.0], 1)
+      assert raw == 0.0
+      assert :ok = Vettore.close(collection)
+      assert {:ok, []} = Vettore.Nifs.flat_search(native, [1.0], 1)
+    end
+
+    test "close reports index, store, and combined cleanup failures" do
+      base = %Collection{index_state: nil, store_state: nil}
+
+      assert {:error, :index_close_failed} =
+               Collection.close(%{
+                 base
+                 | index_mod: Vettore.Test.CloseIndexError,
+                   store_mod: Vettore.Test.CloseOk
+               })
+
+      assert {:error, :store_close_failed} =
+               Collection.close(%{
+                 base
+                 | index_mod: Vettore.Test.CloseOk,
+                   store_mod: Vettore.Test.CloseStoreError
+               })
+
+      assert {:error, {:close_failed, :index_close_failed, :store_close_failed}} =
+               Collection.close(%{
+                 base
+                 | index_mod: Vettore.Test.CloseIndexError,
+                   store_mod: Vettore.Test.CloseStoreError
+               })
     end
 
     test "readers bypass the owner and read protected ETS concurrently" do
@@ -315,6 +459,70 @@ defmodule VettoreHardeningTest do
                ])
 
       assert {:ok, []} = Collection.all(collection)
+      assert :ok = Vettore.close(collection)
+    end
+
+    test "custom ETS stores retain rollback and successful delete semantics" do
+      assert {:ok, failing} =
+               Collection.new(
+                 dimensions: 1,
+                 metric: :l2,
+                 store: Vettore.Test.DelegatingETSStore,
+                 index: Vettore.Test.FailingIndex
+               )
+
+      assert {:error, :forced_index_failure} =
+               Collection.put(failing, %{id: "one", vector: [1.0]})
+
+      assert {:error, :forced_index_failure} =
+               Collection.put_many(failing, [
+                 %{id: "two", vector: [2.0]},
+                 %{id: "three", vector: [3.0]}
+               ])
+
+      assert {:ok, []} = Collection.all(failing)
+      assert :ok = Vettore.close(failing)
+
+      assert {:ok, working} =
+               Collection.new(
+                 dimensions: 1,
+                 metric: :l2,
+                 store: Vettore.Test.DelegatingETSStore
+               )
+
+      assert :ok = Collection.put_many(working, [%{id: "kept", vector: [1.0]}])
+      assert :ok = Collection.delete(working, "missing")
+      assert :ok = Collection.delete(working, "kept")
+      assert {:ok, []} = Collection.all(working)
+      assert :ok = Vettore.close(working)
+    end
+
+    test "owner transactions and indexed writes contain callback failures" do
+      assert {:ok, collection} = Collection.new(dimensions: 1, metric: :l2)
+      owner = collection.store_state.owner
+
+      assert {:error, {:transaction_exception, %RuntimeError{message: "owner boom"}}} =
+               Vettore.ETSOwner.transaction(owner, fn _table -> raise "owner boom" end)
+
+      assert {:error, {:transaction_exception, {:throw, :owner_throw}}} =
+               Vettore.ETSOwner.transaction(owner, fn _table -> throw(:owner_throw) end)
+
+      for {id, callback, expected} <- [
+            {"bad-result", fn -> :unexpected end, {:error, {:invalid_index_result, :unexpected}}},
+            {"raised", fn -> raise "index boom" end,
+             {:error, {:index_exception, %RuntimeError{message: "index boom"}}}},
+            {"thrown", fn -> throw(:index_throw) end,
+             {:error, {:index_exception, {:throw, :index_throw}}}},
+            {"tagged", fn -> {:error, :forced} end, {:error, :forced}}
+          ] do
+        embedding = %Embedding{id: id, value: id, vector: [1.0]}
+
+        assert ^expected =
+                 ETS.put_indexed(collection.store_state, embedding, callback, fn -> :ok end)
+      end
+
+      assert {:ok, []} = Collection.all(collection)
+      assert Process.alive?(owner)
       assert :ok = Vettore.close(collection)
     end
   end
@@ -513,6 +721,17 @@ defmodule VettoreHardeningTest do
       assert {:error, :missing_id} = Collection.put(collection, %{id: "", vector: [0.0, 0.0]})
       assert {:error, :invalid_embedding} = Collection.put(collection, :bad)
       assert :ok = Vettore.close(collection)
+    end
+
+    test "identifier validation covers malformed direct boundary values" do
+      assert {:error, :invalid_id} = Identifier.validate_embeddings([:not_an_embedding])
+      assert {:error, :invalid_id} = Identifier.validate_embeddings(:not_a_list)
+
+      assert {:error, :missing_id} =
+               Identifier.embedding_id(%Embedding{id: 123, value: nil})
+
+      assert {:error, :invalid_id} =
+               Identifier.embedding_id(%Embedding{id: nil, value: <<255>>})
     end
 
     test "normalizes a derived multi-vector mean before cosine indexing" do
