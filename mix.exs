@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.3.3"
+  @version "0.3.4"
 
   def project do
     [
@@ -23,11 +23,20 @@ defmodule Vettore.MixProject do
         tag: "v#{@version}"
       ],
       docs: [
-        master: "readme",
+        main: "readme",
+        source_ref: "v#{@version}",
         extras: [
           "README.md",
           "CHANGELOG.md",
           "LICENSE"
+        ],
+        groups_for_modules: [
+          "Core API": [Vettore, Vettore.Collection, Vettore.Embedding, Vettore.Result],
+          Compatibility: [Vettore.DB],
+          "Search and distance": [Vettore.Distance, Vettore.MultiVector],
+          Indexes: [Vettore.Index, Vettore.Index.Flat, Vettore.Index.HNSW],
+          Storage: [Vettore.Store, Vettore.Store.ETS],
+          Encodings: [Vettore.Encoding.Muvera]
         ]
       ],
       source_url: "https://github.com/elchemista/vettore",
@@ -80,7 +89,7 @@ defmodule Vettore.MixProject do
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.5.1", only: :dev},
       # Documentation Provider
-      {:ex_doc, "~> 0.40.3", only: :dev, optional: true, runtime: false},
+      {:ex_doc, "~> 0.40.3", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4.7", only: [:dev, :test], runtime: false}
     ]
   end

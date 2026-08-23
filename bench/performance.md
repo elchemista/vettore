@@ -1,4 +1,4 @@
-## Vettore 0.3.2 Benchmarks
+## Vettore Benchmarks
 
 Run:
 

@@ -174,12 +174,12 @@ impl HnswIndex {
             );
             self.external_to_internal.insert(external_id, internal_id);
             self.entry = Some(internal_id);
-            self.dimension = Some(self.nodes[&internal_id].vector.len());
+            self.dimension = Some(vector_len(&self.nodes, internal_id)?);
             return Ok(());
         }
 
         let mut entry = self.entry.ok_or_else(|| "missing hnsw entry".to_string())?;
-        let top_layer = self.nodes[&entry].layer;
+        let top_layer = node(&self.nodes, entry)?.layer;
 
         for layer in (node_level + 1..=top_layer).rev() {
             let (best_id, _best_dist) = self.greedy_closest(entry, &vector, layer)?;
@@ -219,7 +219,7 @@ impl HnswIndex {
             },
         );
         self.external_to_internal.insert(external_id, internal_id);
-        self.dimension = Some(self.nodes[&internal_id].vector.len());
+        self.dimension = Some(vector_len(&self.nodes, internal_id)?);
 
         for (layer, neighbors) in new_connections.into_iter().enumerate() {
             self.replace_connections(internal_id, layer, neighbors);
@@ -228,7 +228,7 @@ impl HnswIndex {
         // The new node must exist before reciprocal neighbors are pruned. If it
         // is added afterwards, `prune` cannot score it and silently removes
         // every incoming edge, leaving later inserts unreachable from `entry`.
-        let reciprocal_connections = self.nodes[&internal_id].connections.clone();
+        let reciprocal_connections = node(&self.nodes, internal_id)?.connections.clone();
         for (layer, neighbors) in reciprocal_connections.into_iter().enumerate() {
             for (position, neighbor_id) in neighbors.into_iter().enumerate() {
                 self.add_connection(neighbor_id, layer, internal_id);
@@ -241,7 +241,7 @@ impl HnswIndex {
         }
 
         if let Some(current_entry) = self.entry {
-            if node_level > self.nodes[&current_entry].layer {
+            if node_level > node(&self.nodes, current_entry)?.layer {
                 self.entry = Some(internal_id);
             }
         }
@@ -390,7 +390,7 @@ impl HnswIndex {
             return Ok(Vec::new());
         };
 
-        let top_layer = self.nodes[&entry].layer;
+        let top_layer = node(&self.nodes, entry)?.layer;
         for layer in (1..=top_layer).rev() {
             entry = self.greedy_closest(entry, query, layer)?.0;
         }
@@ -413,14 +413,18 @@ impl HnswIndex {
                 .then_with(|| left_id.cmp(right_id))
         });
 
-        best.into_iter()
-            .take(limit)
-            .filter_map(|neighbor| self.nodes.get(&neighbor.id))
-            .map(|node| {
-                crate::distances::compute(self.metric, query, &node.vector)
-                    .map(|raw| (node.external_id.clone(), raw))
-            })
-            .collect()
+        let mut hits = Vec::with_capacity(usize::min(limit, best.len()));
+        for neighbor in best.into_iter().take(limit) {
+            let Some(node) = self.nodes.get(&neighbor.id) else {
+                continue;
+            };
+            match crate::distances::compute(self.metric, query, &node.vector) {
+                Ok(raw) => hits.push((node.external_id.clone(), raw)),
+                Err(reason) if crate::distances::is_metric_overflow(&reason) => continue,
+                Err(reason) => return Err(reason),
+            }
+        }
+        Ok(hits)
     }
 
     /// Descends one graph layer until no neighbor improves the rank distance.
@@ -431,7 +435,7 @@ impl HnswIndex {
         layer: usize,
     ) -> Result<(usize, f32), String> {
         let mut current = start;
-        let mut current_dist = self.rank_distance(&self.nodes[&current].vector, query)?;
+        let mut current_dist = self.rank_distance(&node(&self.nodes, current)?.vector, query)?;
 
         loop {
             let mut moved = false;
@@ -477,7 +481,7 @@ impl HnswIndex {
         let mut visited = HashSet::new();
         let mut candidates = BinaryHeap::new();
         let mut results = BinaryHeap::new();
-        let dist = self.rank_distance(&self.nodes[&entry].vector, query)?;
+        let dist = self.rank_distance(&node(&self.nodes, entry)?.vector, query)?;
 
         candidates.push(ClosestFirst(ScoredNode { id: entry, dist }));
         results.push(WorstFirst(ScoredNode { id: entry, dist }));
@@ -607,10 +611,16 @@ impl HnswIndex {
                 continue;
             }
 
-            let candidate_vector = &self.nodes[&candidate.id].vector;
+            let Some(candidate_node) = self.nodes.get(&candidate.id) else {
+                continue;
+            };
+            let candidate_vector = &candidate_node.vector;
             let mut diverse = true;
             for retained in &selected {
-                let retained_vector = &self.nodes[&retained.id].vector;
+                let Some(retained_node) = self.nodes.get(&retained.id) else {
+                    continue;
+                };
+                let retained_vector = &retained_node.vector;
                 if self.rank_distance(candidate_vector, retained_vector)? <= candidate.dist {
                     diverse = false;
                     break;
@@ -715,7 +725,11 @@ impl HnswIndex {
 
     /// Computes the ascending distance used internally by HNSW.
     fn rank_distance(&self, left: &[f32], right: &[f32]) -> Result<f32, String> {
-        crate::distances::rank_distance(self.metric, left, right)
+        match crate::distances::rank_distance(self.metric, left, right) {
+            Ok(distance) => Ok(distance),
+            Err(reason) if crate::distances::is_metric_overflow(&reason) => Ok(f32::INFINITY),
+            Err(reason) => Err(reason),
+        }
     }
 
     /// Assigns a deterministic pseudo-random layer from the external id.
@@ -728,6 +742,16 @@ impl HnswIndex {
         }
         level
     }
+}
+
+fn node(nodes: &HashMap<usize, Node>, id: usize) -> Result<&Node, String> {
+    nodes
+        .get(&id)
+        .ok_or_else(|| format!("missing hnsw node {id}"))
+}
+
+fn vector_len(nodes: &HashMap<usize, Node>, id: usize) -> Result<usize, String> {
+    Ok(node(nodes, id)?.vector.len())
 }
 
 pub struct HnswResource(pub RwLock<HnswIndex>);
@@ -1139,5 +1163,17 @@ mod tests {
             assert!(first.level_for(id) <= first.params.max_level);
             assert_eq!(hash64(id.as_bytes()), hash64(id.as_bytes()));
         }
+    }
+
+    #[test]
+    fn search_skips_only_nodes_whose_score_overflows() {
+        let mut index = HnswIndex::new(Metric::L2, params()).unwrap();
+        index.insert("safe".into(), vec![0.0]).unwrap();
+        index.insert("overflow".into(), vec![-f32::MAX]).unwrap();
+
+        assert_eq!(
+            index.search(&[f32::MAX], 2).unwrap(),
+            vec![("safe".into(), f32::MAX)]
+        );
     }
 }

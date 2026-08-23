@@ -52,6 +52,14 @@ defmodule Vettore do
   This is the preferred public constructor for new code. Use `Vettore.new/0`
   only when you need the older compatibility database API.
 
+  The collection is owned by the process that calls `new/1` and is reclaimed
+  automatically when that process exits. Create long-lived collections from a
+  long-lived process; a collection created inside a short-lived `Task` cannot
+  be handed off after that task terminates.
+
+  Results default to `score: :similarity`. Pass `score: :raw` to preserve the
+  score scale used by collection constructors before Vettore 0.3.4.
+
   ## Examples
 
       iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :cosine)
@@ -158,9 +166,7 @@ defmodule Vettore do
       iex> {:ok, %Vettore.Embedding{id: "a"}} = Vettore.get(collection, "a")
   """
   @spec get(Collection.t(), String.t()) :: {:ok, Embedding.t()} | {:error, term()}
-  def get(%Collection{} = collection, id) when is_binary(id) do
-    collection.store_mod.get(collection.store_state, id)
-  end
+  def get(%Collection{} = collection, id), do: Collection.get(collection, id)
 
   @doc """
   Deletes one embedding by id.
@@ -187,9 +193,7 @@ defmodule Vettore do
       iex> {:ok, [%Vettore.Embedding{id: "a"}]} = Vettore.all(collection)
   """
   @spec all(Collection.t()) :: {:ok, [Embedding.t()]} | {:error, term()}
-  def all(%Collection{} = collection) do
-    collection.store_mod.all(collection.store_state)
-  end
+  def all(%Collection{} = collection), do: Collection.all(collection)
 
   @doc """
   Runs the configured collection search.

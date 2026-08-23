@@ -1,9 +1,9 @@
-# Releasing Vettore 0.3.3
+# Releasing Vettore
 
 Until the release workflow finishes, the checked-in checksum map describes the
-currently published `0.3.2` native artifacts. The `0.3.3` native-code changes
-require rebuilding the complete target matrix and replacing that map before the
-new package is published.
+currently published native artifacts. Native-code changes require rebuilding
+the complete target matrix and replacing that map before a new package is
+published.
 
 ## 1. Verify the source release
 
@@ -25,6 +25,7 @@ VETTORE_BENCH_WARMUP=0 \
 mix run bench/search_modes_bench.exs
 VETTORE_BUILD=1 mix credo --strict
 VETTORE_BUILD=1 mix dialyzer
+mix hex.audit
 cargo fmt --manifest-path native/vettore/Cargo.toml --all --check
 cargo test --manifest-path native/vettore/Cargo.toml --locked
 cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-features --features nif_version_2_15
@@ -48,15 +49,17 @@ overlap against the exact vector and multi-vector baselines before timing.
 Before creating the tag, open **Actions → Build precompiled NIFs → Run
 workflow**, select the release branch, and run it manually. A manual run builds
 and uploads the complete NIF/target artifact matrix for inspection but skips the
-GitHub Release publishing job. Only a matching `v0.3.3` tag publishes assets.
+GitHub Release publishing job. Only a tag matching the version in `mix.exs`
+publishes assets.
 
 ## 2. Build and publish native archives
 
 Merge the release commit, then create and push the matching tag:
 
 ```bash
-git tag -s v0.3.3 -m "Vettore 0.3.3"
-git push origin v0.3.3
+release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+git tag -s "v${release_version}" -m "Vettore ${release_version}"
+git push origin "v${release_version}"
 ```
 
 The `Build precompiled NIFs` workflow rejects a tag that differs from the
@@ -69,14 +72,16 @@ GitHub release, and attaches both the archives and
 After the release workflow succeeds:
 
 ```bash
-gh release download v0.3.3 \
+release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+gh release download "v${release_version}" \
   --pattern 'checksum-Elixir.Vettore.Nifs.exs' \
   --clobber
 git diff -- checksum-Elixir.Vettore.Nifs.exs
 ```
 
-Every checksum key must contain `v0.3.3`. Commit the generated checksum file.
-Then verify a clean precompiled build without `VETTORE_BUILD`:
+Every checksum key must contain the current release version. Commit the
+generated checksum file. Then verify a clean precompiled build without
+`VETTORE_BUILD`:
 
 ```bash
 MIX_ENV=prod mix clean
@@ -86,7 +91,8 @@ mix hex.build
 mix hex.publish --dry-run
 ```
 
-The production compile must download and load a `0.3.3` archive successfully.
+The production compile must download and load the current release archive
+successfully.
 Inspect the Hex package listing and confirm it contains the new checksum,
 `CHANGELOG.md`, `RELEASE.md`, Elixir sources, and Rust sources.
 
@@ -96,7 +102,7 @@ Inspect the Hex package listing and confirm it contains the new checksum,
 mix hex.publish
 ```
 
-In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3.3"}` without
+In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3"}` without
 Rust installed. Create flat and HNSW collections, insert records with metadata,
 search them, snapshot/reload them, and call `Vettore.close/1`. Finally, mark the
 changelog entry with the release date.

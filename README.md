@@ -46,7 +46,7 @@ Elixir systems, with Rust kept as acceleration rather than ownership.
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.3.3"}
+    {:vettore, "~> 0.3.4"}
   ]
 end
 ```
@@ -112,6 +112,28 @@ Vettore.close(collection)
 
 `Vettore.new/1` creates a collection. `Vettore.new/0` still creates the older
 compatibility database.
+
+### Score mode
+
+Collections created by `Vettore.new/1` use `score: :similarity` by default.
+This keeps the preferred collection API aligned with the compatibility API,
+but changes the `Result.score` scale used by earlier releases. Pass
+`score: :raw` when creating or loading a collection to preserve the previous
+behavior. Existing snapshots persist their score mode and keep their original
+scale.
+
+### Lifecycle ownership
+
+A collection belongs to the process that calls `Vettore.new/1`. Its ETS table
+and native index are reclaimed automatically when that process exits, even if
+`Vettore.close/1` was not called. Create long-lived collections from a
+long-lived owner such as a dedicated GenServer. Do not create a collection in a
+short-lived `Task` or request process and then hand it to another process: it
+will close when its creator terminates.
+
+Call `Vettore.close/1` when the owner no longer needs the collection to release
+resources immediately. The compatibility database returned by `Vettore.new/0`
+uses the same creator-process ownership rule.
 
 ## Choosing A Search Path
 
@@ -194,6 +216,11 @@ HNSW results are hydrated from ETS, so they contain the same `value`,
 These helpers first find a candidate set, then rerank with full stored vectors.
 They are useful when you want to make the first pass cheaper without changing
 the canonical store.
+
+When `:candidates` is omitted, Vettore uses ten times `:limit` up to a maximum
+of 1,000,000 candidates. Adaptive searches with `limit > 1_000_000` are
+rejected; pass an explicit, smaller result limit rather than relying on an
+unbounded implicit candidate allocation.
 
 ### Matryoshka Funnel
 

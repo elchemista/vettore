@@ -60,6 +60,42 @@ defmodule VettoreStoreCompatTest do
       assert {:error, :closed} = ETS.fold(state, 0, fn _embedding, count -> count + 1 end)
     end
 
+    test "snapshot waits for in-flight owner transactions" do
+      assert {:ok, state} = ETS.new(%{compressed: false, dimensions: 1})
+      parent = self()
+
+      writer =
+        Task.async(fn ->
+          ETS.put_indexed(
+            state,
+            %Embedding{id: "committed", vector: [1.0]},
+            fn ->
+              send(parent, :index_started)
+
+              receive do
+                :commit -> :ok
+              end
+            end,
+            fn -> :ok end
+          )
+        end)
+
+      assert_receive :index_started
+      path = Path.join(System.tmp_dir!(), "vettore-atomic-snapshot-#{System.unique_integer()}")
+      snapshot = Task.async(fn -> ETS.snapshot(state, path) end)
+
+      refute Task.yield(snapshot, 50)
+      send(state.owner, :commit)
+      assert :ok = Task.await(writer)
+      assert :ok = Task.await(snapshot)
+
+      assert {:ok, {loaded, _config}} = ETS.load_snapshot(path)
+      assert {:ok, %Embedding{id: "committed"}} = ETS.get(loaded, "committed")
+      assert :ok = ETS.close(loaded)
+      assert :ok = ETS.close(state)
+      File.rm(path)
+    end
+
     test "batch insert validates identifiers and duplicates atomically" do
       assert {:ok, state} = ETS.new(%{})
 
@@ -202,6 +238,21 @@ defmodule VettoreStoreCompatTest do
       assert {:error, :invalid_snapshot} = Vettore.snapshot(:bad, "path")
       assert true = Vettore.ETSOwner.insert(db.owner, {:unrelated, :row})
       assert :ok = Vettore.close(db)
+      assert :ok = Vettore.close(db)
+    end
+
+    test "empty ids are rejected consistently by collection and compatibility reads" do
+      assert {:ok, collection} = Vettore.new(dimensions: 1, metric: :l2)
+      assert {:error, :invalid_id} = Vettore.get(collection, "")
+      assert {:error, :invalid_id} = Vettore.get(collection, :bad)
+      assert {:error, :invalid_id} = Vettore.delete(collection, "")
+      assert {:ok, []} = Vettore.all(collection)
+      assert :ok = Vettore.close(collection)
+
+      db = Vettore.new()
+      assert {:ok, "docs"} = Vettore.create_collection(db, "docs", 1, :l2)
+      assert {:error, :invalid_id} = Vettore.get_by_value(db, "docs", "")
+      assert {:error, :invalid_id} = Vettore.delete(db, "docs", "")
       assert :ok = Vettore.close(db)
     end
 
