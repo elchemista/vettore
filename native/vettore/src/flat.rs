@@ -108,7 +108,11 @@ impl FlatIndex {
 
         let mut hits = BinaryHeap::with_capacity(usize::min(limit, self.vectors.len()));
         for (id, vector) in &self.vectors {
-            let raw = crate::distances::compute(self.metric, query, vector)?;
+            let raw = match crate::distances::compute(self.metric, query, vector) {
+                Ok(raw) => raw,
+                Err(reason) if crate::distances::is_metric_overflow(&reason) => continue,
+                Err(reason) => return Err(reason),
+            };
             let hit = FlatHit {
                 id: id.clone(),
                 raw,
@@ -287,6 +291,18 @@ mod tests {
         assert_eq!(index.vectors.len(), 1);
         assert_eq!(index.search(&[0.0], 1).unwrap()[0].0, "same");
         assert!(index.search(&[0.0], 1).unwrap()[0].1.is_finite());
+    }
+
+    #[test]
+    fn search_skips_only_rows_whose_score_overflows() {
+        let mut index = FlatIndex::new(Metric::L2);
+        index.insert("safe".into(), vec![0.0]).unwrap();
+        index.insert("overflow".into(), vec![-f32::MAX]).unwrap();
+
+        assert_eq!(
+            index.search(&[f32::MAX], 2).unwrap(),
+            vec![("safe".into(), f32::MAX)]
+        );
     }
 
     #[test]

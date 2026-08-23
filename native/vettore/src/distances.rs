@@ -7,6 +7,8 @@
 
 use wide::f32x8;
 
+pub const METRIC_OVERFLOW: &str = "metric overflow";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Metric {
     L2,
@@ -64,7 +66,7 @@ pub fn compute(metric: Metric, left: &[f32], right: &[f32]) -> Result<f32, Strin
     // result is representable (for example, a large dot product whose terms
     // cancel). Recompute only that exceptional path in f64 before reporting a
     // genuine output overflow.
-    recover_metric_overflow(metric, left, right).ok_or_else(|| "metric overflow".to_string())
+    recover_metric_overflow(metric, left, right).ok_or_else(|| METRIC_OVERFLOW.to_string())
 }
 
 fn recover_metric_overflow(metric: Metric, left: &[f32], right: &[f32]) -> Option<f32> {
@@ -172,9 +174,14 @@ pub fn cosine(left: &[f32], right: &[f32]) -> Result<f32, String> {
         if similarity.is_finite() {
             Ok(similarity.clamp(-1.0, 1.0) as f32)
         } else {
-            Err("metric overflow".to_string())
+            Err(METRIC_OVERFLOW.to_string())
         }
     }
+}
+
+/// Identifies the canonical overflow returned by individual metric kernels.
+pub fn is_metric_overflow(reason: &str) -> bool {
+    reason == METRIC_OVERFLOW
 }
 
 fn f64_dot(left: &[f32], right: &[f32]) -> f64 {

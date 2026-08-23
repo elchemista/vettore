@@ -5,6 +5,39 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-23
+
+### Fixed
+
+- Updated the local Rust toolchain pin to the crate's Rust 1.91 MSRV.
+- Corrected ExDoc's landing page and source links for versioned releases.
+- Replaced panic-prone HNSW graph lookups with recoverable errors and made
+  flat/HNSW searches skip individual rows whose score overflows.
+- Serialized ETS snapshots with writes so snapshots represent one consistent
+  point in time.
+- Aligned collection metric aliases with the compatibility constructor and
+  made empty-id reads and deletes return `{:error, :invalid_id}` consistently.
+
+### Changed
+
+- Changed the `Vettore.new/1` default from `score: :raw` to
+  `score: :similarity`, matching the compatibility API. This changes
+  `Result.score` values for callers that omitted the option; pass
+  `score: :raw` to preserve the previous scale. Existing snapshots retain the
+  score mode stored in their configuration.
+- Collections and compatibility databases are now reclaimed automatically when
+  the process that created them exits. Long-lived resources must be created by
+  a long-lived owner rather than handed off from a short-lived task or request
+  process.
+
+### Security and reliability
+
+- Capped implicit adaptive-search candidate counts at 1,000,000 and reject
+  adaptive searches whose result limit exceeds that bound. Explicit candidate
+  counts above the bound, previously accepted, now return
+  `{:error, :invalid_candidates}`.
+- Added Hex and RustSec dependency audits to CI.
+
 ## [0.3.3] - 2026-08-12
 
 ### Fixed

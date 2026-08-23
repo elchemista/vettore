@@ -59,6 +59,7 @@ defmodule Vettore.Collection do
   @multi_vector_option_keys ~w(limit metric)a
   @hybrid_option_keys ~w(limit generators rerank)a
   @max_nif_usize 4_294_967_295
+  @max_candidate_count 1_000_000
   @f32_max 3.402_823_466_385_288_6e38
   @multi_vector_error_reasons %{
     "score overflow" => :score_overflow,
@@ -89,13 +90,14 @@ defmodule Vettore.Collection do
 
   @spec do_new(keyword()) :: {:ok, t()} | {:error, term()}
   defp do_new(opts) do
-    metric = normalize_metric(Keyword.get(opts, :metric, :cosine))
+    requested_metric = Keyword.get(opts, :metric, :cosine)
+    metric = normalize_metric(requested_metric)
     dimensions = Keyword.get(opts, :dimensions)
     normalize = Keyword.get(opts, :normalize, default_normalize(metric))
     store = Keyword.get(opts, :store, :ets)
-    index = Keyword.get(opts, :index, :flat)
+    index = Keyword.get(opts, :index, if(requested_metric == :hnsw, do: :hnsw, else: :flat))
     index_options = Keyword.get(opts, :index_options, [])
-    score = Keyword.get(opts, :score, :raw)
+    score = Keyword.get(opts, :score, :similarity)
     compressed = Keyword.get(opts, :compressed, false)
 
     with :ok <- validate_dimensions(dimensions),
@@ -190,15 +192,17 @@ defmodule Vettore.Collection do
   @doc false
   @spec get(t(), String.t()) :: {:ok, Embedding.t()} | {:error, term()}
   def get(%__MODULE__{} = collection, id) when is_binary(id) do
-    with :ok <- Identifier.validate_utf8(id) do
+    with :ok <- Identifier.validate(id) do
       collection.store_mod.get(collection.store_state, id)
     end
   end
 
+  def get(%__MODULE__{}, _id), do: {:error, :invalid_id}
+
   @doc false
   @spec delete(t(), String.t()) :: :ok | {:error, term()}
   def delete(%__MODULE__{} = collection, id) when is_binary(id) do
-    with :ok <- Identifier.validate_utf8(id) do
+    with :ok <- Identifier.validate(id) do
       delete_id(collection, id)
     end
   end
@@ -367,7 +371,7 @@ defmodule Vettore.Collection do
     normalize = config_option(config, opts, :normalize, default_normalize(metric))
     index = config_option(config, opts, :index, :flat)
     index_options = config_option(config, opts, :index_options, [])
-    score = config_option(config, opts, :score, :raw)
+    score = config_option(config, opts, :score, :similarity)
     compressed = Map.get(config, :compressed, false)
 
     with :ok <- validate_snapshot_version(config),
@@ -560,7 +564,12 @@ defmodule Vettore.Collection do
   end
 
   @spec candidate_count(keyword(), pos_integer()) :: pos_integer()
-  defp candidate_count(opts, limit), do: Keyword.get(opts, :candidates, max(limit * 10, limit))
+  defp candidate_count(opts, limit),
+    do: Keyword.get(opts, :candidates, default_candidate_count(limit))
+
+  @spec default_candidate_count(pos_integer()) :: pos_integer()
+  defp default_candidate_count(limit),
+    do: min(max(limit * 10, limit), @max_candidate_count)
 
   @spec default_hybrid_generators(t()) :: [hybrid_generator()]
   defp default_hybrid_generators(%__MODULE__{index: :hnsw}), do: [:hnsw, :quantized]
@@ -628,7 +637,7 @@ defmodule Vettore.Collection do
   defp run_hybrid_generator(collection, query, {name, opts}, limit, embeddings)
        when is_atom(name) and is_list(opts) do
     with :ok <- validate_generator_options(name, opts) do
-      opts = Keyword.put_new(opts, :candidates, max(limit * 10, limit))
+      opts = Keyword.put_new(opts, :candidates, default_candidate_count(limit))
 
       case name do
         :funnel -> funnel_candidates(collection, query, opts, limit, embeddings)
@@ -995,14 +1004,14 @@ defmodule Vettore.Collection do
   @spec validate_candidates(term(), pos_integer()) :: :ok | {:error, :invalid_candidates}
   defp validate_candidates(candidates, limit)
        when is_integer(candidates) and candidates >= limit and candidates > 0 and
-              candidates <= @max_nif_usize,
+              candidates <= @max_candidate_count,
        do: :ok
 
   defp validate_candidates(_candidates, _limit), do: {:error, :invalid_candidates}
 
   @spec validate_generator_candidates(term()) :: :ok | {:error, :invalid_candidates}
   defp validate_generator_candidates(candidates)
-       when is_integer(candidates) and candidates > 0 and candidates <= @max_nif_usize,
+       when is_integer(candidates) and candidates > 0 and candidates <= @max_candidate_count,
        do: :ok
 
   defp validate_generator_candidates(_candidates), do: {:error, :invalid_candidates}
@@ -1399,6 +1408,8 @@ defmodule Vettore.Collection do
 
   @spec normalize_metric(atom()) :: atom()
   defp normalize_metric(:euclidean), do: :l2
+  defp normalize_metric(:binary), do: :hamming
+  defp normalize_metric(:hnsw), do: :l2
   defp normalize_metric(:dot), do: :inner_product
   defp normalize_metric(:dot_product), do: :inner_product
   defp normalize_metric(metric), do: metric

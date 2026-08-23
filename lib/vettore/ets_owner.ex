@@ -3,7 +3,8 @@ defmodule Vettore.ETSOwner do
 
   use GenServer
 
-  @type init_arg :: {:new, atom(), [term()], [tuple()]} | {:load, Path.t()}
+  @type init_arg ::
+          {:new, atom(), [term()], [tuple()], pid()} | {:load, Path.t(), pid()}
   @type start_result :: {:ok, {pid(), :ets.tid()}} | {:error, term()}
 
   @spec start_table(atom(), [term()]) :: start_result()
@@ -12,12 +13,12 @@ defmodule Vettore.ETSOwner do
   @spec start_table(atom(), [term()], [tuple()]) :: start_result()
   def start_table(name, options, initial_objects)
       when is_atom(name) and is_list(options) and is_list(initial_objects) do
-    start_child({:new, name, options, initial_objects})
+    start_child({:new, name, options, initial_objects, self()})
   end
 
   @spec load_table(Path.t()) :: start_result()
   def load_table(path) when is_binary(path) and path != "" do
-    start_child({:load, path})
+    start_child({:load, path, self()})
   end
 
   def load_table(_path), do: {:error, :invalid_snapshot_path}
@@ -73,7 +74,8 @@ defmodule Vettore.ETSOwner do
 
   @spec init(init_arg()) :: {:ok, :ets.tid()} | {:stop, term()}
   @impl GenServer
-  def init({:new, name, options, initial_objects}) do
+  def init({:new, name, options, initial_objects, creator}) do
+    Process.monitor(creator)
     table = :ets.new(name, options)
 
     if initial_objects != [] do
@@ -83,7 +85,9 @@ defmodule Vettore.ETSOwner do
     {:ok, table}
   end
 
-  def init({:load, path}) do
+  def init({:load, path, creator}) do
+    Process.monitor(creator)
+
     case :ets.file2tab(String.to_charlist(path), verify: true) do
       {:ok, table} -> normalize_loaded_table(table)
       {:error, reason} -> {:stop, reason}
@@ -122,6 +126,10 @@ defmodule Vettore.ETSOwner do
     true = :ets.delete(table)
     {:stop, :normal, rows, table}
   end
+
+  @impl GenServer
+  def handle_info({:DOWN, _ref, :process, _creator, _reason}, table),
+    do: {:stop, :normal, table}
 
   @spec normalize_loaded_table(:ets.tid()) :: {:ok, :ets.tid()} | {:stop, term()}
   defp normalize_loaded_table(table) do

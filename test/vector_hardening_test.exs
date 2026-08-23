@@ -194,7 +194,7 @@ defmodule VettoreHardeningTest do
   end
 
   describe "ETS ownership and explicit lifecycle" do
-    test "a collection survives the process that created it" do
+    test "a collection is reclaimed when its creating process exits" do
       parent = self()
 
       {pid, monitor} =
@@ -205,9 +205,12 @@ defmodule VettoreHardeningTest do
         end)
 
       assert_receive {:collection, collection}
+      owner_monitor = Process.monitor(collection.store_state.owner)
       assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}
-      assert Process.alive?(collection.store_state.owner)
-      assert {:ok, %Embedding{id: "alive"}} = Collection.get(collection, "alive")
+      assert_receive {:DOWN, ^owner_monitor, :process, _owner, reason}
+      assert reason in [:normal, :noproc]
+      refute Process.alive?(collection.store_state.owner)
+      assert {:error, :closed} = Collection.get(collection, "alive")
       assert :ok = Vettore.close(collection)
     end
 
@@ -821,7 +824,19 @@ defmodule VettoreHardeningTest do
                Collection.quantized_search(collection, [0.0, 0.0], candidates: 0)
 
       assert {:error, :invalid_candidates} =
+               Collection.quantized_search(collection, [0.0, 0.0], candidates: 1_000_001)
+
+      assert {:error, :invalid_candidates} =
                Collection.quantized_search(collection, [0.0, 0.0], candidates: 4_294_967_296)
+
+      assert {:ok, [%Result{id: "origin"}]} =
+               Collection.quantized_search(collection, [0.0, 0.0], limit: 100_001)
+
+      assert {:ok, [%Result{id: "origin"}]} =
+               Collection.hybrid_search(collection, [0.0, 0.0], limit: 100_001)
+
+      assert {:error, :invalid_candidates} =
+               Collection.quantized_search(collection, [0.0, 0.0], limit: 1_000_001)
 
       assert {:error, :invalid_multi_vector} = Collection.multi_vector_search(collection, [])
 
@@ -850,6 +865,9 @@ defmodule VettoreHardeningTest do
                )
 
       assert :ok = Collection.delete(collection, "missing")
+      assert {:error, :invalid_id} = Collection.get(collection, "")
+      assert {:error, :invalid_id} = Collection.get(collection, :bad)
+      assert {:error, :invalid_id} = Collection.delete(collection, "")
       assert {:error, :invalid_id} = Collection.delete(collection, :bad)
       assert {:error, :invalid_embeddings} = Collection.put_many(collection, :bad)
       assert :ok = Vettore.close(collection)
@@ -886,6 +904,20 @@ defmodule VettoreHardeningTest do
       assert {:error, :invalid_options} = Collection.new(:bad)
       assert {:error, :invalid_store} = Collection.new(dimensions: 2, store: "bad")
       assert {:error, :invalid_index} = Collection.new(dimensions: 2, index: "bad")
+    end
+
+    test "new and compatibility constructors share aliases and score defaults" do
+      assert {:ok, binary} = Collection.new(dimensions: 1, metric: :binary)
+      assert binary.metric == :hamming
+      assert binary.score == :similarity
+
+      assert {:ok, hnsw} = Collection.new(dimensions: 1, metric: :hnsw)
+      assert hnsw.metric == :l2
+      assert hnsw.index == :hnsw
+      assert hnsw.score == :similarity
+
+      assert :ok = Vettore.close(binary)
+      assert :ok = Vettore.close(hnsw)
     end
   end
 

@@ -32,7 +32,7 @@ defmodule Vettore.Store.ETS do
     try do
       with :ok <- ensure_snapshot_directory(path),
            :ok <-
-             safe_table_call(state, fn table ->
+             owner_transaction(state, fn table ->
                :ets.tab2file(table, String.to_charlist(temporary_path),
                  extended_info: [:object_count, :md5sum]
                )
