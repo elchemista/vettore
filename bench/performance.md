@@ -35,6 +35,30 @@ HNSW runs are emitted only for its supported metrics (`:l2`, `:cosine`, and
 recall separately against flat top-k results for representative application
 embeddings rather than relying on random vectors alone.
 
+## Resident GPU Flat versus contiguous SIMD Flat
+
+Run the dedicated exact-search benchmark on a machine with a supported adapter:
+
+```bash
+VETTORE_BENCH_BATCH=25000 \
+VETTORE_BENCH_DIMENSIONS=384 \
+VETTORE_BENCH_LIMIT=10 \
+mix run bench/gpu_flat_bench.exs
+```
+
+The script builds identical CPU and GPU collections, verifies top-k ids before
+timing, reports the first GPU query separately (resident-matrix upload plus
+search), and then compares warm resident queries against the contiguous SIMD
+scan. The useful break-even point depends on adapter, driver, dimensions,
+collection size, query concurrency, and mutation frequency. Measure warm and
+cold numbers separately: a workload that rebuilds the matrix after every write
+does not have the same economics as a read-heavy collection loaded with one
+`put_many/2`.
+
+Available settings are `VETTORE_BENCH_DIMENSIONS`, `VETTORE_BENCH_BATCH`,
+`VETTORE_BENCH_LIMIT`, `VETTORE_BENCH_METRIC`, `VETTORE_BENCH_SEED`,
+`VETTORE_BENCH_TIME`, and `VETTORE_BENCH_WARMUP`.
+
 ## Every search mode
 
 Run the deterministic search-mode matrix:

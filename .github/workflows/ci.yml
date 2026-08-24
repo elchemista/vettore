@@ -92,6 +92,17 @@ jobs:
           VETTORE_BENCH_WARMUP: "0"
         run: mix run bench/search_modes_bench.exs
 
+      - name: Preflight resident GPU Flat benchmark
+        env:
+          MIX_ENV: dev
+          VETTORE_GPU_ALLOW_SOFTWARE: "1"
+          VETTORE_BENCH_DIMENSIONS: "16"
+          VETTORE_BENCH_BATCH: "64"
+          VETTORE_BENCH_LIMIT: "5"
+          VETTORE_BENCH_TIME: "1"
+          VETTORE_BENCH_WARMUP: "0"
+        run: mix run bench/gpu_flat_bench.exs
+
       - name: Run Credo
         run: mix credo --strict
 

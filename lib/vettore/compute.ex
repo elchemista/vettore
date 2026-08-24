@@ -1,6 +1,7 @@
 defmodule Vettore.Compute do
   @moduledoc """
-  Selects native CPU or GPU execution for dense-vector primitives.
+  Selects native CPU or GPU execution for dense-vector primitives and exact
+  batched search.
 
   CPU execution uses Vettore's Rust SIMD kernels and remains the default. GPU
   execution is provided directly by the native Rust NIF through `wgpu`; Nx is
@@ -20,7 +21,8 @@ defmodule Vettore.Compute do
     * `:error` returns a stable tagged error.
 
   `gpu: :auto` uses the GPU only when one is available and the operation has at
-  least `:gpu_min_size` coordinates (1,000,000 by default). It always uses CPU
+  least `:gpu_min_size` coordinates (1,000,000 by default). For Flat search the
+  workload is the resident matrix shape (`rows * dimensions`). It always uses CPU
   when no adapter is available, independently of the forced-GPU fallback policy.
   This avoids paying GPU transfer and synchronization costs for small vectors.
   """
@@ -135,6 +137,17 @@ defmodule Vettore.Compute do
   end
 
   @doc false
+  @spec normalize_search_result(term()) :: term()
+  def normalize_search_result({:error, "gpu not detected"}),
+    do: {:error, :gpu_not_available}
+
+  def normalize_search_result({:error, "gpu flat top-k supports" <> _reason}),
+    do: {:error, :gpu_limit_too_large}
+
+  def normalize_search_result({:error, "gpu " <> _reason}), do: {:error, :gpu_failed}
+  def normalize_search_result(result), do: result
+
+  @doc false
   @spec select_device(
           boolean() | :auto,
           :cpu | :error,
@@ -194,7 +207,26 @@ defmodule Vettore.Compute do
       {:error, :gpu_failed}
   end
 
-  defp validate_options(opts) do
+  @doc false
+  @spec validate_options(term()) :: :ok | {:error, term()}
+  def validate_options(opts) do
+    with :ok <- validate_option_keys(opts),
+         {:ok, _selection} <- gpu_selection(opts),
+         {:ok, _fallback} <- gpu_fallback(opts),
+         {:ok, _min_size} <- gpu_min_size(opts) do
+      :ok
+    end
+  end
+
+  @doc false
+  @spec selection(keyword()) :: {:ok, boolean() | :auto} | {:error, term()}
+  def selection(opts) do
+    with :ok <- validate_options(opts) do
+      gpu_selection(opts)
+    end
+  end
+
+  defp validate_option_keys(opts) do
     allowed = [:gpu, :gpu_fallback, :gpu_min_size]
 
     if Keyword.keyword?(opts) do

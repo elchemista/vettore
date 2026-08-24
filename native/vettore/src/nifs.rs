@@ -7,7 +7,7 @@
 use rustler::{Binary, NifResult, ResourceArc};
 
 use crate::distances::Metric;
-use crate::flat::{FlatIndex, FlatResource};
+use crate::flat::FlatResource;
 use crate::hnsw::{HnswIndex, HnswParams, HnswResource};
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -266,6 +266,19 @@ fn vector_top_k(
         .and_then(|metric| crate::search::vector_top_k(vectors, &query, metric, dimensions, limit)))
 }
 
+#[rustler::nif(schedule = "DirtyIo")]
+/// Scores a transient candidate matrix in one GPU dispatch and reduces top-k on-device.
+fn gpu_vector_top_k(
+    vectors: Vec<(String, Vec<f32>)>,
+    query: Vec<f32>,
+    metric_code: u8,
+    dimensions: usize,
+    limit: usize,
+) -> NifResult<Result<Vec<(String, f32)>, String>> {
+    Ok(Metric::from_code(metric_code)
+        .and_then(|metric| crate::gpu::vector_top_k(vectors, &query, metric, dimensions, limit)))
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Runs a packed-Hamming top-k pass over a whole candidate batch.
 fn binary_top_k(
@@ -371,7 +384,7 @@ fn flat_new_jaccard() -> ResourceArc<FlatResource> {
 
 /// Allocates the Rust resource that owns exact flat vector state.
 fn flat_new(metric: Metric) -> ResourceArc<FlatResource> {
-    ResourceArc::new(FlatResource(std::sync::RwLock::new(FlatIndex::new(metric))))
+    ResourceArc::new(FlatResource::new(metric))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -381,11 +394,7 @@ fn flat_insert(
     id: String,
     vector: Vec<f32>,
 ) -> Result<(), String> {
-    let mut guard = index
-        .0
-        .write()
-        .map_err(|_| "flat lock poisoned".to_string())?;
-    guard.insert(id, vector)
+    index.insert(id, vector)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -394,33 +403,31 @@ fn flat_insert_many(
     index: ResourceArc<FlatResource>,
     vectors: Vec<(String, Vec<f32>)>,
 ) -> Result<(), String> {
-    let mut guard = index
-        .0
-        .write()
-        .map_err(|_| "flat lock poisoned".to_string())?;
-    guard.insert_many(vectors)
+    index.insert_many(vectors)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Removes one vector from the native flat index.
 fn flat_delete(index: ResourceArc<FlatResource>, id: String) -> Result<(), String> {
-    let mut guard = index
-        .0
-        .write()
-        .map_err(|_| "flat lock poisoned".to_string())?;
-    guard.delete(&id);
-    Ok(())
+    index.delete(&id)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Releases all vectors retained by a native flat index.
 fn flat_clear(index: ResourceArc<FlatResource>) -> Result<(), String> {
-    let mut guard = index
-        .0
-        .write()
-        .map_err(|_| "flat lock poisoned".to_string())?;
-    guard.clear();
-    Ok(())
+    index.clear()
+}
+
+#[rustler::nif]
+/// Returns row and dimension counts for compute-device selection.
+fn flat_workload(index: ResourceArc<FlatResource>) -> Result<(usize, usize), String> {
+    index.workload()
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Reports successful resident-buffer builds and whether a live cache exists.
+fn flat_gpu_cache_info(index: ResourceArc<FlatResource>) -> Result<(u64, bool), String> {
+    index.gpu_cache_info()
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -430,11 +437,17 @@ fn flat_search(
     query: Vec<f32>,
     limit: usize,
 ) -> Result<Vec<(String, f32)>, String> {
-    let guard = index
-        .0
-        .read()
-        .map_err(|_| "flat lock poisoned".to_string())?;
-    guard.search(&query, limit)
+    index.search(&query, limit)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Searches a GPU-resident flat matrix and reads back only reduced top-k hits.
+fn flat_gpu_search(
+    index: ResourceArc<FlatResource>,
+    query: Vec<f32>,
+    limit: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    index.search_gpu(&query, limit)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]

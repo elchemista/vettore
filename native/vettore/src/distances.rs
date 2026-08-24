@@ -5,7 +5,7 @@
 //! vector kernels use portable SIMD through `wide` where it is useful and fall
 //! back to scalar tails for arbitrary dimensions.
 
-use wide::f32x8;
+use wide::{f32x8, f64x4};
 
 pub const METRIC_OVERFLOW: &str = "metric overflow";
 
@@ -185,20 +185,57 @@ pub fn is_metric_overflow(reason: &str) -> bool {
 }
 
 fn f64_dot(left: &[f32], right: &[f32]) -> f64 {
-    left.iter()
-        .zip(right)
-        .map(|(left, right)| f64::from(*left) * f64::from(*right))
-        .sum()
+    let mut accumulator = 0.0f64;
+    let mut index = 0usize;
+    while index + 4 <= left.len() {
+        let left = f64x4::from([
+            f64::from(left[index]),
+            f64::from(left[index + 1]),
+            f64::from(left[index + 2]),
+            f64::from(left[index + 3]),
+        ]);
+        let right = f64x4::from([
+            f64::from(right[index]),
+            f64::from(right[index + 1]),
+            f64::from(right[index + 2]),
+            f64::from(right[index + 3]),
+        ]);
+        accumulator += (left * right).reduce_add();
+        index += 4;
+    }
+    while index < left.len() {
+        accumulator += f64::from(left[index]) * f64::from(right[index]);
+        index += 1;
+    }
+    accumulator
 }
 
 fn f64_l2_squared(left: &[f32], right: &[f32]) -> f64 {
-    left.iter()
-        .zip(right)
-        .map(|(left, right)| {
-            let difference = f64::from(*left) - f64::from(*right);
-            difference * difference
-        })
-        .sum()
+    let mut accumulator = 0.0f64;
+    let mut index = 0usize;
+    while index + 4 <= left.len() {
+        let left = f64x4::from([
+            f64::from(left[index]),
+            f64::from(left[index + 1]),
+            f64::from(left[index + 2]),
+            f64::from(left[index + 3]),
+        ]);
+        let right = f64x4::from([
+            f64::from(right[index]),
+            f64::from(right[index + 1]),
+            f64::from(right[index + 2]),
+            f64::from(right[index + 3]),
+        ]);
+        let difference = left - right;
+        accumulator += (difference * difference).reduce_add();
+        index += 4;
+    }
+    while index < left.len() {
+        let difference = f64::from(left[index]) - f64::from(right[index]);
+        accumulator += difference * difference;
+        index += 1;
+    }
+    accumulator
 }
 
 /// Accumulates squared coordinate differences in 8-lane SIMD chunks.

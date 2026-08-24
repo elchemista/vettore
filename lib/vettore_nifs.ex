@@ -152,6 +152,17 @@ defmodule Vettore.Nifs do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  @spec gpu_vector_top_k(
+          [{String.t(), [float()]}],
+          [float()],
+          non_neg_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def gpu_vector_top_k(_vectors, _query, _metric_code, _dimensions, _limit),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   @spec binary_top_k(
           [{String.t(), [non_neg_integer()]}],
           [non_neg_integer()],
@@ -245,6 +256,21 @@ defmodule Vettore.Nifs do
   @spec flat_search(reference(), [float()], pos_integer()) ::
           {:ok, [{String.t(), float()}]} | {:error, String.t()}
   def flat_search(_index, _query, _limit), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_workload(reference()) ::
+          {:ok, {non_neg_integer(), non_neg_integer()}} | {:error, String.t()}
+  def flat_workload(_index), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_gpu_cache_info(reference()) ::
+          {:ok, {non_neg_integer(), boolean()}} | {:error, String.t()}
+  def flat_gpu_cache_info(_index), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_gpu_search(reference(), [float()], pos_integer()) ::
+          {:ok, [{String.t(), float()}]} | {:error, String.t()}
+  def flat_gpu_search(_index, _query, _limit), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec hnsw_new_l2(pos_integer(), pos_integer(), pos_integer(), pos_integer(), pos_integer()) ::

@@ -166,6 +166,11 @@ snapshots, and usability.
     name: :exact_vectors,
     dimensions: 384,
     index: :flat,
+    index_options: [
+      gpu: :auto,
+      gpu_min_size: 1_000_000,
+      gpu_fallback: :cpu
+    ],
     metric: :cosine,
     normalize: :l2
   )
@@ -174,8 +179,22 @@ snapshots, and usability.
   Vettore.search(collection, query_vector, limit: 10)
 ```
 
-This path is intentionally boring. It is great for small collections, local
-caches, classifier centroids, deterministic tests, and recall baselines.
+On CPU, Flat stores all rows in one contiguous native matrix and scans each row
+with portable f32/f64 SIMD kernels, including stable cosine accumulation. With
+GPU enabled, its first eligible search creates a stable, device-resident matrix
+snapshot. Warm searches upload only the query, score query-by-all-rows in one
+batched dispatch, reduce top-k on the device in two stages, and read back only
+the final ids and scores. Inserts,
+deletes, bulk loads, and snapshot restores invalidate that GPU snapshot; the
+next eligible query rebuilds it once. Prefer `put_many/2` when ingesting a large
+collection so the resident copy is built after the batch rather than between
+individual writes.
+
+GPU Flat reduction is optimized for result limits up to 64. Larger limits use
+the contiguous SIMD path when `gpu_fallback: :cpu`; strict GPU mode returns
+`{:error, :gpu_limit_too_large}`. The exact scan remains exhaustive on either
+device, although normal f32 reduction-order differences can produce small score
+rounding differences.
 
 ## HNSW Search
 
@@ -213,6 +232,11 @@ Supported HNSW metrics:
 
 HNSW results are hydrated from ETS, so they contain the same `value`,
 `metadata`, score, and distance fields as exact flat results.
+
+HNSW graph traversal remains CPU/SIMD because it is irregular and branch-heavy.
+When an adaptive or hybrid search performs a dense exact rerank after candidate
+generation, that candidate matrix can use the batched GPU scorer under the same
+global compute policy.
 
 ## Adaptive Candidate Search
 
@@ -592,11 +616,12 @@ available.
 
 ## Native CPU And GPU Execution
 
-Rust SIMD on CPU is the default and requires no configuration. Vettore can
-also execute `Vettore.Distance` metrics/normalization and `Vettore.Vector`
-metrics/normalization/mean-pooling through native wgpu compute shaders. This is
-independent of Nx and works through the platform graphics-compute API exposed
-by wgpu, such as Vulkan, Metal, or DirectX 12.
+Rust SIMD on CPU is the default and requires no configuration. Vettore can also
+execute exact Flat searches, dense reranks, `Vettore.Distance`
+metrics/normalization, and `Vettore.Vector` metrics/normalization/mean-pooling
+through native wgpu compute shaders. This is independent of Nx and works
+through the platform graphics-compute API exposed by wgpu, such as Vulkan,
+Metal, or DirectX 12.
 
 Inspect the runtime before enabling it:
 
@@ -645,16 +670,28 @@ Vettore.Vector.mean_pool_f32(model_matrix, dimensions, token_ids,
 
 The GPU runtime, device, and shader pipelines are initialized lazily and reused.
 Calls may submit concurrently, readback waits are bounded, and a failed runtime
-is rebuilt on the next call. Mean pooling gathers and validates only the selected
-rows on the host before uploading them, avoiding a transfer of the complete model
-matrix.
+is rebuilt on the next call. Flat also pools query, score, top-k, parameter, and
+staging buffers per resident snapshot, with a bounded idle pool. Matrix rows are
+normalized once for stable f32 reductions, while per-row scale metadata preserves
+the semantics of every supported metric. Inputs with a device-unsafe numeric
+range return to SIMD under the normal fallback policy rather than silently losing
+small coordinates.
 
-Each metric call still uploads one vector pair and reads one result back. Those
-transfers commonly make SIMD CPU faster even for fairly large single embeddings,
-so benchmark the real workload before enabling GPU mode. It is most plausible for
-large normalization or row-selection work; it is not yet a resident-matrix or
-batched top-k search path. Flat and HNSW collection indexes keep their native CPU
-implementations.
+Single-pair metric calls still upload both vectors, so SIMD can remain faster for
+that shape. Flat search is the throughput-oriented GPU path: the matrix upload is
+amortized across warm queries, top-k is reduced completely in GPU memory, and
+only the final `k` row ids and scores cross back to the host. Use the dedicated
+benchmark to measure cold upload and warm-query latency on the target adapter:
+
+```bash
+VETTORE_BENCH_BATCH=25000 \
+VETTORE_BENCH_DIMENSIONS=384 \
+mix run bench/gpu_flat_bench.exs
+```
+
+Mean pooling still gathers and validates only selected rows on the host before
+uploading them, avoiding transfer of the complete model matrix. HNSW traversal
+remains on CPU, while its optional exact rerank can use the batched GPU path.
 
 ## Normalization
 
