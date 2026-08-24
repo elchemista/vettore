@@ -19,8 +19,10 @@ pub fn decode_f32_le(binary: &[u8]) -> Result<Vec<f32>, String> {
     }
 
     let vector = binary
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
 
     distances::validate_finite_vector(&vector)?;

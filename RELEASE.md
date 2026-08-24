@@ -14,7 +14,10 @@ VETTORE_BUILD=1 mix deps.get --locked
 MIX_ENV=test VETTORE_TEST_EX_FASTEMBED=1 mix deps.get --locked
 VETTORE_BUILD=1 mix compile --warnings-as-errors
 VETTORE_BUILD=1 mix format --check-formatted
-VETTORE_BUILD=1 VETTORE_TEST_EX_FASTEMBED=1 mix test --cover --warnings-as-errors
+VETTORE_BUILD=1 \
+VETTORE_TEST_EX_FASTEMBED=1 \
+VETTORE_GPU_ALLOW_SOFTWARE=1 \
+mix test --cover --warnings-as-errors
 VETTORE_BUILD=1 \
 VETTORE_BENCH_DIMENSIONS=16 \
 VETTORE_BENCH_BATCH=64 \
@@ -104,7 +107,7 @@ Inspect the Hex package listing and confirm it contains the new checksum,
 mix hex.publish
 ```
 
-In a fresh temporary Mix project, depend on `{:vettore, "~> 0.4"}` without
+In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3.5"}` without
 Rust installed. Create flat and HNSW collections, insert records with metadata,
 search them, snapshot/reload them, and call `Vettore.close/1`. Finally, mark the
 changelog entry with the release date.

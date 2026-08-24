@@ -743,7 +743,7 @@ Build the Rust crate locally with Rust 1.91 or newer by setting
 `VETTORE_BUILD=1`:
 
 ```bash
-VETTORE_BUILD=1 mix test --cover
+VETTORE_BUILD=1 VETTORE_GPU_ALLOW_SOFTWARE=1 mix test --cover
 cargo test --manifest-path native/vettore/Cargo.toml
 ```
 

@@ -25,6 +25,13 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7.0.1
 
+      - name: Verify release version metadata
+        run: |
+          mix_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)
+          cargo_version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' native/vettore/Cargo.toml | head -n1)
+          test "${mix_version}" = "${cargo_version}"
+          grep -Fq "## [${mix_version}]" CHANGELOG.md
+
       - name: Install Erlang and Elixir
         uses: erlef/setup-beam@v1.24.1
         with:
@@ -61,6 +68,7 @@ jobs:
       - name: Run tests and enforce coverage
         env:
           VETTORE_TEST_EX_FASTEMBED: "1"
+          VETTORE_GPU_ALLOW_SOFTWARE: "1"
         run: mix test --cover
 
       - name: Preflight every search-mode benchmark

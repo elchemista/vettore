@@ -31,7 +31,7 @@ defmodule VettoreGpuComputeTest do
 
         assert is_binary(name) and name != ""
         assert backend in ["vulkan", "metal", "dx12", "gl", "browser_webgpu"]
-        assert device_type in ["discrete_gpu", "integrated_gpu", "virtual_gpu", "other"]
+        assert device_type in ["discrete_gpu", "integrated_gpu", "virtual_gpu", "other", "cpu"]
       else
         assert {:error, _reason} = Vettore.gpu_info()
       end

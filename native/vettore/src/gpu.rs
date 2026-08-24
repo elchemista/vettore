@@ -291,7 +291,10 @@ pub fn mean_pool_f32_le(
 
 impl GpuRuntime {
     fn new() -> Result<Self, String> {
-        Self::new_with_software_adapter(false)
+        let allow_software = std::env::var("VETTORE_GPU_ALLOW_SOFTWARE")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+
+        Self::new_with_software_adapter(allow_software)
     }
 
     fn new_with_software_adapter(allow_software: bool) -> Result<Self, String> {
@@ -364,7 +367,9 @@ impl GpuRuntime {
         )?;
 
         Ok(bytes
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|chunk| {
                 let values = bytemuck::cast_slice::<u8, f32>(chunk);
                 [values[0], values[1], values[2], values[3]]

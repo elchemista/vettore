@@ -39,6 +39,13 @@ jobs:
         run: |
           echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> "${GITHUB_ENV}"
 
+      - name: Verify release version metadata
+        shell: bash
+        run: |
+          cargo_version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' native/vettore/Cargo.toml | head -n1)
+          test "${PROJECT_VERSION}" = "${cargo_version}"
+          grep -Fq "## [${PROJECT_VERSION}]" CHANGELOG.md
+
       - name: Verify tag matches project version
         if: github.ref_type == 'tag'
         shell: bash

@@ -5,7 +5,7 @@ Semantic Versioning.
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-08-24
+## [0.3.5] - 2026-08-24
 
 ### Added
 
