@@ -6,7 +6,19 @@ defmodule Vettore do
   `Vettore.new/0` database-style API remains available for compatibility.
   """
 
-  alias Vettore.{Collection, Distance, Embedding, Identifier, Result}
+  alias Vettore.{Collection, Compute, Distance, Embedding, Identifier, Result}
+
+  @doc "Returns whether a hardware GPU is available to Vettore's native wgpu runtime."
+  @spec gpu_detected?() :: boolean()
+  def gpu_detected?, do: Compute.gpu_detected?()
+
+  @doc "Compatibility alias for `gpu_detected?/0`."
+  @spec gpu_detected() :: boolean()
+  def gpu_detected, do: gpu_detected?()
+
+  @doc "Returns diagnostic information about Vettore's selected GPU adapter."
+  @spec gpu_info() :: {:ok, map()} | {:error, term()}
+  def gpu_info, do: Compute.gpu_info()
 
   @doc """
   Creates a lightweight ETS-backed compatibility database.

@@ -8,7 +8,7 @@ defmodule Vettore.Distance do
     * similarity metrics return a similarity where higher is better
   """
 
-  alias Vettore.Nifs
+  alias Vettore.{Compute, Nifs}
 
   @type vector :: [number()]
   @type normalized_vector :: [float()]
@@ -57,36 +57,32 @@ defmodule Vettore.Distance do
       iex> Vettore.Distance.normalize([1.0], :unknown)
       {:error, {:unknown_normalization, :unknown}}
   """
-  @spec normalize(vector(), :none | :l2 | :zscore | :minmax) ::
+  @spec normalize(vector(), :none | :l2 | :zscore | :minmax, keyword()) ::
           {:ok, [float()]} | {:error, term()}
-  def normalize(vector, :none) when is_list(vector) do
-    with :ok <- validate_vector(vector) do
-      {:ok, Enum.map(vector, &(&1 / 1))}
+  def normalize(vector, method, opts \\ [])
+
+  def normalize(vector, method, opts)
+      when is_list(vector) and method in [:none, :l2, :zscore, :minmax] and is_list(opts) do
+    with :ok <- validate_compute_options(opts),
+         :ok <- validate_vector(vector) do
+      vector = float_vector(vector)
+
+      Compute.run(
+        opts,
+        length(vector),
+        fn -> cpu_normalize(vector, method) end,
+        fn -> gpu_normalize(vector, method) end
+      )
     end
   end
 
-  def normalize(vector, :l2) when is_list(vector) do
-    with :ok <- validate_vector(vector) do
-      vector |> float_vector() |> Nifs.normalize_l2() |> normalize_native_error()
-    end
+  def normalize(_vector, method, opts)
+      when method in [:none, :l2, :zscore, :minmax] and is_list(opts) do
+    with :ok <- validate_compute_options(opts), do: {:error, :invalid_vector}
   end
 
-  def normalize(vector, :zscore) when is_list(vector) do
-    with :ok <- validate_vector(vector) do
-      vector |> float_vector() |> Nifs.normalize_zscore() |> normalize_native_error()
-    end
-  end
-
-  def normalize(vector, :minmax) when is_list(vector) do
-    with :ok <- validate_vector(vector) do
-      vector |> float_vector() |> Nifs.normalize_minmax() |> normalize_native_error()
-    end
-  end
-
-  def normalize(_vector, method) when method in [:none, :l2, :zscore, :minmax],
-    do: {:error, :invalid_vector}
-
-  def normalize(_vector, method), do: {:error, {:unknown_normalization, method}}
+  def normalize(_vector, _method, opts) when not is_list(opts), do: {:error, :invalid_options}
+  def normalize(_vector, method, _opts), do: {:error, {:unknown_normalization, method}}
 
   @doc """
   Converts a raw metric value into the explicit result score and distance fields.
@@ -122,6 +118,10 @@ defmodule Vettore.Distance do
   @spec l2(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def l2(left, right), do: native_metric(:l2, left, right)
 
+  @doc "L2 distance with per-call CPU/GPU options."
+  @spec l2(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def l2(left, right, opts), do: native_metric(:l2, left, right, opts)
+
   @doc """
   Squared L2 distance.
 
@@ -135,6 +135,10 @@ defmodule Vettore.Distance do
   """
   @spec l2_squared(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def l2_squared(left, right), do: native_metric(:l2_squared, left, right)
+
+  @doc "Squared L2 distance with per-call CPU/GPU options."
+  @spec l2_squared(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def l2_squared(left, right, opts), do: native_metric(:l2_squared, left, right, opts)
 
   @doc """
   Cosine similarity. Defaults to L2-normalizing inputs and returns `[-1.0, 1.0]`.
@@ -154,7 +158,7 @@ defmodule Vettore.Distance do
     with :ok <- validate_cosine_options(opts),
          normalize_method = Keyword.get(opts, :normalize, :l2),
          :ok <- validate_pair(left, right) do
-      normalized_cosine(left, right, normalize_method)
+      normalized_cosine(left, right, normalize_method, compute_options(opts))
     end
   end
 
@@ -174,6 +178,10 @@ defmodule Vettore.Distance do
   @spec inner_product(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def inner_product(left, right), do: native_metric(:inner_product, left, right)
 
+  @doc "Inner product with per-call CPU/GPU options."
+  @spec inner_product(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def inner_product(left, right, opts), do: native_metric(:inner_product, left, right, opts)
+
   @doc """
   Negative inner product.
 
@@ -184,6 +192,12 @@ defmodule Vettore.Distance do
   """
   @spec negative_inner_product(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def negative_inner_product(left, right), do: native_metric(:negative_inner_product, left, right)
+
+  @doc "Negative inner product with per-call CPU/GPU options."
+  @spec negative_inner_product(vector(), vector(), keyword()) ::
+          {:ok, float()} | {:error, term()}
+  def negative_inner_product(left, right, opts),
+    do: native_metric(:negative_inner_product, left, right, opts)
 
   @doc """
   Manhattan/L1 distance.
@@ -196,6 +210,10 @@ defmodule Vettore.Distance do
   @spec manhattan(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def manhattan(left, right), do: native_metric(:manhattan, left, right)
 
+  @doc "Manhattan distance with per-call CPU/GPU options."
+  @spec manhattan(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def manhattan(left, right, opts), do: native_metric(:manhattan, left, right, opts)
+
   @doc """
   Chebyshev/L-infinity distance.
 
@@ -207,6 +225,10 @@ defmodule Vettore.Distance do
   @spec chebyshev(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def chebyshev(left, right), do: native_metric(:chebyshev, left, right)
 
+  @doc "Chebyshev distance with per-call CPU/GPU options."
+  @spec chebyshev(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def chebyshev(left, right, opts), do: native_metric(:chebyshev, left, right, opts)
+
   @doc """
   Hamming distance for equal-length bit/integer vectors.
 
@@ -217,6 +239,10 @@ defmodule Vettore.Distance do
   """
   @spec hamming(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def hamming(left, right), do: native_metric(:hamming, left, right)
+
+  @doc "Hamming distance with per-call CPU/GPU options."
+  @spec hamming(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def hamming(left, right, opts), do: native_metric(:hamming, left, right, opts)
 
   @doc """
   Jaccard distance for truthy/non-truthy coordinates.
@@ -230,6 +256,10 @@ defmodule Vettore.Distance do
   @spec jaccard(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def jaccard(left, right), do: native_metric(:jaccard, left, right)
 
+  @doc "Jaccard distance with per-call CPU/GPU options."
+  @spec jaccard(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def jaccard(left, right, opts), do: native_metric(:jaccard, left, right, opts)
+
   @doc """
   Compatibility alias for L2 distance.
 
@@ -241,6 +271,10 @@ defmodule Vettore.Distance do
   @spec euclidean(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def euclidean(left, right), do: l2(left, right)
 
+  @doc "Compatibility alias for `l2/3`."
+  @spec euclidean(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def euclidean(left, right, opts), do: l2(left, right, opts)
+
   @doc """
   Compatibility alias for inner product.
 
@@ -251,6 +285,10 @@ defmodule Vettore.Distance do
   """
   @spec dot_product(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def dot_product(left, right), do: inner_product(left, right)
+
+  @doc "Compatibility alias for `inner_product/3`."
+  @spec dot_product(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def dot_product(left, right, opts), do: inner_product(left, right, opts)
 
   @doc """
   Compress a float vector into packed sign bits.
@@ -495,9 +533,24 @@ defmodule Vettore.Distance do
 
   @spec validate_cosine_options(term()) :: :ok | {:error, :invalid_options}
   defp validate_cosine_options(opts) do
-    if Keyword.keyword?(opts) and Keyword.keys(opts) in [[], [:normalize]],
-      do: :ok,
-      else: {:error, :invalid_options}
+    validate_options(opts, [:normalize, :gpu, :gpu_fallback, :gpu_min_size])
+  end
+
+  @spec validate_compute_options(term()) :: :ok | {:error, :invalid_options}
+  defp validate_compute_options(opts),
+    do: validate_options(opts, [:gpu, :gpu_fallback, :gpu_min_size])
+
+  @spec validate_options(term(), [atom()]) :: :ok | {:error, :invalid_options}
+  defp validate_options(opts, allowed) do
+    if Keyword.keyword?(opts) do
+      keys = Keyword.keys(opts)
+
+      if keys == Enum.uniq(keys) and Enum.all?(keys, &(&1 in allowed)),
+        do: :ok,
+        else: {:error, :invalid_options}
+    else
+      {:error, :invalid_options}
+    end
   end
 
   @spec validate_packed_vectors(term(), term(), term()) :: :ok | {:error, :invalid_vector}
@@ -530,11 +583,18 @@ defmodule Vettore.Distance do
   defp metric_code(:hamming), do: 7
   defp metric_code(:jaccard), do: 8
 
-  @spec native_metric(metric(), vector(), vector()) :: {:ok, float()} | {:error, term()}
-  defp native_metric(metric, left, right) do
-    with :ok <- validate_metric(metric),
+  @spec native_metric(metric(), vector(), vector(), keyword()) ::
+          {:ok, float()} | {:error, term()}
+  defp native_metric(metric, left, right, opts \\ []) do
+    with :ok <- validate_compute_options(opts),
+         :ok <- validate_metric(metric),
          :ok <- validate_pair(left, right) do
-      native_call(metric, left, right)
+      Compute.run(
+        opts,
+        length(left),
+        fn -> native_call(metric, left, right) end,
+        fn -> gpu_metric(left, right, metric) end
+      )
     end
   end
 
@@ -543,9 +603,6 @@ defmodule Vettore.Distance do
 
   defp native_call(:l2_squared, left, right),
     do: native_pair(left, right, &Nifs.l2_squared_distance/2)
-
-  defp native_call(:cosine, left, right),
-    do: native_pair(left, right, &Nifs.cosine_similarity/2)
 
   defp native_call(:inner_product, left, right),
     do: native_pair(left, right, &Nifs.inner_product/2)
@@ -565,17 +622,65 @@ defmodule Vettore.Distance do
   defp native_call(:jaccard, left, right),
     do: native_pair(left, right, &Nifs.jaccard_distance/2)
 
-  @spec normalized_cosine(vector(), vector(), term()) :: {:ok, float()} | {:error, term()}
-  defp normalized_cosine(left, right, :l2) do
-    native_pair(left, right, &Nifs.normalized_cosine_similarity/2)
+  @spec normalized_cosine(vector(), vector(), term(), keyword()) ::
+          {:ok, float()} | {:error, term()}
+  defp normalized_cosine(left, right, :l2, opts) do
+    Compute.run(
+      opts,
+      length(left),
+      fn -> native_pair(left, right, &Nifs.normalized_cosine_similarity/2) end,
+      fn -> gpu_metric(left, right, :cosine) end
+    )
   end
 
-  defp normalized_cosine(left, right, normalize_method) do
-    with {:ok, left} <- normalize(left, normalize_method),
-         {:ok, right} <- normalize(right, normalize_method) do
-      native_metric(:cosine, left, right)
+  defp normalized_cosine(left, right, :none, opts),
+    do: native_metric(:inner_product, left, right, opts)
+
+  defp normalized_cosine(left, right, normalize_method, opts) do
+    with {:ok, left} <- normalize(left, normalize_method, opts),
+         {:ok, right} <- normalize(right, normalize_method, opts) do
+      native_metric(:inner_product, left, right, opts)
     end
   end
+
+  @spec gpu_metric(vector(), vector(), metric()) :: {:ok, float()} | {:error, term()}
+  defp gpu_metric(left, right, metric) do
+    left
+    |> float_vector()
+    |> Nifs.gpu_metric(float_vector(right), metric_code(metric))
+    |> normalize_native_error()
+  end
+
+  @spec cpu_normalize(normalized_vector(), :none | :l2 | :zscore | :minmax) ::
+          {:ok, normalized_vector()} | {:error, term()}
+  defp cpu_normalize(vector, :none), do: {:ok, vector}
+
+  defp cpu_normalize(vector, :l2),
+    do: vector |> Nifs.normalize_l2() |> normalize_native_error()
+
+  defp cpu_normalize(vector, :zscore),
+    do: vector |> Nifs.normalize_zscore() |> normalize_native_error()
+
+  defp cpu_normalize(vector, :minmax),
+    do: vector |> Nifs.normalize_minmax() |> normalize_native_error()
+
+  @spec gpu_normalize(normalized_vector(), :none | :l2 | :zscore | :minmax) ::
+          {:ok, normalized_vector()} | {:error, term()}
+  defp gpu_normalize(vector, method) do
+    vector
+    |> Nifs.gpu_normalize(normalization_code(method))
+    |> normalize_native_error()
+  end
+
+  @spec normalization_code(:none | :l2 | :zscore | :minmax) :: 0..3
+  defp normalization_code(:none), do: 0
+  defp normalization_code(:l2), do: 1
+  defp normalization_code(:zscore), do: 2
+  defp normalization_code(:minmax), do: 3
+
+  @spec compute_options(keyword()) :: keyword()
+  defp compute_options(opts),
+    do: Keyword.take(opts, [:gpu, :gpu_fallback, :gpu_min_size])
 
   @spec native_pair(vector(), vector(), (normalized_vector(), normalized_vector() -> term())) ::
           term()

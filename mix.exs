@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.3.4"
+  @version "0.3.5"
 
   def project do
     [
@@ -32,6 +32,11 @@ defmodule Vettore.MixProject do
         ],
         groups_for_modules: [
           "Core API": [Vettore, Vettore.Collection, Vettore.Embedding, Vettore.Result],
+          "Vector interoperability": [
+            Vettore.Vector,
+            Vettore.Compute,
+            Vettore.Interop.Nx
+          ],
           Compatibility: [Vettore.DB],
           "Search and distance": [Vettore.Distance, Vettore.MultiVector],
           Indexes: [Vettore.Index, Vettore.Index.Flat, Vettore.Index.HNSW],

@@ -1,5 +1,8 @@
+mod dense;
 mod distances;
 mod flat;
+mod gpu;
+mod gpu_math;
 mod hnsw;
 mod multi_vector;
 mod muvera;

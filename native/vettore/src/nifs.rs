@@ -4,7 +4,7 @@
 //! delegate the work to focused modules such as `distances`, `hnsw`, or
 //! `muvera`.
 
-use rustler::{NifResult, ResourceArc};
+use rustler::{Binary, NifResult, ResourceArc};
 
 use crate::distances::Metric;
 use crate::flat::{FlatIndex, FlatResource};
@@ -120,6 +120,87 @@ fn normalize_zscore(vector: Vec<f32>) -> NifResult<Result<Vec<f32>, String>> {
 /// Min-max normalizes a vector in native code.
 fn normalize_minmax(vector: Vec<f32>) -> NifResult<Result<Vec<f32>, String>> {
     Ok(crate::distances::normalize_minmax(vector))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Decodes a little-endian f32 binary without allocating BEAM float terms first.
+fn decode_f32_binary(binary: Binary<'_>) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::dense::decode_f32_le(binary.as_slice()))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Computes a named metric directly over little-endian f32 binaries.
+fn metric_f32_binary(
+    left: Binary<'_>,
+    right: Binary<'_>,
+    metric_code: u8,
+) -> NifResult<Result<f32, String>> {
+    Ok(Metric::from_code(metric_code)
+        .and_then(|metric| crate::dense::metric_f32_le(left.as_slice(), right.as_slice(), metric)))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Normalizes one little-endian f32 binary into native f32 coordinates.
+fn normalize_f32_binary(
+    binary: Binary<'_>,
+    normalization_code: u8,
+) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::dense::normalize_f32_le(
+        binary.as_slice(),
+        normalization_code,
+    ))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+/// Mean-pools selected rows from a row-major little-endian f32 matrix.
+fn mean_pool_f32(
+    matrix: Binary<'_>,
+    dimensions: usize,
+    row_indices: Vec<usize>,
+) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::dense::mean_pool_f32_le(
+        matrix.as_slice(),
+        dimensions,
+        &row_indices,
+    ))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Reports whether a non-software GPU adapter can be initialized through wgpu.
+fn gpu_detected() -> bool {
+    crate::gpu::detected()
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Returns stable diagnostic information for the selected GPU adapter.
+fn gpu_info() -> Result<(String, String, String), String> {
+    crate::gpu::info().map(|info| (info.name, info.backend, info.device_type))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Computes a named dense-vector metric with the native wgpu pipeline.
+fn gpu_metric(left: Vec<f32>, right: Vec<f32>, metric_code: u8) -> NifResult<Result<f32, String>> {
+    Ok(Metric::from_code(metric_code).and_then(|metric| crate::gpu::metric(&left, &right, metric)))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Normalizes one dense vector with the native wgpu pipeline.
+fn gpu_normalize(vector: Vec<f32>, normalization_code: u8) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::gpu::normalize(vector, normalization_code))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Mean-pools selected matrix rows with the native wgpu pipeline.
+fn gpu_mean_pool_f32(
+    matrix: Binary<'_>,
+    dimensions: usize,
+    row_indices: Vec<usize>,
+) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::gpu::mean_pool_f32_le(
+        matrix.as_slice(),
+        dimensions,
+        &row_indices,
+    ))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]

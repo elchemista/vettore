@@ -135,7 +135,7 @@ jobs:
           cargo check --locked --no-default-features --features nif_version_2_16
 
       - name: Enforce Rust algorithm coverage
-        run: cargo llvm-cov --all-features --ignore-filename-regex 'src/nifs\.rs' --summary-only --fail-under-lines 98
+        run: cargo llvm-cov --all-features --ignore-filename-regex 'src/(nifs|gpu)\.rs' --summary-only --fail-under-lines 98
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings

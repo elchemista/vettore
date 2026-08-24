@@ -7,8 +7,8 @@ database state or collection records.
 
 Current native surface:
 
-- distance and similarity kernels
-- vector normalization
+- portable SIMD and optional wgpu distance/similarity kernels
+- CPU/GPU vector normalization and row-selective mean pooling
 - sign-bit compression
 - native HNSW index resource
 - MUVERA/FDE query encoding
