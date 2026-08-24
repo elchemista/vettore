@@ -5,6 +5,18 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Added `Vettore.Vector` as a validated interchange layer for numeric lists,
+  little-endian f32 binaries, dimensioned vector wrappers, and host-provided Nx
+  tensors.
+- Added native metrics, normalization, and row-selective mean pooling directly
+  over little-endian f32 binaries, including Model2Vec-style token-table
+  pooling without materializing the full matrix on the BEAM.
+- Added the zero-dependency `Vettore.Interop.Nx` runtime adapter. Vettore does
+  not declare Nx as a dependency; applications that already use Nx can opt
+  into tensor conversion without changing Vettore's core runtime.
+
 ## [0.3.4] - 2026-08-23
 
 ### Fixed

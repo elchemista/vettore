@@ -67,6 +67,27 @@ defmodule Vettore.Nifs do
   def normalize_minmax(_vector), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  @spec decode_f32_binary(binary()) :: {:ok, [float()]} | {:error, String.t()}
+  def decode_f32_binary(_binary), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec metric_f32_binary(binary(), binary(), non_neg_integer()) ::
+          {:ok, float()} | {:error, String.t()}
+  def metric_f32_binary(_left, _right, _metric_code), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec normalize_f32_binary(binary(), non_neg_integer()) ::
+          {:ok, [float()]} | {:error, String.t()}
+  def normalize_f32_binary(_binary, _normalization_code),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec mean_pool_f32(binary(), pos_integer(), [non_neg_integer()]) ::
+          {:ok, [float()]} | {:error, String.t()}
+  def mean_pool_f32(_matrix, _dimensions, _row_indices),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   @spec compress_sign_bits([float()]) :: [non_neg_integer()]
   def compress_sign_bits(_vector), do: :erlang.nif_error(:nif_not_loaded)
 

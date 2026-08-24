@@ -1,3 +1,4 @@
+mod dense;
 mod distances;
 mod flat;
 mod hnsw;

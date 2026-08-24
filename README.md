@@ -38,6 +38,8 @@ Elixir systems, with Rust kept as acceleration rather than ownership.
 - ColBERT-style late interaction over multi-vector records
 - MUVERA-style fixed-dimensional encodings
 - named distance, similarity, normalization, and MMR helpers
+- representation-independent vector conversion and mean pooling for lists,
+  little-endian f32 binaries, and host-provided Nx tensors
 - a top-level `Vettore.*` API, plus compatibility wrappers for the older
   `Vettore.new/0` database-style API
 
@@ -507,6 +509,61 @@ Vettore.Distance.cosine([1.0, 0.0], [0.0, 1.0])
 Vettore.Distance.inner_product([1.0, 2.0], [3.0, 4.0])
 # {:ok, 11.0}
 ```
+
+## Vector Formats And Nx Interchange
+
+`Vettore.Vector` is the format boundary for dense vectors. It accepts numeric
+lists and little-endian f32 binaries directly. Conversion, normalization,
+metrics, and mean pooling return tagged results and validate that every
+coordinate is finite and representable as f32.
+
+```elixir
+{:ok, stored} = Vettore.Vector.to_f32_binary([3.0, 4.0])
+{:ok, 2} = Vettore.Vector.dimensions(stored)
+
+{:ok, normalized} =
+  Vettore.Vector.normalize(stored, :l2, as: :list)
+
+{:ok, similarity} =
+  Vettore.Vector.cosine(stored, [6.0, 8.0])
+```
+
+For boundaries that should carry their format explicitly, `new/2` builds a
+`%Vettore.Vector{data, dimensions, representation}` wrapper:
+
+```elixir
+{:ok, vector} = Vettore.Vector.new([1, 2, 3], as: :f32_binary)
+vector.representation
+# :f32_binary
+```
+
+Model tables can be pooled without decoding the full matrix into Elixir
+floats. The matrix is row-major little-endian f32 and repeated row ids are
+counted repeatedly, as expected for token sequences:
+
+```elixir
+{:ok, embedding_binary} =
+  Vettore.Vector.mean_pool_f32(model_matrix, dimensions, token_ids)
+
+{:ok, embedding_list} =
+  Vettore.Vector.mean_pool_f32(model_matrix, dimensions, token_ids, as: :list)
+```
+
+Vettore has **no Nx dependency**. `Vettore.Interop.Nx` detects Nx at runtime
+only when the host application already provides it. This keeps normal vector
+work independent while still allowing explicit interchange:
+
+```elixir
+# In the host application, when Nx interop is wanted:
+# {:nx, "~> 0.11"}
+
+{:ok, tensor} = Vettore.Vector.to_nx(stored)
+{:ok, binary} = Vettore.Vector.to_f32_binary(tensor)
+```
+
+Without Nx in the host application, tensor conversions return
+`{:error, :nx_not_available}`; every list and f32-binary operation remains
+available.
 
 ## Normalization
 
