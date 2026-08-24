@@ -27,11 +27,11 @@ defmodule Vettore.Vector do
       {:ok, [1.0, 2.0, 3.0]}
   """
 
-  alias Vettore.{Distance, Nifs}
+  alias Vettore.{Compute, Distance, Nifs}
   alias Vettore.Interop.Nx, as: NxInterop
 
   @enforce_keys [:data, :dimensions, :representation]
-  defstruct [:data, :dimensions, :representation]
+  defstruct [:data, :dimensions, :representation, :shape]
 
   @type representation :: :list | :f32_binary | :nx
   @type target_representation :: representation() | :same
@@ -39,7 +39,8 @@ defmodule Vettore.Vector do
   @type t :: %__MODULE__{
           data: raw_vector(),
           dimensions: non_neg_integer(),
-          representation: representation()
+          representation: representation(),
+          shape: tuple() | nil
         }
   @type vector :: raw_vector() | t()
   @type normalization :: :none | :l2 | :zscore | :minmax
@@ -75,12 +76,21 @@ defmodule Vettore.Vector do
   def new(vector, opts \\ [])
 
   def new(vector, opts) when is_list(opts) do
-    with :ok <- validate_options(opts, [:as]),
+    with :ok <- validate_options(opts, [:as, :shape]),
          target <- Keyword.get(opts, :as, :same),
          {:ok, target} <- resolve_explicit_target(target, vector),
-         {:ok, data} <- convert(vector, target),
-         {:ok, dimensions} <- dimensions(data) do
-      {:ok, %__MODULE__{data: data, dimensions: dimensions, representation: target}}
+         {:ok, dimensions} <- dimensions(vector),
+         {:ok, source_shape} <- shape(vector),
+         selected_shape = Keyword.get(opts, :shape, source_shape),
+         :ok <- validate_shape(selected_shape, dimensions),
+         {:ok, data} <- convert_with_shape(vector, target, selected_shape) do
+      {:ok,
+       %__MODULE__{
+         data: data,
+         dimensions: dimensions,
+         representation: target,
+         shape: selected_shape
+       }}
     end
   end
 
@@ -125,7 +135,7 @@ defmodule Vettore.Vector do
   @spec shape(vector()) :: {:ok, tuple()} | {:error, term()}
   def shape(%__MODULE__{} = vector) do
     with :ok <- validate_wrapper(vector) do
-      shape(vector.data)
+      if is_tuple(vector.shape), do: {:ok, vector.shape}, else: shape(vector.data)
     end
   end
 
@@ -164,11 +174,45 @@ defmodule Vettore.Vector do
     end
   end
 
-  @doc "Converts a vector to an Nx tensor when Nx is installed by the host application."
-  @spec to_nx(vector()) :: {:ok, term()} | {:error, term()}
-  def to_nx(vector) do
-    with {:ok, vector} <- to_list(vector), do: NxInterop.from_list(vector)
+  @doc "Converts a vector to an Nx tensor, preserving shape and accepting a host backend."
+  @spec to_nx(vector(), keyword()) :: {:ok, term()} | {:error, term()}
+  def to_nx(vector, opts \\ [])
+
+  def to_nx(vector, opts) when is_list(opts) do
+    with :ok <- validate_options(opts, [:backend, :shape]),
+         {:ok, values} <- to_list(vector),
+         {:ok, source_shape} <- shape(vector),
+         selected_shape = Keyword.get(opts, :shape, source_shape),
+         :ok <- validate_shape(selected_shape, length(values)) do
+      NxInterop.from_list(
+        values,
+        opts
+        |> Keyword.put(:shape, selected_shape)
+      )
+    end
   end
+
+  def to_nx(_vector, _opts), do: {:error, :invalid_options}
+
+  @doc "Converts an Nx tensor into a validated Vettore representation."
+  @spec from_nx(term(), :list | :f32_binary) :: {:ok, raw_vector()} | {:error, term()}
+  def from_nx(tensor, target \\ :f32_binary)
+
+  def from_nx(tensor, target) when target in [:list, :f32_binary] do
+    if NxInterop.tensor?(tensor), do: convert(tensor, target), else: {:error, :invalid_vector}
+  end
+
+  def from_nx(_tensor, target), do: {:error, {:unknown_representation, target}}
+
+  @doc "Returns a wrapper with new shape metadata, without changing coordinate order."
+  @spec reshape(vector(), tuple(), keyword()) :: {:ok, t()} | {:error, term()}
+  def reshape(vector, shape, opts \\ [])
+
+  def reshape(vector, shape, opts) when is_list(opts) do
+    new(vector, Keyword.put(opts, :shape, shape))
+  end
+
+  def reshape(_vector, _shape, _opts), do: {:error, :invalid_options}
 
   @doc "Converts between list, f32-binary, and optional Nx representations."
   @spec convert(vector(), target_representation()) :: {:ok, raw_vector()} | {:error, term()}
@@ -181,14 +225,90 @@ defmodule Vettore.Vector do
   def convert(vector, :nx), do: to_nx(vector)
   def convert(_vector, target), do: {:error, {:unknown_representation, target}}
 
+  @doc "Returns the row/column shape of a row-major little-endian f32 matrix."
+  @spec matrix_shape_f32(binary(), pos_integer()) ::
+          {:ok, {non_neg_integer(), pos_integer()}} | {:error, term()}
+  def matrix_shape_f32(matrix, dimensions)
+      when is_binary(matrix) and is_integer(dimensions) do
+    with :ok <- validate_matrix_dimensions(dimensions),
+         row_bytes = dimensions * 4,
+         true <- rem(byte_size(matrix), row_bytes) == 0 do
+      {:ok, {div(byte_size(matrix), row_bytes), dimensions}}
+    else
+      false -> {:error, :matrix_shape_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def matrix_shape_f32(_matrix, _dimensions), do: {:error, :invalid_arguments}
+
+  @doc "Validates a complete f32 matrix and returns its shape."
+  @spec validate_matrix_f32(binary(), pos_integer()) ::
+          {:ok, {non_neg_integer(), pos_integer()}} | {:error, term()}
+  def validate_matrix_f32(matrix, dimensions) do
+    with {:ok, shape} <- matrix_shape_f32(matrix, dimensions),
+         {:ok, _values} <- decode_binary(matrix) do
+      {:ok, shape}
+    end
+  end
+
+  @doc "Returns whether a complete row-major f32 matrix is structurally valid and finite."
+  @spec valid_matrix_f32?(term(), term()) :: boolean()
+  def valid_matrix_f32?(matrix, dimensions),
+    do: match?({:ok, _shape}, validate_matrix_f32(matrix, dimensions))
+
+  @doc "Stacks equally sized vectors into a row-major matrix representation."
+  @spec stack([vector()], keyword()) :: {:ok, term()} | {:error, term()}
+  def stack(vectors, opts \\ [])
+
+  def stack(vectors, opts) when is_list(vectors) and is_list(opts) do
+    with :ok <- validate_options(opts, [:as, :backend]),
+         {:ok, rows, dimensions} <- validate_rows(vectors) do
+      render_matrix(rows, dimensions, opts)
+    end
+  end
+
+  def stack(_vectors, _opts), do: {:error, :invalid_options}
+
+  @doc "Selects rows from a row-major f32 matrix without mean pooling them."
+  @spec take_rows_f32(binary(), pos_integer(), [non_neg_integer()], keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def take_rows_f32(matrix, dimensions, row_indices, opts \\ [])
+
+  def take_rows_f32(matrix, dimensions, row_indices, opts)
+      when is_binary(matrix) and is_integer(dimensions) and is_list(row_indices) and
+             is_list(opts) do
+    with :ok <- validate_options(opts, [:as, :backend]),
+         {:ok, {row_count, ^dimensions}} <- matrix_shape_f32(matrix, dimensions),
+         :ok <- validate_indices(row_indices),
+         true <- Enum.all?(row_indices, &(&1 < row_count)),
+         {:ok, rows} <- copy_matrix_rows(matrix, dimensions, row_indices) do
+      render_matrix(rows, dimensions, opts)
+    else
+      false -> {:error, :invalid_row_index}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def take_rows_f32(_matrix, _dimensions, _row_indices, _opts),
+    do: {:error, :invalid_arguments}
+
   @doc "Normalizes a vector while allowing the result representation to be selected."
   @spec normalize(vector(), normalization(), keyword()) :: {:ok, raw_vector()} | {:error, term()}
   def normalize(vector, method \\ :l2, opts \\ [])
 
   def normalize(vector, method, opts) when is_list(opts) do
-    with :ok <- validate_options(opts, [:as]),
+    with :ok <- validate_options(opts, [:as, :gpu, :gpu_fallback, :gpu_min_size]),
+         :ok <- validate_normalization(method),
          {:ok, target} <- output_target(vector, opts),
-         {:ok, normalized} <- normalize_to_list(vector, method) do
+         {:ok, dimensions} <- dimensions(vector),
+         {:ok, normalized} <-
+           Compute.run(
+             compute_options(opts),
+             dimensions,
+             fn -> normalize_to_list(vector, method) end,
+             fn -> gpu_normalize(vector, method) end
+           ) do
       convert(normalized, target)
     end
   end
@@ -196,8 +316,33 @@ defmodule Vettore.Vector do
   def normalize(_vector, _method, _opts), do: {:error, :invalid_options}
 
   @doc "Computes one named metric over any pair of supported representations."
-  @spec metric(vector(), vector(), metric()) :: {:ok, float()} | {:error, term()}
-  def metric(left, right, metric) when is_map_key(@metric_codes, metric) do
+  @spec metric(vector(), vector(), metric(), keyword()) :: {:ok, float()} | {:error, term()}
+  def metric(left, right, metric, opts \\ [])
+
+  def metric(left, right, metric, opts)
+      when is_map_key(@metric_codes, metric) and is_list(opts) do
+    with :ok <- validate_options(opts, [:gpu, :gpu_fallback, :gpu_min_size]),
+         {:ok, left_dimensions} <- dimensions(left),
+         {:ok, right_dimensions} <- dimensions(right),
+         true <- left_dimensions == right_dimensions do
+      Compute.run(
+        compute_options(opts),
+        left_dimensions,
+        fn -> cpu_metric(left, right, metric) end,
+        fn -> gpu_metric(left, right, metric) end
+      )
+    else
+      false -> {:error, :dimension_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def metric(_left, _right, _metric, opts) when not is_list(opts),
+    do: {:error, :invalid_options}
+
+  def metric(_left, _right, metric, _opts), do: {:error, {:unknown_metric, metric}}
+
+  defp cpu_metric(left, right, metric) do
     case {unwrap(left), unwrap(right)} do
       {{:ok, left}, {:ok, right}} when is_binary(left) and is_binary(right) ->
         binary_metric(left, right, metric)
@@ -205,56 +350,103 @@ defmodule Vettore.Vector do
       _other ->
         with {:ok, left} <- to_list(left),
              {:ok, right} <- to_list(right) do
-          apply(Distance, metric, [left, right])
+          apply(Distance, metric, [left, right, [gpu: false]])
         end
     end
   end
-
-  def metric(_left, _right, metric), do: {:error, {:unknown_metric, metric}}
 
   @doc "L2/Euclidean distance over any supported representation."
   @spec l2(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def l2(left, right), do: metric(left, right, :l2)
 
+  @doc "L2/Euclidean distance with per-call compute options."
+  @spec l2(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def l2(left, right, opts), do: metric(left, right, :l2, opts)
+
   @doc "Squared L2 distance over any supported representation."
   @spec l2_squared(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def l2_squared(left, right), do: metric(left, right, :l2_squared)
+
+  @doc "Squared L2 distance with per-call compute options."
+  @spec l2_squared(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def l2_squared(left, right, opts), do: metric(left, right, :l2_squared, opts)
 
   @doc "Inner/dot product over any supported representation."
   @spec inner_product(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def inner_product(left, right), do: metric(left, right, :inner_product)
 
+  @doc "Inner/dot product with per-call compute options."
+  @spec inner_product(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def inner_product(left, right, opts), do: metric(left, right, :inner_product, opts)
+
   @doc "Compatibility alias for `inner_product/2`."
   @spec dot_product(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def dot_product(left, right), do: inner_product(left, right)
+
+  @doc "Compatibility alias for `inner_product/3`."
+  @spec dot_product(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def dot_product(left, right, opts), do: inner_product(left, right, opts)
 
   @doc "Negative inner product over any supported representation."
   @spec negative_inner_product(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def negative_inner_product(left, right), do: metric(left, right, :negative_inner_product)
 
+  @doc "Negative inner product with per-call compute options."
+  @spec negative_inner_product(vector(), vector(), keyword()) ::
+          {:ok, float()} | {:error, term()}
+  def negative_inner_product(left, right, opts),
+    do: metric(left, right, :negative_inner_product, opts)
+
   @doc "Manhattan/L1 distance over any supported representation."
   @spec manhattan(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def manhattan(left, right), do: metric(left, right, :manhattan)
+
+  @doc "Manhattan/L1 distance with per-call compute options."
+  @spec manhattan(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def manhattan(left, right, opts), do: metric(left, right, :manhattan, opts)
 
   @doc "Chebyshev/L-infinity distance over any supported representation."
   @spec chebyshev(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def chebyshev(left, right), do: metric(left, right, :chebyshev)
 
+  @doc "Chebyshev/L-infinity distance with per-call compute options."
+  @spec chebyshev(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def chebyshev(left, right, opts), do: metric(left, right, :chebyshev, opts)
+
   @doc "Hamming distance using Vettore's non-zero coordinate semantics."
   @spec hamming(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def hamming(left, right), do: metric(left, right, :hamming)
 
+  @doc "Hamming distance with per-call compute options."
+  @spec hamming(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def hamming(left, right, opts), do: metric(left, right, :hamming, opts)
+
   @doc "Jaccard distance using Vettore's non-zero coordinate semantics."
   @spec jaccard(vector(), vector()) :: {:ok, float()} | {:error, term()}
   def jaccard(left, right), do: metric(left, right, :jaccard)
+
+  @doc "Jaccard distance with per-call compute options."
+  @spec jaccard(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
+  def jaccard(left, right, opts), do: metric(left, right, :jaccard, opts)
 
   @doc "Cosine similarity, with the same normalization options as `Vettore.Distance.cosine/3`."
   @spec cosine(vector(), vector(), keyword()) :: {:ok, float()} | {:error, term()}
   def cosine(left, right, opts \\ [])
 
   def cosine(left, right, opts) when is_list(opts) do
-    with :ok <- validate_options(opts, [:normalize]) do
-      cosine_with_normalization(left, right, Keyword.get(opts, :normalize, :l2))
+    with :ok <-
+           validate_options(opts, [
+             :normalize,
+             :gpu,
+             :gpu_fallback,
+             :gpu_min_size
+           ]) do
+      cosine_with_normalization(
+        left,
+        right,
+        Keyword.get(opts, :normalize, :l2),
+        compute_options(opts)
+      )
     end
   end
 
@@ -265,13 +457,19 @@ defmodule Vettore.Vector do
   def mean_pool(vectors, opts \\ [])
 
   def mean_pool(vectors, opts) when is_list(vectors) and is_list(opts) do
-    with :ok <- validate_options(opts, [:as]),
+    with :ok <- validate_options(opts, [:as, :gpu, :gpu_fallback, :gpu_min_size]),
          {:ok, rows, dimensions} <- validate_rows(vectors),
          matrix = rows |> List.flatten() |> encode_binary(),
          target = Keyword.get(opts, :as, :list),
          {:ok, target} <- resolve_explicit_target(target, rows),
          {:ok, pooled} <-
-           native_mean_pool(matrix, dimensions, Enum.to_list(0..(length(rows) - 1))) do
+           compute_mean_pool(
+             matrix,
+             dimensions,
+             Enum.to_list(0..(length(rows) - 1)),
+             dimensions * length(rows),
+             opts
+           ) do
       convert(pooled, target)
     end
   end
@@ -292,12 +490,20 @@ defmodule Vettore.Vector do
   def mean_pool_f32(matrix, dimensions, row_indices, opts)
       when is_binary(matrix) and is_integer(dimensions) and is_list(row_indices) and
              is_list(opts) do
-    with :ok <- validate_options(opts, [:as]),
+    with :ok <- validate_options(opts, [:as, :gpu, :gpu_fallback, :gpu_min_size]),
          :ok <- validate_matrix_dimensions(dimensions),
          :ok <- validate_indices(row_indices),
+         :ok <- validate_non_empty_selection(row_indices),
          target = Keyword.get(opts, :as, :f32_binary),
          {:ok, target} <- resolve_explicit_target(target, matrix),
-         {:ok, pooled} <- native_mean_pool(matrix, dimensions, row_indices) do
+         {:ok, pooled} <-
+           compute_mean_pool(
+             matrix,
+             dimensions,
+             row_indices,
+             dimensions * length(row_indices),
+             opts
+           ) do
       convert(pooled, target)
     end
   end
@@ -309,12 +515,27 @@ defmodule Vettore.Vector do
     with true <- vector.representation in [:list, :f32_binary, :nx],
          true <- representation(vector.data) == vector.representation,
          {:ok, dimensions} <- dimensions(vector.data),
-         true <- dimensions == vector.dimensions do
+         true <- dimensions == vector.dimensions,
+         :ok <- validate_optional_shape(vector.shape, dimensions),
+         :ok <- validate_nx_wrapper_shape(vector) do
       :ok
     else
       _error -> {:error, :invalid_vector}
     end
   end
+
+  defp validate_optional_shape(nil, _dimensions), do: :ok
+  defp validate_optional_shape(shape, dimensions), do: validate_shape(shape, dimensions)
+
+  defp validate_nx_wrapper_shape(%__MODULE__{representation: :nx, shape: shape, data: data})
+       when is_tuple(shape) do
+    case NxInterop.shape(data) do
+      {:ok, ^shape} -> :ok
+      _other -> {:error, :invalid_vector}
+    end
+  end
+
+  defp validate_nx_wrapper_shape(%__MODULE__{}), do: :ok
 
   defp validate_list(vector) do
     if Enum.all?(vector, &valid_coordinate?/1) do
@@ -353,23 +574,28 @@ defmodule Vettore.Vector do
         normalize_binary(binary, method)
 
       _other ->
-        with {:ok, vector} <- to_list(vector), do: Distance.normalize(vector, method)
+        with {:ok, vector} <- to_list(vector),
+             do: Distance.normalize(vector, method, gpu: false)
     end
   end
 
-  defp normalize_to_list(_vector, method), do: {:error, {:unknown_normalization, method}}
+  defp cosine_with_normalization(left, right, :l2, opts),
+    do: metric(left, right, :cosine, opts)
 
-  defp cosine_with_normalization(left, right, :l2), do: metric(left, right, :cosine)
-  defp cosine_with_normalization(left, right, :none), do: metric(left, right, :inner_product)
+  defp cosine_with_normalization(left, right, :none, opts),
+    do: metric(left, right, :inner_product, opts)
 
-  defp cosine_with_normalization(left, right, method) when method in [:zscore, :minmax] do
-    with {:ok, left} <- normalize(left, method, as: :list),
-         {:ok, right} <- normalize(right, method, as: :list) do
-      Distance.cosine(left, right, normalize: :none)
+  defp cosine_with_normalization(left, right, method, opts)
+       when method in [:zscore, :minmax] do
+    normalization_opts = Keyword.put(opts, :as, :list)
+
+    with {:ok, left} <- normalize(left, method, normalization_opts),
+         {:ok, right} <- normalize(right, method, normalization_opts) do
+      metric(left, right, :inner_product, opts)
     end
   end
 
-  defp cosine_with_normalization(_left, _right, method),
+  defp cosine_with_normalization(_left, _right, method, _opts),
     do: {:error, {:unknown_normalization, method}}
 
   defp validate_rows([]), do: {:error, :empty_selection}
@@ -385,6 +611,54 @@ defmodule Vettore.Vector do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp render_matrix(rows, dimensions, opts) do
+    target = Keyword.get(opts, :as, :f32_binary)
+    backend = Keyword.fetch(opts, :backend)
+
+    cond do
+      backend != :error and target != :nx ->
+        {:error, :invalid_options}
+
+      target == :list ->
+        {:ok, rows}
+
+      target == :f32_binary ->
+        {:ok, rows |> List.flatten() |> encode_binary()}
+
+      target == :nx ->
+        nx_opts =
+          [shape: {length(rows), dimensions}]
+          |> maybe_put_option(:backend, backend)
+
+        rows
+        |> List.flatten()
+        |> NxInterop.from_list(nx_opts)
+
+      true ->
+        {:error, {:unknown_representation, target}}
+    end
+  end
+
+  defp copy_matrix_rows(matrix, dimensions, row_indices) do
+    row_bytes = dimensions * 4
+
+    Enum.reduce_while(row_indices, {:ok, []}, fn row_index, {:ok, rows} ->
+      row = binary_part(matrix, row_index * row_bytes, row_bytes)
+
+      case decode_binary(row) do
+        {:ok, values} -> {:cont, {:ok, [values | rows]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, rows} -> {:ok, Enum.reverse(rows)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_put_option(opts, key, {:ok, value}), do: Keyword.put(opts, key, value)
+  defp maybe_put_option(opts, _key, :error), do: opts
 
   defp collect_rows(vectors) do
     Enum.reduce_while(vectors, {:ok, []}, fn vector, {:ok, rows} ->
@@ -410,6 +684,36 @@ defmodule Vettore.Vector do
     )
   end
 
+  defp compute_mean_pool(matrix, dimensions, row_indices, workload_size, opts) do
+    Compute.run(
+      compute_options(opts),
+      workload_size,
+      fn -> native_mean_pool(matrix, dimensions, row_indices) end,
+      fn ->
+        matrix
+        |> Nifs.gpu_mean_pool_f32(dimensions, row_indices)
+        |> normalize_native_error()
+      end
+    )
+  end
+
+  defp gpu_metric(left, right, metric) do
+    with {:ok, left} <- to_list(left),
+         {:ok, right} <- to_list(right) do
+      left
+      |> Nifs.gpu_metric(right, Map.fetch!(@metric_codes, metric))
+      |> normalize_native_error()
+    end
+  end
+
+  defp gpu_normalize(vector, method) do
+    with {:ok, vector} <- to_list(vector) do
+      vector
+      |> Nifs.gpu_normalize(Map.fetch!(@normalization_codes, method))
+      |> normalize_native_error()
+    end
+  end
+
   defp binary_metric(left, right, metric) do
     run_native(
       fn ->
@@ -424,7 +728,7 @@ defmodule Vettore.Vector do
   defp binary_metric_fallback(left, right, metric) do
     with {:ok, left} <- decode_binary_fallback(left),
          {:ok, right} <- decode_binary_fallback(right) do
-      apply(Distance, metric, [left, right])
+      apply(Distance, metric, [left, right, [gpu: false]])
     end
   end
 
@@ -440,7 +744,8 @@ defmodule Vettore.Vector do
   end
 
   defp normalize_binary_fallback(binary, method) do
-    with {:ok, vector} <- decode_binary_fallback(binary), do: Distance.normalize(vector, method)
+    with {:ok, vector} <- decode_binary_fallback(binary),
+         do: Distance.normalize(vector, method, gpu: false)
   end
 
   defp decode_binary_fallback(binary) when rem(byte_size(binary), 4) == 0 do
@@ -463,16 +768,9 @@ defmodule Vettore.Vector do
   defp mean_pool_fallback(matrix, dimensions, row_indices) do
     row_bytes = dimensions * 4
 
-    cond do
-      row_indices == [] ->
-        {:error, :empty_selection}
-
-      row_bytes <= 0 or matrix == <<>> or rem(byte_size(matrix), row_bytes) != 0 ->
-        {:error, :matrix_shape_mismatch}
-
-      true ->
-        mean_pool_valid_matrix(matrix, row_bytes, row_indices)
-    end
+    if row_bytes <= 0 or matrix == <<>> or rem(byte_size(matrix), row_bytes) != 0,
+      do: {:error, :matrix_shape_mismatch},
+      else: mean_pool_valid_matrix(matrix, row_bytes, row_indices)
   end
 
   defp mean_pool_valid_matrix(matrix, row_bytes, row_indices) do
@@ -522,11 +820,16 @@ defmodule Vettore.Vector do
     end
   end
 
+  defp validate_non_empty_selection([]), do: {:error, :empty_selection}
+  defp validate_non_empty_selection(_row_indices), do: :ok
+
   defp native_f32_enabled? do
     Application.get_env(:vettore, :native_f32, true)
   end
 
-  defp run_native(native, fallback) do
+  @doc false
+  @spec run_native((-> term()), (-> term())) :: term()
+  def run_native(native, fallback) do
     if native_f32_enabled?() do
       try do
         native.()
@@ -546,11 +849,31 @@ defmodule Vettore.Vector do
 
   defp validate_matrix_dimensions(_dimensions), do: {:error, :invalid_dimensions}
 
+  defp validate_shape(shape, dimensions) when is_tuple(shape) do
+    entries = Tuple.to_list(shape)
+
+    if Enum.all?(entries, &(is_integer(&1) and &1 >= 0)) and shape_size(entries) == dimensions,
+      do: :ok,
+      else: {:error, :invalid_shape}
+  end
+
+  defp validate_shape(_shape, _dimensions), do: {:error, :invalid_shape}
+
+  defp shape_size([]), do: 1
+  defp shape_size(entries), do: Enum.product(entries)
+
+  defp validate_normalization(method) when is_map_key(@normalization_codes, method), do: :ok
+
+  defp validate_normalization(method), do: {:error, {:unknown_normalization, method}}
+
   defp output_target(vector, opts) do
     opts
     |> Keyword.get(:as, :same)
     |> resolve_explicit_target(vector)
   end
+
+  defp convert_with_shape(vector, :nx, shape), do: to_nx(vector, shape: shape)
+  defp convert_with_shape(vector, target, _shape), do: convert(vector, target)
 
   defp resolve_explicit_target(:same, vector) do
     case default_representation(vector) do
@@ -587,6 +910,9 @@ defmodule Vettore.Vector do
       {:error, :invalid_options}
     end
   end
+
+  defp compute_options(opts),
+    do: Keyword.take(opts, [:gpu, :gpu_fallback, :gpu_min_size])
 
   defp normalize_native_error({:error, reason}) when is_binary(reason) do
     {:error, Map.get(@native_errors, reason, reason)}

@@ -5,6 +5,8 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-24
+
 ### Added
 
 - Added `Vettore.Vector` as a validated interchange layer for numeric lists,
@@ -16,6 +18,28 @@ Semantic Versioning.
 - Added the zero-dependency `Vettore.Interop.Nx` runtime adapter. Vettore does
   not declare Nx as a dependency; applications that already use Nx can opt
   into tensor conversion without changing Vettore's core runtime.
+- Added native wgpu compute kernels for every dense metric, L2/z-score/min-max
+  normalization, and row-selective mean pooling. CPU SIMD remains the default;
+  `gpu: true` and `gpu: :auto` can be configured globally or per call with an
+  explicit CPU/error fallback policy.
+- Added `Vettore.gpu_detected?/0`, `Vettore.gpu_info/0`, and
+  `Vettore.Compute.info/0` for hardware detection and runtime diagnostics.
+- Added shape-preserving wrappers and Nx conversion, backend transfer/type
+  helpers, plus matrix `stack/2`, `take_rows_f32/4`, shape, and full-validation
+  APIs.
+
+### Changed
+
+- Extended every `Vettore.Distance` dense metric and normalization helper with
+  per-call compute options while preserving existing arities.
+- Nx remains runtime-only and absent from both Mix and Cargo dependencies; GPU
+  execution is implemented entirely in Rust and does not use Nx.
+
+### Performance
+
+- GPU devices and compiled pipelines are initialized lazily and reused. CPU
+  calls skip GPU detection entirely, and GPU mean pooling uploads only selected
+  rows rather than the complete model matrix.
 
 ## [0.3.4] - 2026-08-23
 

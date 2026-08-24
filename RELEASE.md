@@ -30,7 +30,7 @@ cargo fmt --manifest-path native/vettore/Cargo.toml --all --check
 cargo test --manifest-path native/vettore/Cargo.toml --locked
 cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-features --features nif_version_2_15
 cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-features --features nif_version_2_16
-cargo llvm-cov --manifest-path native/vettore/Cargo.toml --all-features --ignore-filename-regex 'src/nifs\.rs' --summary-only --fail-under-lines 98
+cargo llvm-cov --manifest-path native/vettore/Cargo.toml --all-features --ignore-filename-regex 'src/(nifs|gpu)\.rs' --summary-only --fail-under-lines 98
 cargo clippy --manifest-path native/vettore/Cargo.toml --all-targets --all-features --locked -- -D warnings
 VETTORE_BUILD=1 mix docs
 VETTORE_BUILD=1 mix hex.build
@@ -38,10 +38,12 @@ VETTORE_BUILD=1 mix hex.build
 
 Confirm CI is green and `git diff --check` has no output.
 
-The Rust coverage gate excludes only `src/nifs.rs`: Rustler macro-generated NIF
-entry functions are outside Cargo unit-test instrumentation. Those public
-boundaries are exercised through the BEAM by the Elixir integration suite;
-algorithm modules remain subject to the 98% Rust line threshold.
+The Rust coverage gate excludes the external runtime boundaries in
+`src/nifs.rs` and `src/gpu.rs`: Rustler entry functions and hardware/driver I/O
+contain environment-specific failure branches. Those boundaries are exercised
+through the BEAM and an available hardware or software wgpu adapter. Pure GPU
+validation/reduction logic lives in `src/gpu_math.rs` and remains subject to the
+98% Rust line threshold with every other algorithm module.
 
 The benchmark smoke run must preflight every search mode successfully and print
 overlap against the exact vector and multi-vector baselines before timing.
@@ -102,7 +104,7 @@ Inspect the Hex package listing and confirm it contains the new checksum,
 mix hex.publish
 ```
 
-In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3"}` without
+In a fresh temporary Mix project, depend on `{:vettore, "~> 0.4"}` without
 Rust installed. Create flat and HNSW collections, insert records with metadata,
 search them, snapshot/reload them, and call `Vettore.close/1`. Finally, mark the
 changelog entry with the release date.

@@ -1,6 +1,6 @@
 [package]
 name = "vettore"
-version = "0.3.4"
+version = "0.4.0"
 authors = []
 edition = "2021"
 rust-version = "1.91"
@@ -11,8 +11,14 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+bytemuck = "1.25.0"
+pollster = "1.0.0"
 rustler = { version = "0.38.0", default-features = false }
 wide = "1.5.0"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "gles", "vulkan", "wgsl"] }
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
 
 [features]
 default = ["nif_version_2_15"]

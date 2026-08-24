@@ -1,8 +1,8 @@
 # Vettore
 
 Vettore is a small vector toolkit for Elixir that keeps your data in ETS and
-uses Rust only where it helps: distance kernels, normalization, HNSW search, and
-MUVERA-style encodings.
+uses Rust only where it helps: SIMD/GPU distance kernels, normalization, HNSW
+search, and MUVERA-style encodings.
 
 Earlier versions leaned toward a Rust-owned in-memory database. That was fast,
 but it made the library feel less like an Elixir tool and more like an external
@@ -40,6 +40,7 @@ Elixir systems, with Rust kept as acceleration rather than ownership.
 - named distance, similarity, normalization, and MMR helpers
 - representation-independent vector conversion and mean pooling for lists,
   little-endian f32 binaries, and host-provided Nx tensors
+- optional native GPU execution through wgpu, with no Nx requirement
 - a top-level `Vettore.*` API, plus compatibility wrappers for the older
   `Vettore.new/0` database-style API
 
@@ -48,7 +49,7 @@ Elixir systems, with Rust kept as acceleration rather than ownership.
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.3.4"}
+    {:vettore, "~> 0.4.0"}
   ]
 end
 ```
@@ -529,12 +530,32 @@ coordinate is finite and representable as f32.
 ```
 
 For boundaries that should carry their format explicitly, `new/2` builds a
-`%Vettore.Vector{data, dimensions, representation}` wrapper:
+`%Vettore.Vector{data, dimensions, representation, shape}` wrapper:
 
 ```elixir
 {:ok, vector} = Vettore.Vector.new([1, 2, 3], as: :f32_binary)
 vector.representation
 # :f32_binary
+
+{:ok, matrix_vector} =
+  Vettore.Vector.new([1, 2, 3, 4], as: :f32_binary, shape: {2, 2})
+
+Vettore.Vector.shape(matrix_vector)
+# {:ok, {2, 2}}
+```
+
+Equally sized vectors can be stacked, validated, and sliced without losing
+their row/column shape:
+
+```elixir
+{:ok, matrix} =
+  Vettore.Vector.stack([[1.0, 2.0], [3.0, 4.0]])
+
+Vettore.Vector.validate_matrix_f32(matrix, 2)
+# {:ok, {2, 2}}
+
+Vettore.Vector.take_rows_f32(matrix, 2, [1, 0], as: :list)
+# {:ok, [[3.0, 4.0], [1.0, 2.0]]}
 ```
 
 Model tables can be pooled without decoding the full matrix into Elixir
@@ -557,13 +578,75 @@ work independent while still allowing explicit interchange:
 # In the host application, when Nx interop is wanted:
 # {:nx, "~> 0.11"}
 
-{:ok, tensor} = Vettore.Vector.to_nx(stored)
-{:ok, binary} = Vettore.Vector.to_f32_binary(tensor)
+{:ok, tensor} = Vettore.Vector.to_nx(matrix, shape: {2, 2})
+{:ok, binary} = Vettore.Vector.from_nx(tensor)
+
+# A backend is an opaque host value; Vettore does not depend on its module.
+{:ok, cuda_tensor} =
+  Vettore.Interop.Nx.transfer(tensor, {EXLA.Backend, client: :cuda})
 ```
 
 Without Nx in the host application, tensor conversions return
 `{:error, :nx_not_available}`; every list and f32-binary operation remains
 available.
+
+## Native CPU And GPU Execution
+
+Rust SIMD on CPU is the default and requires no configuration. Vettore can
+also execute `Vettore.Distance` metrics/normalization and `Vettore.Vector`
+metrics/normalization/mean-pooling through native wgpu compute shaders. This is
+independent of Nx and works through the platform graphics-compute API exposed
+by wgpu, such as Vulkan, Metal, or DirectX 12.
+
+Inspect the runtime before enabling it:
+
+```elixir
+Vettore.gpu_detected?()
+# true or false
+
+Vettore.gpu_info()
+# {:ok, %{name: "...", backend: "vulkan", device_type: "integrated_gpu"}}
+```
+
+Enable GPU execution globally:
+
+```elixir
+config :vettore,
+  gpu: :auto,
+  gpu_min_size: 1_000_000,
+  gpu_fallback: :cpu
+```
+
+The modes are explicit:
+
+- `gpu: false` always uses the native SIMD CPU path and does not probe a GPU.
+- `gpu: true` forces a GPU attempt for each supported primitive.
+- `gpu: :auto` uses the GPU only at or above `gpu_min_size`; smaller work stays
+  on CPU to avoid transfer and synchronization overhead.
+- `gpu_fallback: :cpu` falls back safely if initialization or execution fails.
+- `gpu_fallback: :error` instead returns `{:error, :gpu_not_available}` or the
+  device error.
+
+Every supported call can override the application configuration:
+
+```elixir
+Vettore.Distance.cosine(left, right,
+  gpu: true,
+  gpu_fallback: :error
+)
+
+Vettore.Vector.mean_pool_f32(model_matrix, dimensions, token_ids,
+  as: :list,
+  gpu: :auto,
+  gpu_min_size: 8_192
+)
+```
+
+The GPU runtime, device, and shader pipelines are initialized lazily and reused.
+Mean pooling uploads only selected rows. Single embeddings are commonly faster
+with SIMD CPU; GPU mode is intended for larger vectors or row selections. Flat
+and HNSW collection indexes keep their existing native CPU implementations;
+the GPU selector currently applies to the dense primitives listed above.
 
 ## Normalization
 

@@ -165,6 +165,44 @@ fn mean_pool_f32(
     ))
 }
 
+#[rustler::nif(schedule = "DirtyIo")]
+/// Reports whether a non-software GPU adapter can be initialized through wgpu.
+fn gpu_detected() -> bool {
+    crate::gpu::detected()
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Returns stable diagnostic information for the selected GPU adapter.
+fn gpu_info() -> Result<(String, String, String), String> {
+    crate::gpu::info().map(|info| (info.name, info.backend, info.device_type))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Computes a named dense-vector metric with the native wgpu pipeline.
+fn gpu_metric(left: Vec<f32>, right: Vec<f32>, metric_code: u8) -> NifResult<Result<f32, String>> {
+    Ok(Metric::from_code(metric_code).and_then(|metric| crate::gpu::metric(&left, &right, metric)))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Normalizes one dense vector with the native wgpu pipeline.
+fn gpu_normalize(vector: Vec<f32>, normalization_code: u8) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::gpu::normalize(vector, normalization_code))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// Mean-pools selected matrix rows with the native wgpu pipeline.
+fn gpu_mean_pool_f32(
+    matrix: Binary<'_>,
+    dimensions: usize,
+    row_indices: Vec<usize>,
+) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::gpu::mean_pool_f32_le(
+        matrix.as_slice(),
+        dimensions,
+        &row_indices,
+    ))
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 /// Compresses signs into integer bits for compatibility with old helpers.
 fn compress_sign_bits(vector: Vec<f32>) -> Vec<u64> {

@@ -70,6 +70,25 @@ defmodule VettoreVectorInteropTest do
       assert {:ok, {3}} = Vector.shape(vector)
     end
 
+    test "wrappers retain explicit multidimensional shape metadata" do
+      assert {:ok, vector} = Vector.new([1, 2, 3, 4], shape: {2, 2}, as: :f32_binary)
+      assert vector.shape == {2, 2}
+      assert {:ok, {2, 2}} = Vector.shape(vector)
+      assert {:ok, reshaped} = Vector.reshape(vector, {1, 4})
+      assert {:ok, {1, 4}} = Vector.shape(reshaped)
+      assert {:error, :invalid_shape} = Vector.reshape(vector, {3, 2})
+      assert {:error, :invalid_shape} = Vector.reshape(vector, :flat)
+      assert {:error, :invalid_options} = Vector.reshape(vector, {4}, :bad)
+      assert {:error, :invalid_shape} = Vector.new([1.0], shape: {-1})
+      assert {:error, :invalid_shape} = Vector.new([], shape: {})
+
+      refute Vector.valid?(%{vector | shape: {3, 3}})
+
+      legacy_wrapper = %{vector | shape: nil}
+      assert Vector.valid?(legacy_wrapper)
+      assert {:ok, {4}} = Vector.shape(legacy_wrapper)
+    end
+
     test "Nx conversion is explicitly unavailable without an Nx dependency" do
       refute NxInterop.available?()
       refute NxInterop.tensor?([1.0])
@@ -79,6 +98,9 @@ defmodule VettoreVectorInteropTest do
       assert NxInterop.tensor?(fake_tensor)
       assert {:error, :nx_not_available} = Vector.to_list(fake_tensor)
       assert {:error, :nx_not_available} = NxInterop.shape(fake_tensor)
+      assert {:error, :nx_not_available} = NxInterop.type(fake_tensor)
+      assert {:error, :nx_not_available} = NxInterop.transfer(fake_tensor, :host)
+      assert {:error, :invalid_options} = Vector.to_nx([1.0], :bad)
     end
   end
 
@@ -240,6 +262,72 @@ defmodule VettoreVectorInteropTest do
       assert {:error, :matrix_shape_mismatch} = Vector.mean_pool_f32(<<1, 2, 3>>, 2, [0])
       assert {:error, :invalid_options} = Vector.mean_pool_f32(matrix, 2, [0], extra: true)
       assert {:error, :invalid_arguments} = Vector.mean_pool_f32(:not_binary, 2, [0])
+    end
+  end
+
+  describe "matrix interchange" do
+    test "stack creates validated list and binary matrices" do
+      assert {:ok, matrix} = Vector.stack([[1, 2], f32_binary([3.0, 4.0])])
+      assert matrix == f32_binary([1.0, 2.0, 3.0, 4.0])
+      assert {:ok, {2, 2}} = Vector.matrix_shape_f32(matrix, 2)
+      assert {:ok, {2, 2}} = Vector.validate_matrix_f32(matrix, 2)
+      assert Vector.valid_matrix_f32?(matrix, 2)
+
+      assert {:ok, [[1.0, 2.0], [3.0, 4.0]]} =
+               Vector.stack([[1, 2], [3, 4]], as: :list)
+
+      assert {:error, :empty_selection} = Vector.stack([])
+      assert {:error, :invalid_options} = Vector.stack([[1.0]], backend: :gpu)
+      assert {:error, :invalid_options} = Vector.stack(:bad)
+
+      assert {:error, {:unknown_representation, :matrix}} =
+               Vector.stack([[1.0]], as: :matrix)
+    end
+
+    test "matrix validation separates structural shape from finite-value validation" do
+      nan_matrix = f32_bits(0x7FC00000)
+      assert {:ok, {1, 1}} = Vector.matrix_shape_f32(nan_matrix, 1)
+      assert {:error, :invalid_vector} = Vector.validate_matrix_f32(nan_matrix, 1)
+      refute Vector.valid_matrix_f32?(nan_matrix, 1)
+      assert {:ok, {0, 3}} = Vector.matrix_shape_f32(<<>>, 3)
+      assert {:error, :matrix_shape_mismatch} = Vector.matrix_shape_f32(<<1, 2, 3>>, 2)
+      assert {:error, :invalid_dimensions} = Vector.matrix_shape_f32(<<>>, 0)
+      assert {:error, :invalid_arguments} = Vector.matrix_shape_f32(:bad, 2)
+    end
+
+    test "take_rows_f32 preserves order, duplicates, and output shape" do
+      matrix = f32_binary([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+      assert {:ok, selected} = Vector.take_rows_f32(matrix, 2, [2, 0, 2])
+      assert selected == f32_binary([5.0, 6.0, 1.0, 2.0, 5.0, 6.0])
+
+      assert {:ok, [[3.0, 4.0], [1.0, 2.0]]} =
+               Vector.take_rows_f32(matrix, 2, [1, 0], as: :list)
+
+      assert {:ok, <<>>} = Vector.take_rows_f32(matrix, 2, [])
+      assert {:error, :invalid_row_index} = Vector.take_rows_f32(matrix, 2, [3])
+      assert {:error, :invalid_row_index} = Vector.take_rows_f32(matrix, 2, [-1])
+      assert {:error, :invalid_options} = Vector.take_rows_f32(matrix, 2, [0], backend: :gpu)
+      assert {:error, :invalid_arguments} = Vector.take_rows_f32(:bad, 2, [0])
+
+      nan_matrix = matrix <> f32_bits(0x7FC00000) <> f32_binary([7.0])
+      assert {:error, :invalid_vector} = Vector.take_rows_f32(nan_matrix, 2, [3], as: :list)
+    end
+  end
+
+  describe "native fallback containment" do
+    test "raised and thrown NIF failures use the supplied fallback" do
+      previous = Application.get_env(:vettore, :native_f32, :missing)
+      Application.put_env(:vettore, :native_f32, true)
+
+      on_exit(fn ->
+        if previous == :missing,
+          do: Application.delete_env(:vettore, :native_f32),
+          else: Application.put_env(:vettore, :native_f32, previous)
+      end)
+
+      assert :fallback == Vector.run_native(fn -> raise "native failure" end, fn -> :fallback end)
+      assert :fallback == Vector.run_native(fn -> throw(:native_failure) end, fn -> :fallback end)
     end
   end
 
