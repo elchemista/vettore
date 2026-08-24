@@ -184,9 +184,33 @@ fn gpu_metric(left: Vec<f32>, right: Vec<f32>, metric_code: u8) -> NifResult<Res
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+/// Computes a GPU metric over little-endian f32 binaries without BEAM float terms.
+fn gpu_metric_f32_binary(
+    left: Binary<'_>,
+    right: Binary<'_>,
+    metric_code: u8,
+) -> NifResult<Result<f32, String>> {
+    Ok(Metric::from_code(metric_code).and_then(|metric| {
+        let left = crate::dense::decode_f32_le(left.as_slice())?;
+        let right = crate::dense::decode_f32_le(right.as_slice())?;
+        crate::gpu::metric(&left, &right, metric)
+    }))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 /// Normalizes one dense vector with the native wgpu pipeline.
 fn gpu_normalize(vector: Vec<f32>, normalization_code: u8) -> NifResult<Result<Vec<f32>, String>> {
     Ok(crate::gpu::normalize(vector, normalization_code))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+/// GPU-normalizes a little-endian f32 binary without BEAM float terms.
+fn gpu_normalize_f32_binary(
+    binary: Binary<'_>,
+    normalization_code: u8,
+) -> NifResult<Result<Vec<f32>, String>> {
+    Ok(crate::dense::decode_f32_le(binary.as_slice())
+        .and_then(|vector| crate::gpu::normalize(vector, normalization_code)))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

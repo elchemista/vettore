@@ -99,6 +99,12 @@ jobs:
         shell: bash
         run: |
           checksum_file="checksum-Elixir.Vettore.Nifs.exs"
+          release_version="${GITHUB_REF_NAME#v}"
+          mismatched=$(find release-artifacts -maxdepth 1 -type f ! -name "*-v${release_version}-*" -print -quit)
+          if [ -n "${mismatched}" ]; then
+            echo "Artifact version does not match v${release_version}: ${mismatched}" >&2
+            exit 1
+          fi
           {
             printf '%%{\n'
             find release-artifacts -maxdepth 1 -type f -printf '%f\n' | sort | while read -r filename; do

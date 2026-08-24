@@ -604,6 +604,9 @@ defmodule Vettore.Distance do
   defp native_call(:l2_squared, left, right),
     do: native_pair(left, right, &Nifs.l2_squared_distance/2)
 
+  defp native_call(:cosine, left, right),
+    do: native_pair(left, right, &Nifs.normalized_cosine_similarity/2)
+
   defp native_call(:inner_product, left, right),
     do: native_pair(left, right, &Nifs.inner_product/2)
 
@@ -628,7 +631,7 @@ defmodule Vettore.Distance do
     Compute.run(
       opts,
       length(left),
-      fn -> native_pair(left, right, &Nifs.normalized_cosine_similarity/2) end,
+      fn -> native_call(:cosine, left, right) end,
       fn -> gpu_metric(left, right, :cosine) end
     )
   end
@@ -694,6 +697,8 @@ defmodule Vettore.Distance do
 
   @spec normalize_native_error({:error, String.t()} | {:ok, term()} | term()) ::
           {:error, String.t()} | {:ok, term()} | term()
+  defp normalize_native_error({:error, "gpu " <> _reason}), do: {:error, :gpu_failed}
+
   defp normalize_native_error({:error, reason}) when is_binary(reason),
     do: {:error, Map.get(@native_error_reasons, reason, reason)}
 

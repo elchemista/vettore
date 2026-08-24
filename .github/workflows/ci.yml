@@ -25,6 +25,12 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7.0.1
 
+      - name: Install software Vulkan adapter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary
+
       - name: Verify release version metadata
         run: |
           mix_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)
@@ -46,6 +52,9 @@ jobs:
         with:
           path: |
             deps
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/vettore/target
             ~/.cache/rustler_precompiled
             ~/.cache/huggingface
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/vettore/Cargo.lock') }}
@@ -69,6 +78,7 @@ jobs:
         env:
           VETTORE_TEST_EX_FASTEMBED: "1"
           VETTORE_GPU_ALLOW_SOFTWARE: "1"
+          VETTORE_REQUIRE_GPU: "1"
         run: mix test --cover
 
       - name: Preflight every search-mode benchmark
@@ -103,6 +113,9 @@ jobs:
   rust:
     name: Rust unit tests and lints
     runs-on: ubuntu-24.04
+    env:
+      VETTORE_GPU_ALLOW_SOFTWARE: "1"
+      VETTORE_REQUIRE_GPU: "1"
     defaults:
       run:
         working-directory: native/vettore
@@ -110,6 +123,12 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v7.0.1
+
+      - name: Install software Vulkan adapter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -153,3 +172,29 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: native/vettore
+
+  rust-msrv:
+    name: Rust 1.91 MSRV
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: native/vettore
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Rust 1.91
+        uses: dtolnay/rust-toolchain@1.91.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/vettore/target
+          key: ${{ runner.os }}-cargo-msrv-1.91-${{ hashFiles('native/vettore/Cargo.lock') }}
+
+      - name: Verify minimum Rust version
+        run: cargo check --locked

@@ -1,4 +1,4 @@
-defmodule VettoreVectorPrecompiledFallbackTest do
+defmodule VettoreVectorNativeFallbackTest do
   use ExUnit.Case, async: false
 
   alias Vettore.Vector

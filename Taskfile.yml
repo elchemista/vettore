@@ -30,6 +30,7 @@ tasks:
     desc: Run tests (with Rust)
     env:
       VETTORE_BUILD: 1
+      VETTORE_GPU_ALLOW_SOFTWARE: 1
     cmds:
       - mix test --trace
 

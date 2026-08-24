@@ -1,5 +1,5 @@
 defmodule VettoreVectorInteropTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Vettore.Interop.Nx, as: NxInterop
   alias Vettore.Vector
@@ -300,6 +300,7 @@ defmodule VettoreVectorInteropTest do
 
       assert {:ok, selected} = Vector.take_rows_f32(matrix, 2, [2, 0, 2])
       assert selected == f32_binary([5.0, 6.0, 1.0, 2.0, 5.0, 6.0])
+      assert {:ok, ^selected} = Vector.take_rows_f32(matrix, 2, [2, 0, 2], as: :same)
 
       assert {:ok, [[3.0, 4.0], [1.0, 2.0]]} =
                Vector.take_rows_f32(matrix, 2, [1, 0], as: :list)
@@ -308,10 +309,15 @@ defmodule VettoreVectorInteropTest do
       assert {:error, :invalid_row_index} = Vector.take_rows_f32(matrix, 2, [3])
       assert {:error, :invalid_row_index} = Vector.take_rows_f32(matrix, 2, [-1])
       assert {:error, :invalid_options} = Vector.take_rows_f32(matrix, 2, [0], backend: :gpu)
+
+      assert {:error, {:unknown_representation, :array}} =
+               Vector.take_rows_f32(matrix, 2, [0], as: :array)
+
       assert {:error, :invalid_arguments} = Vector.take_rows_f32(:bad, 2, [0])
 
       nan_matrix = matrix <> f32_bits(0x7FC00000) <> f32_binary([7.0])
       assert {:error, :invalid_vector} = Vector.take_rows_f32(nan_matrix, 2, [3], as: :list)
+      assert {:error, :invalid_vector} = Vector.take_rows_f32(nan_matrix, 2, [3])
     end
   end
 

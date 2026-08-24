@@ -12,16 +12,20 @@ defmodule Vettore.Compute do
         gpu: true,
         gpu_fallback: :cpu
 
-  Or per call with `gpu: true`. `gpu_fallback` controls what happens when a
-  compatible hardware adapter cannot be initialized:
+  Or per call with `gpu: true`. For forced GPU execution, `gpu_fallback`
+  controls what happens when an adapter cannot be initialized or execution
+  fails:
 
     * `:cpu` (default) transparently uses the SIMD CPU kernel;
-    * `:error` returns `{:error, :gpu_not_available}`.
+    * `:error` returns a stable tagged error.
 
   `gpu: :auto` uses the GPU only when one is available and the operation has at
-  least `:gpu_min_size` coordinates (1,000,000 by default). This avoids paying GPU
-  transfer and synchronization costs for small vectors.
+  least `:gpu_min_size` coordinates (1,000,000 by default). It always uses CPU
+  when no adapter is available, independently of the forced-GPU fallback policy.
+  This avoids paying GPU transfer and synchronization costs for small vectors.
   """
+
+  require Logger
 
   alias Vettore.Nifs
 
@@ -38,9 +42,13 @@ defmodule Vettore.Compute do
   def gpu_detected?(probe) when is_function(probe, 0) do
     probe.() == true
   rescue
-    _exception -> false
+    exception ->
+      log_gpu_failure("detection", :error, exception)
+      false
   catch
-    _kind, _reason -> false
+    kind, reason ->
+      log_gpu_failure("detection", kind, reason)
+      false
   end
 
   @doc "Compatibility alias for `gpu_detected?/0`."
@@ -65,13 +73,20 @@ defmodule Vettore.Compute do
       {:error, "gpu not detected"} ->
         {:error, :gpu_not_available}
 
+      {:error, "gpu " <> _reason} ->
+        {:error, :gpu_failed}
+
       {:error, reason} ->
         {:error, reason}
     end
   rescue
-    _exception -> {:error, :gpu_not_available}
+    exception ->
+      log_gpu_failure("adapter info", :error, exception)
+      {:error, :gpu_not_available}
   catch
-    _kind, _reason -> {:error, :gpu_not_available}
+    kind, reason ->
+      log_gpu_failure("adapter info", kind, reason)
+      {:error, :gpu_not_available}
   end
 
   @doc "Returns the configured mode, fallback, threshold, and detected GPU details."
@@ -133,6 +148,8 @@ defmodule Vettore.Compute do
       when workload_size < min_size,
       do: {:ok, :cpu}
 
+  def select_device(:auto, _fallback, _min_size, _workload_size, false), do: {:ok, :cpu}
+
   def select_device(selection, fallback, _min_size, _workload_size, detected?)
       when selection in [true, :auto] do
     cond do
@@ -168,9 +185,13 @@ defmodule Vettore.Compute do
   defp safely_run(operation) do
     operation.()
   rescue
-    _exception -> {:error, :gpu_failed}
+    exception ->
+      log_gpu_failure("operation", :error, exception)
+      {:error, :gpu_failed}
   catch
-    _kind, _reason -> {:error, :gpu_failed}
+    kind, reason ->
+      log_gpu_failure("operation", kind, reason)
+      {:error, :gpu_failed}
   end
 
   defp validate_options(opts) do
@@ -217,5 +238,12 @@ defmodule Vettore.Compute do
       {:ok, info} -> info
       {:error, _reason} -> nil
     end
+  end
+
+  defp log_gpu_failure(operation, kind, reason) do
+    Logger.warning(fn ->
+      formatted = inspect(reason, limit: 10, printable_limit: 200)
+      "Vettore GPU #{operation} failed (#{kind}): #{formatted}"
+    end)
   end
 end
