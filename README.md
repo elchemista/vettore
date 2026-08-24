@@ -49,7 +49,7 @@ Elixir systems, with Rust kept as acceleration rather than ownership.
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.4.0"}
+    {:vettore, "~> 0.3.5"}
   ]
 end
 ```
