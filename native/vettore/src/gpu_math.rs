@@ -1,6 +1,20 @@
 //! Pure validation and reduction helpers shared by the wgpu runtime.
 
+use std::borrow::Cow;
+
 use crate::distances::{self, Metric};
+
+pub(crate) struct PreparedMetric<'a> {
+    pub(crate) left: Cow<'a, [f32]>,
+    pub(crate) right: Cow<'a, [f32]>,
+    result_scale: f64,
+}
+
+pub(crate) struct PreparedNormalization {
+    pub(crate) vector: Vec<f32>,
+    pub(crate) first: f32,
+    pub(crate) second: f32,
+}
 
 pub(crate) fn metric_code(metric: Metric) -> u32 {
     match metric {
@@ -17,6 +31,14 @@ pub(crate) fn metric_code(metric: Metric) -> u32 {
 }
 
 pub(crate) fn finish_metric(metric: Metric, partials: &[[f32; 4]]) -> Result<f32, String> {
+    if partials
+        .iter()
+        .flat_map(|partial| partial.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err(distances::METRIC_OVERFLOW.to_string());
+    }
+
     let sums = partials.iter().fold([0.0f64; 4], |mut sums, partial| {
         for (sum, value) in sums.iter_mut().zip(partial) {
             *sum += f64::from(*value);
@@ -58,48 +80,180 @@ pub(crate) fn finish_metric(metric: Metric, partials: &[[f32; 4]]) -> Result<f32
     }
 }
 
-pub(crate) fn normalization_parameters(
-    method: u8,
-    length: usize,
-    partials: &[[f32; 4]],
-) -> Result<(f32, f32), String> {
-    let sum = partials
-        .iter()
-        .map(|partial| f64::from(partial[0]))
-        .sum::<f64>();
-    let sum_squares = partials
-        .iter()
-        .map(|partial| f64::from(partial[1]))
-        .sum::<f64>();
-    let minimum = partials
-        .iter()
-        .map(|partial| partial[2])
-        .fold(f32::INFINITY, f32::min);
-    let maximum = partials
-        .iter()
-        .map(|partial| partial[3])
-        .fold(f32::NEG_INFINITY, f32::max);
+pub(crate) fn prepare_metric<'a>(
+    left: &'a [f32],
+    right: &'a [f32],
+    metric: Metric,
+) -> PreparedMetric<'a> {
+    match metric {
+        Metric::L2 | Metric::L2Squared | Metric::Manhattan | Metric::Chebyshev => {
+            let scale = max_abs(left).max(max_abs(right));
+            if scale == 0.0 {
+                borrowed_metric(left, right)
+            } else {
+                let result_scale = match metric {
+                    Metric::L2Squared => scale * scale,
+                    _ => scale,
+                };
 
-    match method {
-        1 => Ok((sum_squares.sqrt() as f32, 0.0)),
-        2 => {
-            let divisor = length as f64;
-            let mean = sum / divisor;
-            let variance = (sum_squares / divisor - mean * mean).max(0.0);
-            Ok((mean as f32, variance.sqrt() as f32))
+                PreparedMetric {
+                    left: Cow::Owned(scale_vector(left, scale)),
+                    right: Cow::Owned(scale_vector(right, scale)),
+                    result_scale,
+                }
+            }
         }
-        3 => Ok((minimum, maximum - minimum)),
+        Metric::Cosine => PreparedMetric {
+            left: scaled_or_borrowed(left),
+            right: scaled_or_borrowed(right),
+            result_scale: 1.0,
+        },
+        Metric::InnerProduct | Metric::NegativeInnerProduct => {
+            let left_scale = max_abs(left);
+            let right_scale = max_abs(right);
+            if left_scale == 0.0 || right_scale == 0.0 {
+                borrowed_metric(left, right)
+            } else {
+                PreparedMetric {
+                    left: Cow::Owned(scale_vector(left, left_scale)),
+                    right: Cow::Owned(scale_vector(right, right_scale)),
+                    result_scale: left_scale * right_scale,
+                }
+            }
+        }
+        Metric::Hamming | Metric::Jaccard => borrowed_metric(left, right),
+    }
+}
+
+pub(crate) fn finish_prepared_metric(
+    metric: Metric,
+    partials: &[[f32; 4]],
+    prepared: &PreparedMetric<'_>,
+) -> Result<f32, String> {
+    let value = f64::from(finish_metric(metric, partials)?) * prepared.result_scale;
+    checked_f32(value)
+}
+
+pub(crate) fn prepare_normalization(
+    vector: &[f32],
+    method: u8,
+) -> Result<PreparedNormalization, String> {
+    match method {
+        1 => prepare_l2_normalization(vector),
+        2 => prepare_zscore_normalization(vector),
+        3 => prepare_minmax_normalization(vector),
         _ => Err("unknown normalization".to_string()),
     }
 }
 
-pub(crate) fn cpu_normalize(vector: Vec<f32>, method: u8) -> Result<Vec<f32>, String> {
-    match method {
-        0 => Ok(vector),
-        1 => distances::normalize_l2(vector),
-        2 => distances::normalize_zscore(vector),
-        3 => distances::normalize_minmax(vector),
-        _ => Err("unknown normalization".to_string()),
+fn prepare_l2_normalization(vector: &[f32]) -> Result<PreparedNormalization, String> {
+    let scale = max_abs(vector);
+    if scale == 0.0 {
+        return Ok(zero_normalization(vector.len()));
+    }
+
+    let vector = scale_vector(vector, scale);
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+
+    Ok(PreparedNormalization {
+        vector,
+        first: checked_f32(norm)?,
+        second: 0.0,
+    })
+}
+
+fn prepare_zscore_normalization(vector: &[f32]) -> Result<PreparedNormalization, String> {
+    let divisor = vector.len() as f64;
+    let mean = vector.iter().map(|value| f64::from(*value)).sum::<f64>() / divisor;
+    let centered = vector
+        .iter()
+        .map(|value| f64::from(*value) - mean)
+        .collect::<Vec<_>>();
+    let variance = centered.iter().map(|value| value * value).sum::<f64>() / divisor;
+    let stddev = variance.sqrt();
+
+    if stddev == 0.0 {
+        return Ok(zero_normalization(vector.len()));
+    }
+
+    let scale = centered.iter().copied().map(f64::abs).fold(0.0, f64::max);
+    let vector = centered
+        .into_iter()
+        .map(|value| (value / scale) as f32)
+        .collect();
+
+    Ok(PreparedNormalization {
+        vector,
+        first: 0.0,
+        second: checked_f32(stddev / scale)?,
+    })
+}
+
+fn prepare_minmax_normalization(vector: &[f32]) -> Result<PreparedNormalization, String> {
+    let minimum = vector.iter().copied().fold(f32::INFINITY, f32::min);
+    let maximum = vector.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if minimum == maximum {
+        return Ok(zero_normalization(vector.len()));
+    }
+
+    let scale = f64::from(minimum).abs().max(f64::from(maximum).abs());
+    let range = f64::from(maximum) - f64::from(minimum);
+
+    Ok(PreparedNormalization {
+        vector: scale_vector(vector, scale),
+        first: checked_f32(f64::from(minimum) / scale)?,
+        second: checked_f32(range / scale)?,
+    })
+}
+
+fn zero_normalization(length: usize) -> PreparedNormalization {
+    PreparedNormalization {
+        vector: vec![0.0; length],
+        first: 0.0,
+        second: 0.0,
+    }
+}
+
+fn borrowed_metric<'a>(left: &'a [f32], right: &'a [f32]) -> PreparedMetric<'a> {
+    PreparedMetric {
+        left: Cow::Borrowed(left),
+        right: Cow::Borrowed(right),
+        result_scale: 1.0,
+    }
+}
+
+fn scaled_or_borrowed(values: &[f32]) -> Cow<'_, [f32]> {
+    let scale = max_abs(values);
+    if scale == 0.0 {
+        Cow::Borrowed(values)
+    } else {
+        Cow::Owned(scale_vector(values, scale))
+    }
+}
+
+fn max_abs(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|value| f64::from(*value).abs())
+        .fold(0.0, f64::max)
+}
+
+fn scale_vector(values: &[f32], scale: f64) -> Vec<f32> {
+    values
+        .iter()
+        .map(|value| (f64::from(*value) / scale) as f32)
+        .collect()
+}
+
+fn checked_f32(value: f64) -> Result<f32, String> {
+    if value.is_finite() && value >= f64::from(f32::MIN) && value <= f64::from(f32::MAX) {
+        Ok(value as f32)
+    } else {
+        Err(distances::METRIC_OVERFLOW.to_string())
     }
 }
 
@@ -183,22 +337,58 @@ mod tests {
     }
 
     #[test]
-    fn normalization_parameters_and_cpu_fallback_cover_every_method() {
-        let partials = [[3.0, 5.0, 1.0, 2.0], [7.0, 25.0, 3.0, 4.0]];
-        let (norm, _) = normalization_parameters(1, 4, &partials).unwrap();
-        assert!((norm - 30.0f32.sqrt()).abs() < 1.0e-6);
+    fn metric_preparation_stabilizes_extreme_values() {
+        let maximum = f32::MAX;
 
-        let (mean, stddev) = normalization_parameters(2, 4, &partials).unwrap();
-        assert_eq!(mean, 2.5);
-        assert!((stddev - 1.118_034).abs() < 1.0e-6);
-        assert_eq!(normalization_parameters(3, 4, &partials), Ok((1.0, 3.0)));
-        assert!(normalization_parameters(99, 4, &partials).is_err());
+        let cosine_left = [2.0e19];
+        let cosine_right = [1.0];
+        let cosine = prepare_metric(&cosine_left, &cosine_right, Metric::Cosine);
+        assert_eq!(cosine.left.as_ref(), &[1.0]);
+        assert_eq!(cosine.right.as_ref(), &[1.0]);
 
-        assert_eq!(cpu_normalize(vec![3.0, 4.0], 0), Ok(vec![3.0, 4.0]));
-        assert_eq!(cpu_normalize(vec![3.0, 4.0], 1), Ok(vec![0.6, 0.8]));
-        assert!(cpu_normalize(vec![1.0, 2.0], 2).is_ok());
-        assert_eq!(cpu_normalize(vec![1.0, 2.0], 3), Ok(vec![0.0, 1.0]));
-        assert!(cpu_normalize(vec![1.0], 99).is_err());
+        let dot_left = [maximum, maximum];
+        let dot_right = [maximum, -maximum];
+        let dot = prepare_metric(&dot_left, &dot_right, Metric::InnerProduct);
+        assert_eq!(dot.left.as_ref(), &[1.0, 1.0]);
+        assert_eq!(dot.right.as_ref(), &[1.0, -1.0]);
+        assert_eq!(
+            finish_prepared_metric(Metric::InnerProduct, &[[0.0; 4]], &dot),
+            Ok(0.0)
+        );
+
+        let squared_left = [maximum];
+        let squared_right = [0.0];
+        let squared = prepare_metric(&squared_left, &squared_right, Metric::L2Squared);
+        assert!(
+            finish_prepared_metric(Metric::L2Squared, &[[1.0, 0.0, 0.0, 0.0]], &squared).is_err()
+        );
+
+        let zeros = [0.0, 0.0];
+        let l2_zero = prepare_metric(&zeros, &zeros, Metric::L2);
+        assert!(matches!(l2_zero.left, std::borrow::Cow::Borrowed(_)));
+        let dot_zero = prepare_metric(&zeros, &dot_right, Metric::InnerProduct);
+        assert!(matches!(dot_zero.left, std::borrow::Cow::Borrowed(_)));
+        let cosine_zero = prepare_metric(&zeros, &dot_right, Metric::Cosine);
+        assert!(matches!(cosine_zero.left, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn normalization_preparation_is_stable_for_small_and_offset_values() {
+        let l2 = prepare_normalization(&[1.0e-23; 4], 1).unwrap();
+        assert_eq!(l2.vector, vec![1.0; 4]);
+        assert_eq!(l2.first, 2.0);
+
+        let zscore = prepare_normalization(&[10_000.0, 10_000.1], 2).unwrap();
+        assert_eq!(zscore.first, 0.0);
+        assert!(zscore.second.is_finite() && zscore.second > 0.0);
+        assert_eq!(zscore.vector, vec![-1.0, 1.0]);
+
+        let minmax = prepare_normalization(&[-f32::MAX, f32::MAX], 3).unwrap();
+        assert_eq!(minmax.vector, vec![-1.0, 1.0]);
+        assert_eq!(minmax.first, -1.0);
+        assert_eq!(minmax.second, 2.0);
+
+        assert!(prepare_normalization(&[1.0], 99).is_err());
     }
 
     #[test]

@@ -5,7 +5,7 @@ Semantic Versioning.
 
 ## [Unreleased]
 
-## [0.3.5] - 2026-08-24
+## [0.3.5] - Unreleased
 
 ### Added
 
@@ -34,6 +34,25 @@ Semantic Versioning.
   per-call compute options while preserving existing arities.
 - Nx remains runtime-only and absent from both Mix and Cargo dependencies; GPU
   execution is implemented entirely in Rust and does not use Nx.
+- GPU calls now run concurrently without a process-wide execution mutex. Failed
+  initialization is retryable, runtime failures invalidate the cached device,
+  and readback waits have a bounded timeout.
+
+### Fixed
+
+- Stabilized GPU metrics across the finite f32 range by scaling operands before
+  shader reduction and rescaling checked results on the host. This fixes cosine
+  overflow/underflow, cancelling extreme dot products, and large L1/L2 inputs.
+- Replaced one-pass f32 normalization statistics with two-pass f64 host
+  preparation, fixing tiny L2 vectors and catastrophic z-score cancellation.
+- Guarded dispatch counts and storage bindings against the selected device
+  limits before submitting work, preventing wgpu validation panics on oversized
+  vectors and matrices.
+- Made `gpu: :auto` use CPU when no adapter is available even when the forced-GPU
+  fallback policy is `:error`, and normalized runtime failures to stable atoms.
+- Added direct GPU NIF paths for little-endian f32 binaries, structural binary
+  dimension checks, GPU-backed CI with lavapipe, Vector/Compute doctests, and an
+  explicit Rust 1.91 MSRV check.
 
 ### Performance
 

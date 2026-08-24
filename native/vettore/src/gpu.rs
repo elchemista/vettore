@@ -4,16 +4,20 @@
 //! the lifetime of the loaded NIF. CPU/SIMD remains the caller-controlled
 //! fallback for unavailable devices and small workloads.
 
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{mpsc, Arc, OnceLock, RwLock};
+use std::time::Duration;
 
 use wgpu::util::DeviceExt;
 
 use crate::distances::{self, Metric};
 use crate::gpu_math::{
-    cpu_normalize, finish_metric, metric_code, normalization_parameters, selected_matrix_rows,
+    finish_prepared_metric, metric_code, prepare_metric, prepare_normalization,
+    selected_matrix_rows,
 };
 
 const WORKGROUP_SIZE: u32 = 256;
+const GPU_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 const GPU_NOT_DETECTED: &str = "gpu not detected";
 
 const METRIC_SHADER: &str = r#"
@@ -160,9 +164,8 @@ struct Params {
 }
 
 @group(0) @binding(0) var<storage, read> matrix: array<f32>;
-@group(0) @binding(1) var<storage, read> indices: array<u32>;
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;
-@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -180,7 +183,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (selected >= selected_count) {
             break;
         }
-        sum = sum + matrix[indices[selected] * dimensions + column];
+        sum = sum + matrix[selected * dimensions + column];
         selected = selected + 1u;
     }
 
@@ -201,18 +204,18 @@ struct GpuRuntime {
     metric_pipeline: wgpu::ComputePipeline,
     normalize_pipeline: wgpu::ComputePipeline,
     mean_pool_pipeline: wgpu::ComputePipeline,
+    limits: wgpu::Limits,
     info: GpuInfo,
 }
 
-static GPU_RUNTIME: OnceLock<Result<Mutex<GpuRuntime>, String>> = OnceLock::new();
+static GPU_RUNTIME: OnceLock<RwLock<Option<Arc<GpuRuntime>>>> = OnceLock::new();
 
 pub fn detected() -> bool {
     runtime().is_ok()
 }
 
 pub fn info() -> Result<GpuInfo, String> {
-    let runtime = lock_runtime()?;
-    Ok(runtime.info.clone())
+    Ok(runtime()?.info.clone())
 }
 
 pub fn metric(left: &[f32], right: &[f32], metric: Metric) -> Result<f32, String> {
@@ -227,9 +230,15 @@ pub fn metric(left: &[f32], right: &[f32], metric: Metric) -> Result<f32, String
         return distances::compute(metric, left, right);
     }
 
-    let mut runtime = lock_runtime()?;
-    let partials = runtime.metric_partials(left, right, metric_code(metric))?;
-    finish_metric(metric, &partials).or_else(|_| distances::compute(metric, left, right))
+    let prepared = prepare_metric(left, right, metric);
+    with_runtime(|runtime| {
+        let partials = runtime.metric_partials(
+            prepared.left.as_ref(),
+            prepared.right.as_ref(),
+            metric_code(metric),
+        )?;
+        finish_prepared_metric(metric, &partials, &prepared)
+    })
 }
 
 pub fn normalize(vector: Vec<f32>, method: u8) -> Result<Vec<f32>, String> {
@@ -250,21 +259,17 @@ pub fn normalize(vector: Vec<f32>, method: u8) -> Result<Vec<f32>, String> {
         return Err("unknown normalization".to_string());
     }
 
-    let mut runtime = lock_runtime()?;
-    let partials = runtime.metric_partials(&vector, &vector, 9)?;
-    let (first, second) = normalization_parameters(method, vector.len(), &partials)?;
+    let prepared = prepare_normalization(&vector, method)?;
+    with_runtime(|runtime| {
+        let normalized =
+            runtime.transform(&prepared.vector, method, prepared.first, prepared.second)?;
 
-    if !first.is_finite() || !second.is_finite() {
-        return cpu_normalize(vector, method);
-    }
-
-    let normalized = runtime.transform(&vector, method, first, second)?;
-
-    if normalized.iter().all(|value| value.is_finite()) {
-        Ok(normalized)
-    } else {
-        cpu_normalize(vector, method)
-    }
+        if normalized.iter().all(|value| value.is_finite()) {
+            Ok(normalized)
+        } else {
+            Err("gpu normalization produced a non-finite value".to_string())
+        }
+    })
 }
 
 pub fn mean_pool_f32_le(
@@ -272,21 +277,25 @@ pub fn mean_pool_f32_le(
     dimensions: usize,
     row_indices: &[usize],
 ) -> Result<Vec<f32>, String> {
-    let selected_matrix = selected_matrix_rows(matrix, dimensions, row_indices)?;
-
     let dimensions_u32 = u32::try_from(dimensions).map_err(|_| "invalid dimensions".to_string())?;
-    let indices = (0..row_indices.len())
-        .map(|index| u32::try_from(index).map_err(|_| "too many row indices".to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
+    let selected_count =
+        u32::try_from(row_indices.len()).map_err(|_| "too many row indices".to_string())?;
 
-    let mut runtime = lock_runtime()?;
-    let pooled = runtime.mean_pool(&selected_matrix, dimensions_u32, &indices)?;
+    with_runtime(|runtime| {
+        let selected_size = dimensions
+            .checked_mul(row_indices.len())
+            .and_then(|values| values.checked_mul(4))
+            .ok_or_else(|| "gpu workload too large".to_string())?;
+        runtime.validate_storage_size(selected_size as u64)?;
+        let selected_matrix = selected_matrix_rows(matrix, dimensions, row_indices)?;
+        let pooled = runtime.mean_pool(&selected_matrix, dimensions_u32, selected_count)?;
 
-    if pooled.iter().all(|value| value.is_finite()) {
-        Ok(pooled)
-    } else {
-        crate::dense::mean_pool_f32_le(matrix, dimensions, row_indices)
-    }
+        if pooled.iter().all(|value| value.is_finite()) {
+            Ok(pooled)
+        } else {
+            Err("metric overflow".to_string())
+        }
+    })
 }
 
 impl GpuRuntime {
@@ -322,6 +331,7 @@ impl GpuRuntime {
         let metric_pipeline = create_pipeline(&device, "vettore metric", METRIC_SHADER);
         let normalize_pipeline = create_pipeline(&device, "vettore normalize", NORMALIZE_SHADER);
         let mean_pool_pipeline = create_pipeline(&device, "vettore mean pool", MEAN_POOL_SHADER);
+        let limits = device.limits();
 
         Ok(Self {
             device,
@@ -329,6 +339,7 @@ impl GpuRuntime {
             metric_pipeline,
             normalize_pipeline,
             mean_pool_pipeline,
+            limits,
             info: GpuInfo {
                 name: adapter_info.name,
                 backend: adapter_info.backend.to_str().to_string(),
@@ -338,16 +349,19 @@ impl GpuRuntime {
     }
 
     fn metric_partials(
-        &mut self,
+        &self,
         left: &[f32],
         right: &[f32],
         operation: u32,
     ) -> Result<Vec<[f32; 4]>, String> {
-        let length = u32::try_from(left.len()).map_err(|_| "vector too large".to_string())?;
-        let groups = length.div_ceil(WORKGROUP_SIZE);
+        let (length, groups) = self.dispatch_dimensions(left.len())?;
+        let vector_size = u64::from(length) * 4;
+        self.validate_storage_size(vector_size)?;
+        let output_size = u64::from(groups) * 16;
+        self.validate_storage_size(output_size)?;
+
         let left_buffer = storage_buffer(&self.device, "vettore metric left", left);
         let right_buffer = storage_buffer(&self.device, "vettore metric right", right);
-        let output_size = u64::from(groups) * 16;
         let output = output_buffer(&self.device, "vettore metric output", output_size);
         let params = uniform_buffer(&self.device, [length, operation, 0, 0]);
         let layout = self.metric_pipeline.get_bind_group_layout(0);
@@ -378,16 +392,18 @@ impl GpuRuntime {
     }
 
     fn transform(
-        &mut self,
+        &self,
         vector: &[f32],
         method: u8,
         first: f32,
         second: f32,
     ) -> Result<Vec<f32>, String> {
-        let length = u32::try_from(vector.len()).map_err(|_| "vector too large".to_string())?;
-        let groups = length.div_ceil(WORKGROUP_SIZE);
+        let (length, groups) = self.dispatch_dimensions(vector.len())?;
+        let logical_output_size = u64::from(length) * 4;
+        let output_size = aligned_readback_size(logical_output_size);
+        self.validate_storage_size(output_size)?;
+
         let input = storage_buffer(&self.device, "vettore normalize input", vector);
-        let output_size = u64::from(length) * 4;
         let output = output_buffer(&self.device, "vettore normalize output", output_size);
         let params = uniform_buffer(
             &self.device,
@@ -408,35 +424,30 @@ impl GpuRuntime {
             &output,
             output_size,
         )?;
-        Ok(bytemuck::cast_slice::<u8, f32>(&bytes).to_vec())
+        Ok(bytemuck::cast_slice::<u8, f32>(&bytes[..logical_output_size as usize]).to_vec())
     }
 
     fn mean_pool(
-        &mut self,
+        &self,
         matrix: &[u8],
         dimensions: u32,
-        indices: &[u32],
+        selected_count: u32,
     ) -> Result<Vec<f32>, String> {
-        let groups = dimensions.div_ceil(WORKGROUP_SIZE);
+        let (_, groups) = self.dispatch_dimensions(dimensions as usize)?;
+        self.validate_storage_size(matrix.len() as u64)?;
+        let logical_output_size = u64::from(dimensions) * 4;
+        let output_size = aligned_readback_size(logical_output_size);
+        self.validate_storage_size(output_size)?;
+
         let matrix_buffer = storage_bytes(&self.device, "vettore mean matrix", matrix);
-        let indices_buffer = storage_buffer(&self.device, "vettore mean indices", indices);
-        let output_size = u64::from(dimensions) * 4;
         let output = output_buffer(&self.device, "vettore mean output", output_size);
-        let params = uniform_buffer(
-            &self.device,
-            [
-                dimensions,
-                u32::try_from(indices.len()).map_err(|_| "too many row indices".to_string())?,
-                0,
-                0,
-            ],
-        );
+        let params = uniform_buffer(&self.device, [dimensions, selected_count, 0, 0]);
         let layout = self.mean_pool_pipeline.get_bind_group_layout(0);
         let bind_group = bind_group(
             &self.device,
             "vettore mean bindings",
             &layout,
-            &[&matrix_buffer, &indices_buffer, &output, &params],
+            &[&matrix_buffer, &output, &params],
         );
 
         let bytes = self.dispatch_and_read(
@@ -446,7 +457,26 @@ impl GpuRuntime {
             &output,
             output_size,
         )?;
-        Ok(bytemuck::cast_slice::<u8, f32>(&bytes).to_vec())
+        Ok(bytemuck::cast_slice::<u8, f32>(&bytes[..logical_output_size as usize]).to_vec())
+    }
+
+    fn dispatch_dimensions(&self, length: usize) -> Result<(u32, u32), String> {
+        let length = u32::try_from(length).map_err(|_| "gpu workload too large".to_string())?;
+        let workgroups = length.div_ceil(WORKGROUP_SIZE);
+        if workgroups > self.limits.max_compute_workgroups_per_dimension {
+            return Err("gpu workload too large".to_string());
+        }
+
+        Ok((length, workgroups))
+    }
+
+    fn validate_storage_size(&self, size: u64) -> Result<(), String> {
+        if size > self.limits.max_storage_buffer_binding_size || size > self.limits.max_buffer_size
+        {
+            Err("gpu workload too large".to_string())
+        } else {
+            Ok(())
+        }
     }
 
     fn dispatch_and_read(
@@ -480,7 +510,7 @@ impl GpuRuntime {
         }
 
         encoder.copy_buffer_to_buffer(output, 0, &staging, 0, output_size);
-        self.queue.submit([encoder.finish()]);
+        let submission_index = self.queue.submit([encoder.finish()]);
 
         let slice = staging.slice(..);
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -488,10 +518,13 @@ impl GpuRuntime {
             let _ignored = sender.send(result);
         });
         self.device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission_index),
+                timeout: Some(GPU_POLL_TIMEOUT),
+            })
             .map_err(|error| format!("gpu synchronization failed: {error}"))?;
         receiver
-            .recv()
+            .recv_timeout(GPU_POLL_TIMEOUT)
             .map_err(|_| "gpu mapping callback failed".to_string())?
             .map_err(|error| format!("gpu readback failed: {error}"))?;
 
@@ -505,21 +538,70 @@ impl GpuRuntime {
     }
 }
 
-fn runtime() -> Result<&'static Mutex<GpuRuntime>, String> {
-    let initialized = GPU_RUNTIME.get_or_init(|| {
-        std::panic::catch_unwind(GpuRuntime::new)
-            .map_err(|_| "gpu initialization panicked".to_string())
-            .and_then(|result| result)
-            .map(Mutex::new)
-    });
+fn runtime() -> Result<Arc<GpuRuntime>, String> {
+    if let Some(runtime) = cached_runtime() {
+        return Ok(runtime);
+    }
 
-    initialized.as_ref().map_err(Clone::clone)
+    let initialized =
+        catch_unwind(GpuRuntime::new).map_err(|_| "gpu initialization panicked".to_string())??;
+    let initialized = Arc::new(initialized);
+    let slot = runtime_slot();
+    let mut cached = slot
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = cached.get_or_insert_with(|| Arc::clone(&initialized));
+    Ok(Arc::clone(runtime))
 }
 
-fn lock_runtime() -> Result<std::sync::MutexGuard<'static, GpuRuntime>, String> {
-    runtime()?
-        .lock()
-        .map_err(|_| "gpu runtime lock poisoned".to_string())
+fn with_runtime<T>(operation: impl FnOnce(&GpuRuntime) -> Result<T, String>) -> Result<T, String> {
+    let runtime = runtime()?;
+    let result = match catch_unwind(AssertUnwindSafe(|| operation(&runtime))) {
+        Ok(result) => result,
+        Err(_panic) => Err("gpu operation panicked".to_string()),
+    };
+
+    if let Err(error) = &result {
+        if runtime_error_requires_reinitialization(error) {
+            invalidate_runtime(&runtime);
+        }
+    }
+
+    result
+}
+
+fn runtime_slot() -> &'static RwLock<Option<Arc<GpuRuntime>>> {
+    GPU_RUNTIME.get_or_init(|| RwLock::new(None))
+}
+
+fn cached_runtime() -> Option<Arc<GpuRuntime>> {
+    runtime_slot()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn invalidate_runtime(runtime: &Arc<GpuRuntime>) {
+    let mut cached = runtime_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cached
+        .as_ref()
+        .is_some_and(|candidate| Arc::ptr_eq(candidate, runtime))
+    {
+        *cached = None;
+    }
+}
+
+fn runtime_error_requires_reinitialization(error: &str) -> bool {
+    error.starts_with("gpu synchronization")
+        || error.starts_with("gpu mapping")
+        || error.starts_with("gpu readback")
+        || error == "gpu operation panicked"
+}
+
+fn aligned_readback_size(size: u64) -> u64 {
+    size.div_ceil(wgpu::MAP_ALIGNMENT) * wgpu::MAP_ALIGNMENT
 }
 
 fn create_pipeline(
@@ -651,9 +733,21 @@ mod tests {
 
     #[test]
     fn available_wgpu_adapter_executes_every_pipeline() {
-        let Ok(mut runtime) = GpuRuntime::new_with_software_adapter(true) else {
-            return;
+        let runtime = match GpuRuntime::new_with_software_adapter(true) {
+            Ok(runtime) => runtime,
+            Err(error) if std::env::var("VETTORE_REQUIRE_GPU").as_deref() == Ok("1") => {
+                panic!("a GPU adapter is required for this test: {error}")
+            }
+            Err(_error) => return,
         };
+
+        let maximum_elements =
+            runtime.limits.max_compute_workgroups_per_dimension as usize * WORKGROUP_SIZE as usize;
+        assert!(runtime.dispatch_dimensions(maximum_elements).is_ok());
+        assert!(runtime.dispatch_dimensions(maximum_elements + 1).is_err());
+        assert!(runtime
+            .validate_storage_size(runtime.limits.max_storage_buffer_binding_size + 1)
+            .is_err());
 
         let left = [1.0, 0.0, 2.0];
         let right = [0.0, 3.0, 2.0];
@@ -670,27 +764,36 @@ mod tests {
         ];
 
         for (metric, expected) in expected {
+            let prepared = prepare_metric(&left, &right, metric);
             let partials = runtime
-                .metric_partials(&left, &right, metric_code(metric))
+                .metric_partials(
+                    prepared.left.as_ref(),
+                    prepared.right.as_ref(),
+                    metric_code(metric),
+                )
                 .unwrap();
-            let actual = finish_metric(metric, &partials).unwrap();
+            let actual = finish_prepared_metric(metric, &partials, &prepared).unwrap();
             assert!((actual - expected).abs() < 1.0e-5, "metric {metric:?}");
         }
 
-        let stats = runtime
-            .metric_partials(&[3.0, 4.0], &[3.0, 4.0], 9)
+        let prepared = prepare_normalization(&[3.0, 4.0], 1).unwrap();
+        let normalized = runtime
+            .transform(&prepared.vector, 1, prepared.first, prepared.second)
             .unwrap();
-        let (norm, unused) = normalization_parameters(1, 2, &stats).unwrap();
-        let normalized = runtime.transform(&[3.0, 4.0], 1, norm, unused).unwrap();
         assert!((normalized[0] - 0.6).abs() < 1.0e-5);
         assert!((normalized[1] - 0.8).abs() < 1.0e-5);
 
         for method in [2, 3] {
             let values = [1.0, 2.0, 3.0, 4.0];
-            let stats = runtime.metric_partials(&values, &values, 9).unwrap();
-            let (first, second) = normalization_parameters(method, values.len(), &stats).unwrap();
-            let actual = runtime.transform(&values, method, first, second).unwrap();
-            let expected = cpu_normalize(values.to_vec(), method).unwrap();
+            let prepared = prepare_normalization(&values, method).unwrap();
+            let actual = runtime
+                .transform(&prepared.vector, method, prepared.first, prepared.second)
+                .unwrap();
+            let expected = match method {
+                2 => distances::normalize_zscore(values.to_vec()).unwrap(),
+                3 => distances::normalize_minmax(values.to_vec()).unwrap(),
+                _ => unreachable!(),
+            };
             for (actual, expected) in actual.iter().zip(expected) {
                 assert!((actual - expected).abs() < 1.0e-5);
             }
@@ -698,9 +801,10 @@ mod tests {
 
         for method in [1, 2, 3] {
             let values = [4.0, 4.0];
-            let stats = runtime.metric_partials(&values, &values, 9).unwrap();
-            let (first, second) = normalization_parameters(method, values.len(), &stats).unwrap();
-            let actual = runtime.transform(&values, method, first, second).unwrap();
+            let prepared = prepare_normalization(&values, method).unwrap();
+            let actual = runtime
+                .transform(&prepared.vector, method, prepared.first, prepared.second)
+                .unwrap();
             assert!(actual.iter().all(|value| value.is_finite()));
         }
 
@@ -708,11 +812,15 @@ mod tests {
             .into_iter()
             .flat_map(f32::to_le_bytes)
             .collect::<Vec<_>>();
-        let pooled = runtime.mean_pool(&matrix, 2, &[0, 1]).unwrap();
+        let pooled = runtime.mean_pool(&matrix, 2, 2).unwrap();
         assert!((pooled[0] - 2.0).abs() < 1.0e-5);
         assert!((pooled[1] - 3.0).abs() < 1.0e-5);
 
-        let repeated = runtime.mean_pool(&matrix, 2, &[1, 1, 0]).unwrap();
+        let repeated_matrix = [3.0f32, 4.0, 3.0, 4.0, 1.0, 2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let repeated = runtime.mean_pool(&repeated_matrix, 2, 3).unwrap();
         assert!((repeated[0] - 7.0 / 3.0).abs() < 1.0e-5);
         assert!((repeated[1] - 10.0 / 3.0).abs() < 1.0e-5);
     }

@@ -17,6 +17,7 @@ VETTORE_BUILD=1 mix format --check-formatted
 VETTORE_BUILD=1 \
 VETTORE_TEST_EX_FASTEMBED=1 \
 VETTORE_GPU_ALLOW_SOFTWARE=1 \
+VETTORE_REQUIRE_GPU=1 \
 mix test --cover --warnings-as-errors
 VETTORE_BUILD=1 \
 VETTORE_BENCH_DIMENSIONS=16 \
@@ -85,8 +86,16 @@ git diff -- checksum-Elixir.Vettore.Nifs.exs
 ```
 
 Every checksum key must contain the current release version. Commit the
-generated checksum file. Then verify a clean precompiled build without
-`VETTORE_BUILD`:
+generated checksum file. Verify that mechanically before building the package:
+
+```bash
+release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+test "$(grep -c '=>' checksum-Elixir.Vettore.Nifs.exs)" -gt 0
+test "$(grep -vc -- "-v${release_version}-" checksum-Elixir.Vettore.Nifs.exs)" -eq 2
+```
+
+The two non-matching lines are the opening and closing map delimiters. Then
+verify a clean precompiled build without `VETTORE_BUILD`:
 
 ```bash
 MIX_ENV=prod mix clean

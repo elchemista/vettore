@@ -47,7 +47,7 @@ defmodule Vettore.Vector do
   @type metric :: Distance.metric()
 
   @f32_max 3.402_823_466_385_288_6e38
-  @usize_max 18_446_744_073_709_551_615
+  @usize_max Integer.pow(2, :erlang.system_info(:wordsize) * 8) - 1
   @metric_codes %{
     l2: 0,
     l2_squared: 1,
@@ -120,9 +120,10 @@ defmodule Vettore.Vector do
     with {:ok, vector} <- validate_list(vector), do: {:ok, length(vector)}
   end
 
-  def dimensions(vector) when is_binary(vector) do
-    with {:ok, vector} <- decode_binary(vector), do: {:ok, length(vector)}
-  end
+  def dimensions(vector) when is_binary(vector) and rem(byte_size(vector), 4) == 0,
+    do: {:ok, div(byte_size(vector), 4)}
+
+  def dimensions(vector) when is_binary(vector), do: {:error, :invalid_f32_binary}
 
   def dimensions(vector) do
     with {:ok, vector} <- NxInterop.to_list(vector),
@@ -282,8 +283,8 @@ defmodule Vettore.Vector do
          {:ok, {row_count, ^dimensions}} <- matrix_shape_f32(matrix, dimensions),
          :ok <- validate_indices(row_indices),
          true <- Enum.all?(row_indices, &(&1 < row_count)),
-         {:ok, rows} <- copy_matrix_rows(matrix, dimensions, row_indices) do
-      render_matrix(rows, dimensions, opts)
+         {:ok, target} <- resolve_matrix_target(Keyword.get(opts, :as, :f32_binary)) do
+      render_selected_rows(matrix, dimensions, row_indices, target, opts)
     else
       false -> {:error, :invalid_row_index}
       {:error, reason} -> {:error, reason}
@@ -613,7 +614,7 @@ defmodule Vettore.Vector do
   end
 
   defp render_matrix(rows, dimensions, opts) do
-    target = Keyword.get(opts, :as, :f32_binary)
+    target = opts |> Keyword.get(:as, :f32_binary) |> normalize_matrix_target()
     backend = Keyword.fetch(opts, :backend)
 
     cond do
@@ -657,6 +658,45 @@ defmodule Vettore.Vector do
     end
   end
 
+  defp render_selected_rows(matrix, dimensions, row_indices, :f32_binary, opts) do
+    if Keyword.has_key?(opts, :backend) do
+      {:error, :invalid_options}
+    else
+      copy_matrix_row_binaries(matrix, dimensions, row_indices)
+    end
+  end
+
+  defp render_selected_rows(matrix, dimensions, row_indices, target, opts) do
+    with {:ok, rows} <- copy_matrix_rows(matrix, dimensions, row_indices) do
+      render_matrix(rows, dimensions, Keyword.put(opts, :as, target))
+    end
+  end
+
+  defp copy_matrix_row_binaries(matrix, dimensions, row_indices) do
+    row_bytes = dimensions * 4
+
+    Enum.reduce_while(row_indices, {:ok, []}, fn row_index, {:ok, rows} ->
+      row = binary_part(matrix, row_index * row_bytes, row_bytes)
+
+      case decode_binary(row) do
+        {:ok, _values} -> {:cont, {:ok, [row | rows]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, rows} -> {:ok, rows |> Enum.reverse() |> IO.iodata_to_binary()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resolve_matrix_target(target) when target in [:list, :f32_binary, :nx, :same],
+    do: {:ok, normalize_matrix_target(target)}
+
+  defp resolve_matrix_target(target), do: {:error, {:unknown_representation, target}}
+
+  defp normalize_matrix_target(:same), do: :f32_binary
+  defp normalize_matrix_target(target), do: target
+
   defp maybe_put_option(opts, key, {:ok, value}), do: Keyword.put(opts, key, value)
   defp maybe_put_option(opts, _key, :error), do: opts
 
@@ -698,19 +738,35 @@ defmodule Vettore.Vector do
   end
 
   defp gpu_metric(left, right, metric) do
-    with {:ok, left} <- to_list(left),
-         {:ok, right} <- to_list(right) do
-      left
-      |> Nifs.gpu_metric(right, Map.fetch!(@metric_codes, metric))
-      |> normalize_native_error()
+    case {unwrap(left), unwrap(right)} do
+      {{:ok, left}, {:ok, right}} when is_binary(left) and is_binary(right) ->
+        left
+        |> Nifs.gpu_metric_f32_binary(right, Map.fetch!(@metric_codes, metric))
+        |> normalize_native_error()
+
+      _other ->
+        with {:ok, left} <- to_list(left),
+             {:ok, right} <- to_list(right) do
+          left
+          |> Nifs.gpu_metric(right, Map.fetch!(@metric_codes, metric))
+          |> normalize_native_error()
+        end
     end
   end
 
   defp gpu_normalize(vector, method) do
-    with {:ok, vector} <- to_list(vector) do
-      vector
-      |> Nifs.gpu_normalize(Map.fetch!(@normalization_codes, method))
-      |> normalize_native_error()
+    case unwrap(vector) do
+      {:ok, vector} when is_binary(vector) ->
+        vector
+        |> Nifs.gpu_normalize_f32_binary(Map.fetch!(@normalization_codes, method))
+        |> normalize_native_error()
+
+      _other ->
+        with {:ok, vector} <- to_list(vector) do
+          vector
+          |> Nifs.gpu_normalize(Map.fetch!(@normalization_codes, method))
+          |> normalize_native_error()
+        end
     end
   end
 
@@ -913,6 +969,8 @@ defmodule Vettore.Vector do
 
   defp compute_options(opts),
     do: Keyword.take(opts, [:gpu, :gpu_fallback, :gpu_min_size])
+
+  defp normalize_native_error({:error, "gpu " <> _reason}), do: {:error, :gpu_failed}
 
   defp normalize_native_error({:error, reason}) when is_binary(reason) do
     {:error, Map.get(@native_errors, reason, reason)}

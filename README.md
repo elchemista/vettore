@@ -621,11 +621,12 @@ The modes are explicit:
 
 - `gpu: false` always uses the native SIMD CPU path and does not probe a GPU.
 - `gpu: true` forces a GPU attempt for each supported primitive.
-- `gpu: :auto` uses the GPU only at or above `gpu_min_size`; smaller work stays
-  on CPU to avoid transfer and synchronization overhead.
+- `gpu: :auto` uses the GPU only when an adapter is available and the workload
+  is at or above `gpu_min_size`; otherwise it always stays on CPU.
 - `gpu_fallback: :cpu` falls back safely if initialization or execution fails.
-- `gpu_fallback: :error` instead returns `{:error, :gpu_not_available}` or the
-  device error.
+- `gpu_fallback: :error` instead returns a stable error such as
+  `{:error, :gpu_not_available}`, `{:error, :gpu_failed}`, or
+  `{:error, :metric_overflow}`.
 
 Every supported call can override the application configuration:
 
@@ -643,10 +644,17 @@ Vettore.Vector.mean_pool_f32(model_matrix, dimensions, token_ids,
 ```
 
 The GPU runtime, device, and shader pipelines are initialized lazily and reused.
-Mean pooling uploads only selected rows. Single embeddings are commonly faster
-with SIMD CPU; GPU mode is intended for larger vectors or row selections. Flat
-and HNSW collection indexes keep their existing native CPU implementations;
-the GPU selector currently applies to the dense primitives listed above.
+Calls may submit concurrently, readback waits are bounded, and a failed runtime
+is rebuilt on the next call. Mean pooling gathers and validates only the selected
+rows on the host before uploading them, avoiding a transfer of the complete model
+matrix.
+
+Each metric call still uploads one vector pair and reads one result back. Those
+transfers commonly make SIMD CPU faster even for fairly large single embeddings,
+so benchmark the real workload before enabling GPU mode. It is most plausible for
+large normalization or row-selection work; it is not yet a resident-matrix or
+batched top-k search path. Flat and HNSW collection indexes keep their native CPU
+implementations.
 
 ## Normalization
 

@@ -102,9 +102,21 @@ defmodule Vettore.Nifs do
   def gpu_metric(_left, _right, _metric_code), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  @spec gpu_metric_f32_binary(binary(), binary(), non_neg_integer()) ::
+          {:ok, float()} | {:error, String.t()}
+  def gpu_metric_f32_binary(_left, _right, _metric_code),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   @spec gpu_normalize([float()], non_neg_integer()) ::
           {:ok, [float()]} | {:error, String.t()}
   def gpu_normalize(_vector, _normalization_code), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec gpu_normalize_f32_binary(binary(), non_neg_integer()) ::
+          {:ok, [float()]} | {:error, String.t()}
+  def gpu_normalize_f32_binary(_binary, _normalization_code),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec gpu_mean_pool_f32(binary(), pos_integer(), [non_neg_integer()]) ::

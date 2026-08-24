@@ -20,6 +20,13 @@ defmodule VettoreGpuComputeTest do
   end
 
   describe "GPU detection and configuration" do
+    test "CI can require a real hardware or software adapter" do
+      if System.get_env("VETTORE_REQUIRE_GPU") == "1" do
+        assert Compute.gpu_detected?(),
+               "VETTORE_REQUIRE_GPU=1 but wgpu could not initialize an adapter"
+      end
+    end
+
     test "detection is boolean and adapter diagnostics agree with it" do
       assert is_boolean(Vettore.gpu_detected?())
       assert Vettore.gpu_detected() == Vettore.gpu_detected?()
@@ -43,6 +50,13 @@ defmodule VettoreGpuComputeTest do
                Compute.gpu_info(fn -> {:error, "gpu not detected"} end)
 
       assert {:error, :driver_failure} = Compute.gpu_info(fn -> {:error, :driver_failure} end)
+
+      assert {:error, :gpu_failed} =
+               Compute.gpu_info(fn -> {:error, "gpu device initialization failed"} end)
+
+      assert {:ok, %{name: "test adapter", backend: "vulkan", device_type: "cpu"}} =
+               Compute.gpu_info(fn -> {:ok, {"test adapter", "vulkan", "cpu"}} end)
+
       assert {:error, :gpu_not_available} = Compute.gpu_info(fn -> raise "info failure" end)
       assert {:error, :gpu_not_available} = Compute.gpu_info(fn -> throw(:info_failure) end)
 
@@ -51,6 +65,12 @@ defmodule VettoreGpuComputeTest do
 
       refute fallback_info.detected?
       assert fallback_info.adapter == nil
+
+      detected_info =
+        Compute.info(fn -> true end, fn -> {:ok, %{name: "test adapter"}} end)
+
+      assert detected_info.detected?
+      assert detected_info.adapter == %{name: "test adapter"}
     end
 
     test "pure device selection covers forced, automatic, and fallback modes" do
@@ -59,6 +79,7 @@ defmodule VettoreGpuComputeTest do
       assert {:ok, :gpu} = Compute.select_device(:auto, :error, 100, 100, true)
       assert {:ok, :gpu} = Compute.select_device(true, :cpu, 100, 1, true)
       assert {:ok, :cpu} = Compute.select_device(true, :cpu, 100, 1, false)
+      assert {:ok, :cpu} = Compute.select_device(:auto, :error, 100, 100, false)
 
       assert {:error, :gpu_not_available} =
                Compute.select_device(true, :error, 100, 1, false)
@@ -305,6 +326,36 @@ defmodule VettoreGpuComputeTest do
 
         assert {:error, :metric_overflow} =
                  Vettore.Distance.l2_squared([maximum], [0.0], opts)
+      end
+    end
+
+    test "GPU scaling preserves tiny vectors, large cosine inputs, and stable z-score" do
+      if Compute.gpu_detected?() do
+        opts = [gpu: true, gpu_fallback: :error]
+
+        assert {:ok, cosine} = Vettore.Distance.cosine([2.0e19], [1.0], opts)
+        assert_in_delta cosine, 1.0, 1.0e-6
+
+        assert {:ok, tiny} = Vettore.Distance.normalize(List.duplicate(1.0e-23, 4), :l2, opts)
+
+        for value <- tiny do
+          assert_in_delta value, 0.5, 1.0e-6
+        end
+
+        values = [10_000.0, 10_000.1, 9_999.9, 10_000.05]
+        assert {:ok, expected} = Vettore.Distance.normalize(values, :zscore, gpu: false)
+        assert {:ok, actual} = Vettore.Distance.normalize(values, :zscore, opts)
+
+        for {gpu_value, cpu_value} <- Enum.zip(actual, expected) do
+          assert_in_delta gpu_value, cpu_value, 1.0e-5
+        end
+
+        left = f32_binary([3.0, 4.0])
+        right = f32_binary([6.0, 8.0])
+        assert {:ok, 50.0} = Vector.inner_product(left, right, opts)
+        assert {:ok, normalized} = Vector.normalize(left, :l2, Keyword.put(opts, :as, :list))
+        assert_in_delta Enum.at(normalized, 0), 0.6, 1.0e-5
+        assert_in_delta Enum.at(normalized, 1), 0.8, 1.0e-5
       end
     end
 
