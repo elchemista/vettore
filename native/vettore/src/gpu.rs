@@ -1376,7 +1376,7 @@ fn unsafe_gpu_dynamic_range(values: &[f32]) -> bool {
 
 fn decode_resident_candidates(bytes: &[u8], row_count: usize) -> Vec<(usize, f32)> {
     let mut hits = Vec::with_capacity(bytes.len() / 8);
-    for candidate in bytes.chunks_exact(8) {
+    for candidate in bytes.as_chunks::<8>().0 {
         let raw = f32::from_ne_bytes(candidate[..4].try_into().expect("four-byte score"));
         let index = u32::from_ne_bytes(candidate[4..].try_into().expect("four-byte index"));
         if index == u32::MAX || index as usize >= row_count || !raw.is_finite() {
