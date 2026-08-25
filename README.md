@@ -184,17 +184,22 @@ with portable f32/f64 SIMD kernels, including stable cosine accumulation. With
 GPU enabled, its first eligible search creates a stable, device-resident matrix
 snapshot. Warm searches upload only the query, score query-by-all-rows in one
 batched dispatch, reduce top-k on the device in two stages, and read back only
-the final ids and scores. Inserts,
-deletes, bulk loads, and snapshot restores invalidate that GPU snapshot; the
-next eligible query rebuilds it once. Prefer `put_many/2` when ingesting a large
-collection so the resident copy is built after the batch rather than between
-individual writes.
+the final ids and scores. Snapshot sorting, device upload, dispatch, and
+readback run without holding the index read lock; only the immutable host copy
+blocks writers. Inserts, deletes, bulk loads, and snapshot restores
+invalidate that GPU snapshot; the next eligible query rebuilds it once.
+Deterministic matrix-build failures are remembered until the next mutation, so
+an unchanged unsupported row cannot force a full copy on every fallback query.
+Prefer `put_many/2` when ingesting a large collection so the resident copy is
+built after the batch rather than between individual writes.
 
 GPU Flat reduction is optimized for result limits up to 64. Larger limits use
 the contiguous SIMD path when `gpu_fallback: :cpu`; strict GPU mode returns
 `{:error, :gpu_limit_too_large}`. The exact scan remains exhaustive on either
 device, although normal f32 reduction-order differences can produce small score
-rounding differences.
+rounding differences. When candidates are mathematically tied or separated only
+by that rounding noise, CPU and GPU may return different ids inside the tied
+boundary group; scores and all unambiguous ranks remain equivalent.
 
 ## HNSW Search
 
@@ -669,18 +674,22 @@ Vettore.Vector.mean_pool_f32(model_matrix, dimensions, token_ids,
 ```
 
 The GPU runtime, device, and shader pipelines are initialized lazily and reused.
-Calls may submit concurrently, readback waits are bounded, and a failed runtime
-is rebuilt on the next call. Flat also pools query, score, top-k, parameter, and
-staging buffers per resident snapshot, with a bounded idle pool. Matrix rows are
-normalized once for stable f32 reductions, while per-row scale metadata preserves
-the semantics of every supported metric. Inputs with a device-unsafe numeric
-range return to SIMD under the normal fallback policy rather than silently losing
-small coordinates.
+Calls may submit concurrently. Failed initialization is cached for ten seconds
+before another adapter probe, while device-loss errors invalidate a live runtime
+immediately. Readback waits default to ten seconds and can be set from 100 to
+120,000 milliseconds with `VETTORE_GPU_TIMEOUT_MS` before the first GPU
+readback. Flat also pools query, score, top-k, parameter, and staging buffers per
+resident snapshot, with a bounded idle pool. Matrix rows are normalized once
+for stable f32 reductions, while per-row scale metadata and explicit validity
+flags preserve every supported metric and discard only genuinely overflowing
+rows. Inputs with a device-unsafe numeric range return to SIMD under the normal
+fallback policy rather than silently losing small coordinates.
 
 Single-pair metric calls still upload both vectors, so SIMD can remain faster for
 that shape. Flat search is the throughput-oriented GPU path: the matrix upload is
 amortized across warm queries, top-k is reduced completely in GPU memory, and
-only the final `k` row ids and scores cross back to the host. Use the dedicated
+only the final `k` row ids and scores cross back to the host. Its per-chunk top-k
+stage uses a 16-lane reduction instead of one serial thread. Use the dedicated
 benchmark to measure cold upload and warm-query latency on the target adapter:
 
 ```bash
@@ -690,8 +699,32 @@ mix run bench/gpu_flat_bench.exs
 ```
 
 Mean pooling still gathers and validates only selected rows on the host before
-uploading them, avoiding transfer of the complete model matrix. HNSW traversal
-remains on CPU, while its optional exact rerank can use the batched GPU path.
+uploading them, avoiding transfer of the complete model matrix. Selected columns
+are scaled on the host and accumulated by 256 GPU lanes per output coordinate,
+which avoids representable means overflowing in intermediate f32 sums. HNSW
+traversal remains on CPU, while its optional exact rerank can use the batched GPU
+path.
+
+### Choosing CPU, automatic GPU, or forced GPU
+
+| Workload | Recommended policy | Benefit and cost |
+| --- | --- | --- |
+| Large, read-heavy Flat index with repeated queries | `gpu: :auto`, tuned `gpu_min_size` | Warm queries amortize the upload and keep top-k on the device. The first eligible query pays snapshot, upload, and pipeline latency. |
+| Flat index with frequent inserts or deletes | CPU, or a higher `gpu_min_size` | Every effective mutation invalidates the resident matrix; the next GPU query must copy and upload it again. Batch ingestion with `put_many/2` limits rebuilds. |
+| Single-pair metrics or small batches | CPU | Transfer, dispatch, and readback overhead normally exceeds the arithmetic saved by the GPU. |
+| Flat searches requesting more than 64 results | `gpu_fallback: :cpu` | The current GPU reduction is intentionally bounded at 64; forced strict GPU mode returns `{:error, :gpu_limit_too_large}`. |
+| HNSW collections | CPU traversal, optional automatic GPU rerank | The graph walk is CPU-native. Only exact batched reranking can move to the GPU. |
+| Hosts without a reliable adapter | `gpu: :auto, gpu_fallback: :cpu` | Availability is preserved, but fallback queries run at CPU speed. Failed initialization is retried after ten seconds; readback uses the configured timeout. |
+| GPU validation, benchmarking, or capacity tests | `gpu: true, gpu_fallback: :error` | Proves that work reached the adapter and exposes failures immediately; it deliberately gives up transparent CPU recovery. |
+
+A resident Flat index keeps its native CPU matrix and an additional prepared
+copy in device memory, plus row metadata and bounded scratch buffers. Budget at
+least `rows * dimensions * 4` bytes of GPU memory for the matrix itself. Use
+`:auto` as the production default and measure `gpu_min_size` on the target
+adapter: the included benchmark reports cold-build and warm-query latency
+separately. Exact CPU and GPU scans cover the same rows, but f32 reduction order
+can change ids only within a numerically tied top-k boundary. Overflowing rows
+are skipped consistently on both devices rather than aborting the whole batch.
 
 ## Normalization
 
@@ -767,10 +800,14 @@ New code should prefer the collection-style top-level API: `Vettore.new/1`, `Vet
 The test-only `ex_fastembed` dependency generates the committed
 `BAAI/bge-small-en-v1.5` fixture under `test/fixtures`. The normal suite uses
 those real vectors offline to exercise exact search, HNSW, funnel search,
-quantized search, multi-vector search, hybrid search, and snapshot reloads.
+quantized search, multi-vector search, hybrid search, snapshot reloads, and
+strict resident-GPU parity against the SIMD Flat path when an adapter is
+available. GPU-backed CI requires that adapter and verifies that the resident
+matrix is built once and reused across all real-embedding queries.
 
-CI additionally runs fresh model inference and checks it against the committed
-artifact. Enable that slower check locally with:
+CI additionally runs fresh model inference, checks it against the committed
+artifact, and searches the newly produced vectors through strict resident GPU
+Flat with no CPU fallback. Enable that slower check locally with:
 
 ```bash
 VETTORE_BUILD=1 VETTORE_TEST_EX_FASTEMBED=1 \

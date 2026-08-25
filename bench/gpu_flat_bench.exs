@@ -1,6 +1,18 @@
 defmodule Vettore.GpuFlatBench do
   alias Vettore.{Collection, Compute, Nifs}
 
+  @metrics %{
+    "l2" => :l2,
+    "l2_squared" => :l2_squared,
+    "cosine" => :cosine,
+    "inner_product" => :inner_product,
+    "negative_inner_product" => :negative_inner_product,
+    "manhattan" => :manhattan,
+    "chebyshev" => :chebyshev,
+    "hamming" => :hamming,
+    "jaccard" => :jaccard
+  }
+
   def run do
     unless Compute.gpu_detected?() do
       raise "no GPU adapter detected; configure the platform driver before this benchmark"
@@ -50,12 +62,7 @@ defmodule Vettore.GpuFlatBench do
         :timer.tc(fn -> Collection.search(gpu, query, limit: limit) end)
 
       {:ok, cpu_reference} = Collection.search(cpu, query, limit: limit)
-      cpu_ids = Enum.map(cpu_reference, & &1.id)
-      gpu_ids = Enum.map(gpu_reference, & &1.id)
-
-      if cpu_ids != gpu_ids do
-        raise "CPU and GPU top-k ids differ before benchmark"
-      end
+      validate_top_k!(cpu_reference, gpu_reference)
 
       {:ok, {builds, resident?}} = Nifs.flat_gpu_cache_info(gpu.index_state)
       adapter = Compute.gpu_info()
@@ -115,15 +122,49 @@ defmodule Vettore.GpuFlatBench do
   end
 
   defp metric_env! do
-    case System.get_env("VETTORE_BENCH_METRIC", "cosine") do
-      metric
-      when metric in ~w(l2 l2_squared cosine inner_product negative_inner_product manhattan chebyshev hamming jaccard) ->
-        String.to_existing_atom(metric)
+    metric = System.get_env("VETTORE_BENCH_METRIC", "cosine")
 
-      metric ->
+    case Map.fetch(@metrics, metric) do
+      {:ok, metric} ->
+        metric
+
+      :error ->
         raise "unsupported VETTORE_BENCH_METRIC=#{inspect(metric)}"
     end
   end
+
+  defp validate_top_k!(cpu, gpu) do
+    if length(cpu) != length(gpu) do
+      raise "CPU and GPU top-k hit counts differ before benchmark"
+    end
+
+    Enum.zip(cpu, gpu)
+    |> Enum.each(fn {cpu_hit, gpu_hit} ->
+      tolerance = score_tolerance(cpu_hit.score)
+
+      if abs(cpu_hit.score - gpu_hit.score) > tolerance do
+        raise "CPU and GPU top-k scores differ before benchmark"
+      end
+    end)
+
+    boundary_score = List.last(cpu).score
+
+    required_ids =
+      cpu
+      |> Enum.reject(&scores_tied?(&1.score, boundary_score))
+      |> MapSet.new(& &1.id)
+
+    gpu_ids = MapSet.new(gpu, & &1.id)
+
+    unless MapSet.subset?(required_ids, gpu_ids) do
+      raise "GPU top-k is missing an unambiguous CPU result before benchmark"
+    end
+  end
+
+  defp scores_tied?(left, right),
+    do: abs(left - right) <= max(score_tolerance(left), score_tolerance(right))
+
+  defp score_tolerance(score), do: max(abs(score) * 1.0e-4, 1.0e-5)
 
   defp positive_env!(name, default) do
     value = non_negative_env!(name, default)

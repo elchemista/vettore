@@ -6,22 +6,22 @@
 //! remains the caller-controlled fallback for unavailable or unsafe workloads.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
-use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use wgpu::util::DeviceExt;
 
 use crate::distances::{self, Metric};
 use crate::gpu_math::{
-    finish_prepared_metric, metric_code, prepare_metric, prepare_normalization,
-    selected_matrix_rows,
+    finish_prepared_metric, metric_code, prepare_mean_pool, prepare_metric, prepare_normalization,
 };
 
 const WORKGROUP_SIZE: u32 = 256;
 pub(crate) const MAX_RESIDENT_TOP_K: u32 = 64;
 const FLAT_TOP_K_CHUNK_ROWS: u32 = 8_192;
 const MAX_RESIDENT_SCRATCHES: usize = 4;
-const GPU_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_GPU_POLL_TIMEOUT: Duration = Duration::from_secs(10);
+const GPU_INIT_RETRY_DELAY: Duration = Duration::from_secs(10);
 const GPU_NOT_DETECTED: &str = "gpu not detected";
 
 const METRIC_SHADER: &str = r#"
@@ -37,7 +37,6 @@ struct Params {
 var<workgroup> scratch_a: array<f32, 256>;
 var<workgroup> scratch_b: array<f32, 256>;
 var<workgroup> scratch_c: array<f32, 256>;
-var<workgroup> scratch_d: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn main(
@@ -53,7 +52,6 @@ fn main(
     var a = 0.0;
     var b = 0.0;
     var c = 0.0;
-    var d = 0.0;
 
     if (index < length) {
         let x = left[index];
@@ -77,21 +75,12 @@ fn main(
             let y_set = y != 0.0;
             a = select(0.0, 1.0, x_set && y_set);
             b = select(0.0, 1.0, x_set || y_set);
-        } else if (operation == 9u) {
-            a = x;
-            b = x * x;
-            c = x;
-            d = x;
         }
-    } else if (operation == 9u) {
-        c = 3.402823466e38;
-        d = -3.402823466e38;
     }
 
     scratch_a[lane] = a;
     scratch_b[lane] = b;
     scratch_c[lane] = c;
-    scratch_d[lane] = d;
     workgroupBarrier();
 
     var stride = 128u;
@@ -105,13 +94,7 @@ fn main(
 
             scratch_b[lane] = scratch_b[lane] + scratch_b[lane + stride];
 
-            if (operation == 9u) {
-                scratch_c[lane] = min(scratch_c[lane], scratch_c[lane + stride]);
-                scratch_d[lane] = max(scratch_d[lane], scratch_d[lane + stride]);
-            } else {
-                scratch_c[lane] = scratch_c[lane] + scratch_c[lane + stride];
-                scratch_d[lane] = scratch_d[lane] + scratch_d[lane + stride];
-            }
+            scratch_c[lane] = scratch_c[lane] + scratch_c[lane + stride];
         }
 
         workgroupBarrier();
@@ -123,7 +106,7 @@ fn main(
 
     if (lane == 0u) {
         output[workgroup_id.x] = vec4<f32>(
-            scratch_a[0], scratch_b[0], scratch_c[0], scratch_d[0]
+            scratch_a[0], scratch_b[0], scratch_c[0], 0.0
         );
     }
 }
@@ -171,9 +154,15 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
+var<workgroup> scratch: array<f32, 256>;
+
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let column = global_id.x;
+fn main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+) {
+    let column = workgroup_id.x;
+    let lane = local_id.x;
     let dimensions = params.values.x;
     let selected_count = params.values.y;
 
@@ -182,20 +171,46 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var sum = 0.0;
-    var selected = 0u;
+    var compensation = 0.0;
+    var selected = lane;
     loop {
         if (selected >= selected_count) {
             break;
         }
-        sum = sum + matrix[selected * dimensions + column];
-        selected = selected + 1u;
+        let value = matrix[selected * dimensions + column] - compensation;
+        let next = sum + value;
+        compensation = (next - sum) - value;
+        sum = next;
+        selected = selected + 256u;
     }
 
-    output[column] = sum / f32(selected_count);
+    scratch[lane] = sum;
+    workgroupBarrier();
+
+    var stride = 128u;
+    loop {
+        if (lane < stride) {
+            scratch[lane] = scratch[lane] + scratch[lane + stride];
+        }
+        workgroupBarrier();
+        if (stride == 1u) {
+            break;
+        }
+        stride = stride / 2u;
+    }
+
+    if (lane == 0u) {
+        output[column] = scratch[0] / f32(selected_count);
+    }
 }
 "#;
 
 const FLAT_SCORE_SHADER: &str = r#"
+struct Score {
+    raw: f32,
+    valid: u32,
+}
+
 struct Params {
     shape: vec4<u32>,
     scales: vec4<u32>,
@@ -204,7 +219,7 @@ struct Params {
 @group(0) @binding(0) var<storage, read> matrix: array<f32>;
 @group(0) @binding(1) var<storage, read> row_metadata: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> query: array<f32>;
-@group(0) @binding(3) var<storage, read_write> scores: array<f32>;
+@group(0) @binding(3) var<storage, read_write> scores: array<Score>;
 @group(0) @binding(4) var<uniform> params: Params;
 
 var<workgroup> scratch_a: array<f32, 256>;
@@ -219,6 +234,29 @@ fn scaled_product(value: f32, left_scale: f32, right_scale: f32) -> f32 {
     let right_parts = frexp(right_scale);
     let fraction = value_parts.fract * left_parts.fract * right_parts.fract;
     return ldexp(fraction, value_parts.exp + left_parts.exp + right_parts.exp);
+}
+
+fn scale_ratio(value: f32, scale: f32) -> f32 {
+    if (value == 0.0 || scale == 0.0) {
+        return 0.0;
+    }
+    if (value == scale) {
+        return 1.0;
+    }
+    let value_parts = frexp(value);
+    let scale_parts = frexp(scale);
+    return ldexp(value_parts.fract / scale_parts.fract, value_parts.exp - scale_parts.exp);
+}
+
+fn checked_nonnegative_product(left: f32, right: f32) -> vec2<f32> {
+    if (left == 0.0 || right == 0.0) {
+        return vec2<f32>(0.0, 1.0);
+    }
+    let maximum = bitcast<f32>(0x7f7fffffu);
+    if (left > scale_ratio(maximum, right)) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    return vec2<f32>(left * right, 1.0);
 }
 
 @compute @workgroup_size(256)
@@ -243,8 +281,8 @@ fn main(
     let row_scale = metadata.x;
     let row_norm_squared = metadata.y;
     let pair_scale = max(query_scale, row_scale);
-    let query_factor = select(query_scale / pair_scale, 0.0, pair_scale == 0.0);
-    let row_factor = select(row_scale / pair_scale, 0.0, pair_scale == 0.0);
+    let query_factor = scale_ratio(query_scale, pair_scale);
+    let row_factor = scale_ratio(row_scale, pair_scale);
 
     var a = 0.0;
     var b = 0.0;
@@ -302,11 +340,16 @@ fn main(
 
     if (lane == 0u) {
         var raw = scratch_a[0];
+        var valid = 1u;
         if (operation == 0u) {
-            raw = sqrt(raw) * pair_scale;
+            let checked = checked_nonnegative_product(sqrt(raw), pair_scale);
+            raw = checked.x;
+            valid = u32(checked.y);
         } else if (operation == 1u) {
-            let distance = sqrt(raw) * pair_scale;
-            raw = distance * distance;
+            let distance = checked_nonnegative_product(sqrt(raw), pair_scale);
+            let squared = checked_nonnegative_product(distance.x, distance.x);
+            raw = squared.x;
+            valid = u32(distance.y * squared.y);
         } else if (operation == 2u) {
             let denominator = sqrt(query_norm_squared * row_norm_squared);
             raw = select(clamp(raw / denominator, -1.0, 1.0), 0.0, denominator == 0.0);
@@ -315,16 +358,29 @@ fn main(
         } else if (operation == 4u) {
             raw = -scaled_product(raw, query_scale, row_scale);
         } else if (operation == 5u || operation == 6u) {
-            raw = raw * pair_scale;
+            let checked = checked_nonnegative_product(raw, pair_scale);
+            raw = checked.x;
+            valid = u32(checked.y);
         } else if (operation == 8u) {
             raw = select(1.0 - raw / scratch_b[0], 0.0, scratch_b[0] == 0.0);
         }
-        scores[row] = raw;
+        let maximum = bitcast<f32>(0x7f7fffffu);
+        if (!(raw >= -maximum && raw <= maximum)) {
+            raw = 0.0;
+            valid = 0u;
+        }
+        scores[row].raw = raw;
+        scores[row].valid = valid;
     }
 }
 "#;
 
 const FLAT_TOP_K_SHADER: &str = r#"
+struct Score {
+    raw: f32,
+    valid: u32,
+}
+
 struct Candidate {
     raw: f32,
     index: u32,
@@ -334,9 +390,12 @@ struct Params {
     values: vec4<u32>,
 }
 
-@group(0) @binding(0) var<storage, read> scores: array<f32>;
+@group(0) @binding(0) var<storage, read> scores: array<Score>;
 @group(0) @binding(1) var<storage, read_write> candidates: array<Candidate>;
 @group(0) @binding(2) var<uniform> params: Params;
+
+var<workgroup> lane_best_raw: array<f32, 1024>;
+var<workgroup> lane_best_index: array<u32, 1024>;
 
 fn rank_value(operation: u32, raw: f32) -> f32 {
     if (operation == 2u) {
@@ -352,13 +411,17 @@ fn precedes(rank: f32, index: u32, other_rank: f32, other_index: u32) -> bool {
     return rank < other_rank || (rank == other_rank && index < other_index);
 }
 
-@compute @workgroup_size(1)
-fn main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
+@compute @workgroup_size(16)
+fn main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+) {
     let row_count = params.values.x;
     let limit = params.values.y;
     let operation = params.values.z;
     let chunk_rows = params.values.w;
     let chunk = workgroup_id.x;
+    let lane = local_id.x;
     let start = chunk * chunk_rows;
     let end = min(start + chunk_rows, row_count);
 
@@ -377,14 +440,15 @@ fn main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
         slot = slot + 1u;
     }
 
-    var row = start;
+    var row = start + lane;
     loop {
         if (row >= end) {
             break;
         }
 
-        let raw = scores[row];
-        if (abs(raw) <= 3.402823466e38) {
+        let score = scores[row];
+        let raw = score.raw;
+        if (score.valid != 0u && abs(raw) <= bitcast<f32>(0x7f7fffffu)) {
             let rank = rank_value(operation, raw);
             var insertion = limit;
             var position = 0u;
@@ -415,7 +479,76 @@ fn main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
                 best_index[insertion] = row;
             }
         }
-        row = row + 1u;
+        row = row + 16u;
+    }
+
+    slot = 0u;
+    loop {
+        if (slot >= limit) {
+            break;
+        }
+        let lane_offset = lane * limit + slot;
+        lane_best_raw[lane_offset] = best_raw[slot];
+        lane_best_index[lane_offset] = best_index[slot];
+        slot = slot + 1u;
+    }
+
+    workgroupBarrier();
+    if (lane != 0u) {
+        return;
+    }
+
+    slot = 0u;
+    loop {
+        if (slot >= 64u) {
+            break;
+        }
+        best_rank[slot] = bitcast<f32>(0x7f800000u);
+        best_raw[slot] = 0.0;
+        best_index[slot] = 0xffffffffu;
+        slot = slot + 1u;
+    }
+
+    var candidate_index = 0u;
+    let candidate_count = 16u * limit;
+    loop {
+        if (candidate_index >= candidate_count) {
+            break;
+        }
+        let raw = lane_best_raw[candidate_index];
+        let index = lane_best_index[candidate_index];
+        if (index != 0xffffffffu && abs(raw) <= bitcast<f32>(0x7f7fffffu)) {
+            let rank = rank_value(operation, raw);
+            var insertion = limit;
+            var position = 0u;
+            loop {
+                if (position >= limit) {
+                    break;
+                }
+                if (precedes(rank, index, best_rank[position], best_index[position])) {
+                    insertion = position;
+                    break;
+                }
+                position = position + 1u;
+            }
+
+            if (insertion < limit) {
+                var cursor = limit - 1u;
+                loop {
+                    if (cursor <= insertion) {
+                        break;
+                    }
+                    best_rank[cursor] = best_rank[cursor - 1u];
+                    best_raw[cursor] = best_raw[cursor - 1u];
+                    best_index[cursor] = best_index[cursor - 1u];
+                    cursor = cursor - 1u;
+                }
+                best_rank[insertion] = rank;
+                best_raw[insertion] = raw;
+                best_index[insertion] = index;
+            }
+        }
+        candidate_index = candidate_index + 1u;
     }
 
     slot = 0u;
@@ -485,7 +618,7 @@ fn main() {
             break;
         }
         let candidate = input_candidates[candidate_index];
-        if (candidate.index != 0xffffffffu && abs(candidate.raw) <= 3.402823466e38) {
+        if (candidate.index != 0xffffffffu && abs(candidate.raw) <= bitcast<f32>(0x7f7fffffu)) {
             let rank = rank_value(operation, candidate.raw);
             var insertion = limit;
             var position = 0u;
@@ -580,7 +713,18 @@ struct FlatSearchScratch {
     final_top_k_bind_group: wgpu::BindGroup,
 }
 
-static GPU_RUNTIME: OnceLock<RwLock<Option<Arc<GpuRuntime>>>> = OnceLock::new();
+enum RuntimeCache {
+    Empty,
+    Ready(Arc<GpuRuntime>),
+    Failed {
+        error: String,
+        allow_software: bool,
+        retry_at: Instant,
+    },
+}
+
+static GPU_RUNTIME: OnceLock<Mutex<RuntimeCache>> = OnceLock::new();
+static GPU_POLL_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 
 pub fn detected() -> bool {
     runtime().is_ok()
@@ -652,15 +796,30 @@ pub fn mean_pool_f32_le(
     let dimensions_u32 = u32::try_from(dimensions).map_err(|_| "invalid dimensions".to_string())?;
     let selected_count =
         u32::try_from(row_indices.len()).map_err(|_| "too many row indices".to_string())?;
+    let prepared = prepare_mean_pool(matrix, dimensions, row_indices)?;
 
     with_runtime(|runtime| {
-        let selected_size = dimensions
-            .checked_mul(row_indices.len())
-            .and_then(|values| values.checked_mul(4))
+        let selected_size = prepared
+            .values
+            .len()
+            .checked_mul(4)
             .ok_or_else(|| "gpu workload too large".to_string())?;
         runtime.validate_storage_size(selected_size as u64)?;
-        let selected_matrix = selected_matrix_rows(matrix, dimensions, row_indices)?;
-        let pooled = runtime.mean_pool(&selected_matrix, dimensions_u32, selected_count)?;
+        let pooled = runtime.mean_pool(&prepared.values, dimensions_u32, selected_count)?;
+        let pooled = pooled
+            .into_iter()
+            .zip(&prepared.column_scales)
+            .map(|(value, scale)| {
+                let value = value.clamp(-1.0, 1.0);
+                let value = f64::from(value) * f64::from(*scale);
+                if value.is_finite() && value >= f64::from(f32::MIN) && value <= f64::from(f32::MAX)
+                {
+                    Ok(value as f32)
+                } else {
+                    Err("metric overflow".to_string())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         if pooled.iter().all(|value| value.is_finite()) {
             Ok(pooled)
@@ -922,7 +1081,7 @@ impl ResidentMatrixInner {
 
     fn create_scratch(&self) -> Result<FlatSearchScratch, String> {
         let query_size = u64::from(self.dimensions) * 4;
-        let scores_size = u64::from(self.rows) * 4;
+        let scores_size = u64::from(self.rows) * 8;
         let candidates_size = u64::from(self.top_k_groups) * u64::from(MAX_RESIDENT_TOP_K) * 8;
         let final_candidates_size = u64::from(MAX_RESIDENT_TOP_K) * 8;
         self.runtime.validate_storage_size(query_size)?;
@@ -1229,13 +1388,6 @@ fn decode_resident_candidates(bytes: &[u8], row_count: usize) -> Vec<(usize, f32
 }
 
 impl GpuRuntime {
-    fn new() -> Result<Self, String> {
-        let allow_software = std::env::var("VETTORE_GPU_ALLOW_SOFTWARE")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-
-        Self::new_with_software_adapter(allow_software)
-    }
-
     fn new_with_software_adapter(allow_software: bool) -> Result<Self, String> {
         let instance = wgpu::Instance::default();
         let mut adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
@@ -1370,17 +1522,24 @@ impl GpuRuntime {
 
     fn mean_pool(
         &self,
-        matrix: &[u8],
+        matrix: &[f32],
         dimensions: u32,
         selected_count: u32,
     ) -> Result<Vec<f32>, String> {
-        let (_, groups) = self.dispatch_dimensions(dimensions as usize)?;
-        self.validate_storage_size(matrix.len() as u64)?;
+        if dimensions > self.limits.max_compute_workgroups_per_dimension {
+            return Err("gpu workload too large".to_string());
+        }
+        let matrix_size = matrix
+            .len()
+            .checked_mul(4)
+            .and_then(|size| u64::try_from(size).ok())
+            .ok_or_else(|| "gpu workload too large".to_string())?;
+        self.validate_storage_size(matrix_size)?;
         let logical_output_size = u64::from(dimensions) * 4;
         let output_size = aligned_readback_size(logical_output_size);
         self.validate_storage_size(output_size)?;
 
-        let matrix_buffer = storage_bytes(&self.device, "vettore mean matrix", matrix);
+        let matrix_buffer = storage_buffer(&self.device, "vettore mean matrix", matrix);
         let output = output_buffer(&self.device, "vettore mean output", output_size);
         let params = uniform_buffer(&self.device, [dimensions, selected_count, 0, 0]);
         let layout = self.mean_pool_pipeline.get_bind_group_layout(0);
@@ -1394,7 +1553,7 @@ impl GpuRuntime {
         let bytes = self.dispatch_and_read(
             &self.mean_pool_pipeline,
             &bind_group,
-            groups,
+            dimensions,
             &output,
             output_size,
         )?;
@@ -1462,19 +1621,21 @@ impl GpuRuntime {
         output_size: u64,
         submission_index: Option<wgpu::SubmissionIndex>,
     ) -> Result<Vec<u8>, String> {
+        let timeout = gpu_poll_timeout();
         let slice = staging.slice(..output_size);
         let (sender, receiver) = mpsc::sync_channel(1);
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ignored = sender.send(result);
         });
+        let started = Instant::now();
         self.device
             .poll(wgpu::PollType::Wait {
                 submission_index,
-                timeout: Some(GPU_POLL_TIMEOUT),
+                timeout: Some(timeout),
             })
             .map_err(|error| format!("gpu synchronization failed: {error}"))?;
         receiver
-            .recv_timeout(GPU_POLL_TIMEOUT)
+            .recv_timeout(timeout.saturating_sub(started.elapsed()))
             .map_err(|_| "gpu mapping callback failed".to_string())?
             .map_err(|error| format!("gpu readback failed: {error}"))?;
 
@@ -1489,19 +1650,42 @@ impl GpuRuntime {
 }
 
 fn runtime() -> Result<Arc<GpuRuntime>, String> {
-    if let Some(runtime) = cached_runtime() {
-        return Ok(runtime);
+    let allow_software = allow_software_adapter();
+    let mut cached = runtime_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    match &*cached {
+        RuntimeCache::Ready(runtime) => return Ok(Arc::clone(runtime)),
+        RuntimeCache::Failed {
+            error,
+            allow_software: cached_allow_software,
+            retry_at,
+        } if *cached_allow_software == allow_software && Instant::now() < *retry_at => {
+            return Err(error.clone());
+        }
+        RuntimeCache::Empty | RuntimeCache::Failed { .. } => {}
     }
 
-    let initialized =
-        catch_unwind(GpuRuntime::new).map_err(|_| "gpu initialization panicked".to_string())??;
-    let initialized = Arc::new(initialized);
-    let slot = runtime_slot();
-    let mut cached = slot
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = cached.get_or_insert_with(|| Arc::clone(&initialized));
-    Ok(Arc::clone(runtime))
+    let initialized = catch_unwind(|| GpuRuntime::new_with_software_adapter(allow_software))
+        .map_err(|_| "gpu initialization panicked".to_string())
+        .and_then(|result| result);
+
+    match initialized {
+        Ok(runtime) => {
+            let runtime = Arc::new(runtime);
+            *cached = RuntimeCache::Ready(Arc::clone(&runtime));
+            Ok(runtime)
+        }
+        Err(error) => {
+            *cached = RuntimeCache::Failed {
+                error: error.clone(),
+                allow_software,
+                retry_at: Instant::now() + GPU_INIT_RETRY_DELAY,
+            };
+            Err(error)
+        }
+    }
 }
 
 fn with_runtime<T>(operation: impl FnOnce(&GpuRuntime) -> Result<T, String>) -> Result<T, String> {
@@ -1520,27 +1704,43 @@ fn with_runtime<T>(operation: impl FnOnce(&GpuRuntime) -> Result<T, String>) -> 
     result
 }
 
-fn runtime_slot() -> &'static RwLock<Option<Arc<GpuRuntime>>> {
-    GPU_RUNTIME.get_or_init(|| RwLock::new(None))
+fn runtime_slot() -> &'static Mutex<RuntimeCache> {
+    GPU_RUNTIME.get_or_init(|| Mutex::new(RuntimeCache::Empty))
 }
 
 fn cached_runtime() -> Option<Arc<GpuRuntime>> {
-    runtime_slot()
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+    let cached = runtime_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match &*cached {
+        RuntimeCache::Ready(runtime) => Some(Arc::clone(runtime)),
+        RuntimeCache::Empty | RuntimeCache::Failed { .. } => None,
+    }
 }
 
 fn invalidate_runtime(runtime: &Arc<GpuRuntime>) {
     let mut cached = runtime_slot()
-        .write()
+        .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cached
-        .as_ref()
-        .is_some_and(|candidate| Arc::ptr_eq(candidate, runtime))
-    {
-        *cached = None;
+    if matches!(&*cached, RuntimeCache::Ready(candidate) if Arc::ptr_eq(candidate, runtime)) {
+        *cached = RuntimeCache::Empty;
     }
+}
+
+fn allow_software_adapter() -> bool {
+    std::env::var("VETTORE_GPU_ALLOW_SOFTWARE")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn gpu_poll_timeout() -> Duration {
+    *GPU_POLL_TIMEOUT.get_or_init(|| {
+        std::env::var("VETTORE_GPU_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|milliseconds| (100..=120_000).contains(milliseconds))
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_GPU_POLL_TIMEOUT)
+    })
 }
 
 fn runtime_error_requires_reinitialization(error: &str) -> bool {
@@ -1670,6 +1870,7 @@ fn device_type_name(device_type: wgpu::DeviceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn adapter_selection_prefers_hardware_and_reports_stable_names() {
@@ -1809,18 +2010,12 @@ mod tests {
             assert!(actual.iter().all(|value| value.is_finite()));
         }
 
-        let matrix = [1.0f32, 2.0, 3.0, 4.0]
-            .into_iter()
-            .flat_map(f32::to_le_bytes)
-            .collect::<Vec<_>>();
+        let matrix = [1.0f32, 2.0, 3.0, 4.0];
         let pooled = runtime.mean_pool(&matrix, 2, 2).unwrap();
         assert!((pooled[0] - 2.0).abs() < 1.0e-5);
         assert!((pooled[1] - 3.0).abs() < 1.0e-5);
 
-        let repeated_matrix = [3.0f32, 4.0, 3.0, 4.0, 1.0, 2.0]
-            .into_iter()
-            .flat_map(f32::to_le_bytes)
-            .collect::<Vec<_>>();
+        let repeated_matrix = [3.0f32, 4.0, 3.0, 4.0, 1.0, 2.0];
         let repeated = runtime.mean_pool(&repeated_matrix, 2, 3).unwrap();
         assert!((repeated[0] - 7.0 / 3.0).abs() < 1.0e-5);
         assert!((repeated[1] - 10.0 / 3.0).abs() < 1.0e-5);
@@ -1891,18 +2086,28 @@ mod tests {
                     .total_cmp(&right.2)
                     .then_with(|| left.0.cmp(&right.0))
             });
+            let cpu_scores = expected
+                .iter()
+                .map(|(row, raw, _rank)| (*row, *raw))
+                .collect::<std::collections::HashMap<_, _>>();
             expected.truncate(7);
 
-            assert_eq!(
-                actual.iter().map(|hit| hit.0).collect::<Vec<_>>(),
-                expected.iter().map(|hit| hit.0).collect::<Vec<_>>(),
-                "resident flat ids for {metric:?}"
-            );
-            for ((_, actual), (_, expected, _)) in actual.iter().zip(expected) {
-                let tolerance = (expected.abs() * 1.0e-4).max(1.0e-5);
+            assert_eq!(actual.len(), expected.len(), "resident flat hit count");
+            let mut seen = HashSet::new();
+            for ((row, actual), (_, _expected, expected_rank)) in actual.iter().zip(expected) {
+                assert!(seen.insert(*row), "duplicate resident row for {metric:?}");
+                let cpu_score = cpu_scores[row];
+                let score_tolerance = (cpu_score.abs() * 1.0e-4).max(1.0e-5);
                 assert!(
-                    (actual - expected).abs() <= tolerance,
-                    "resident flat score for {metric:?}: {actual} vs {expected}"
+                    (actual - cpu_score).abs() <= score_tolerance,
+                    "resident flat score for {metric:?}, row {row}: {actual} vs {cpu_score}"
+                );
+
+                let cpu_rank = distances::rank_value(metric, cpu_score);
+                let rank_tolerance = (expected_rank.abs() * 1.0e-4).max(1.0e-5);
+                assert!(
+                    (cpu_rank - expected_rank).abs() <= rank_tolerance,
+                    "resident flat rank for {metric:?}, row {row}: {cpu_rank} vs {expected_rank}"
                 );
             }
         }
@@ -1941,5 +2146,17 @@ mod tests {
                 boundary - 1,
             ]
         );
+
+        let overflow_vectors = vec![f32::MAX, -f32::MAX];
+        let (prepared, metadata) = prepare_resident_matrix(overflow_vectors, 1, Metric::L2);
+        let resident =
+            ResidentMatrixInner::new(Arc::clone(&runtime), Metric::L2, 1, 2, &prepared, &metadata)
+                .unwrap();
+        let (query, scale, norm_squared) = prepare_resident_query(&[f32::MAX], Metric::L2);
+        let mut scratch = resident.take_scratch().unwrap();
+        let actual = resident
+            .execute_search(&mut scratch, &query, scale, norm_squared, 2)
+            .unwrap();
+        assert_eq!(actual, vec![(0, 0.0)]);
     }
 }

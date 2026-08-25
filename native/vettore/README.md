@@ -9,6 +9,7 @@ Current native surface:
 
 - portable SIMD and optional wgpu distance/similarity kernels
 - CPU/GPU vector normalization and row-selective mean pooling
+- generation-aware GPU-resident exact Flat search and batched reranking
 - sign-bit compression
 - native HNSW index resource
 - MUVERA/FDE query encoding

@@ -5,36 +5,7 @@ Semantic Versioning.
 
 ## [Unreleased]
 
-### Added
-
-- Added an exact GPU Flat search path with a generation-aware resident embedding
-  matrix, one-query-by-all-rows scoring shaders for every metric, device-side
-  two-stage top-k reduction, and readback of only the final ids and scores.
-- Added batched GPU scoring for exact adaptive/hybrid reranks and a dedicated
-  cold-upload versus warm-query Flat benchmark.
-
-### Changed
-
-- Replaced the Flat index's fragmented vector map with a contiguous row-major
-  matrix plus id-to-row map. CPU exact scans retain portable SIMD kernels with
-  improved locality, while mutations atomically invalidate the optional GPU
-  snapshot.
-- Vectorized the f64 accumulation used by stable cosine scoring and exceptional
-  overflow recovery, so numerical safeguards no longer force those hot loops
-  back to scalar iteration.
-- Flat index options now accept `:gpu`, `:gpu_min_size`, and `:gpu_fallback`.
-  Automatic selection uses the real `rows * dimensions` search workload.
-- GPU Flat queries reuse bounded pools of query, score, top-k, uniform, bind
-  group, and staging resources. Concurrent warm searches do not hold the cache
-  construction lock while dispatching.
-
-### Fixed
-
-- Preserved deterministic external-id tie ordering across CPU and GPU exact
-  search, rebuilt resident buffers after every effective mutation, and routed
-  numerically unsafe device ranges through the configured SIMD fallback.
-
-## [0.3.5] - Unreleased
+## [0.3.5] - 2026-08-25
 
 ### Added
 
@@ -56,16 +27,33 @@ Semantic Versioning.
 - Added shape-preserving wrappers and Nx conversion, backend transfer/type
   helpers, plus matrix `stack/2`, `take_rows_f32/4`, shape, and full-validation
   APIs.
+- Added an exact GPU Flat search path with a generation-aware resident embedding
+  matrix, one-query-by-all-rows scoring shaders for every metric, device-side
+  two-stage top-k reduction, and readback of only the final ids and scores.
+- Added batched GPU scoring for exact adaptive/hybrid reranks and a dedicated
+  cold-upload versus warm-query Flat benchmark.
 
 ### Changed
 
+- Replaced the Flat index's fragmented vector map with a contiguous row-major
+  matrix plus id-to-row map. CPU exact scans retain portable SIMD kernels with
+  improved locality, while mutations atomically invalidate the optional GPU
+  snapshot.
 - Extended every `Vettore.Distance` dense metric and normalization helper with
   per-call compute options while preserving existing arities.
 - Nx remains runtime-only and absent from both Mix and Cargo dependencies; GPU
   execution is implemented entirely in Rust and does not use Nx.
-- GPU calls now run concurrently without a process-wide execution mutex. Failed
-  initialization is retryable, runtime failures invalidate the cached device,
-  and readback waits have a bounded timeout.
+- Vectorized the f64 accumulation used by stable cosine scoring and exceptional
+  overflow recovery, so numerical safeguards no longer force those hot loops
+  back to scalar iteration.
+- Flat index options now accept `:gpu`, `:gpu_min_size`, and `:gpu_fallback`.
+  Automatic selection uses the real `rows * dimensions` search workload.
+- GPU Flat queries reuse bounded pools of query, score, top-k, uniform, bind
+  group, and staging resources. Concurrent warm searches do not hold the cache
+  construction lock while dispatching.
+- GPU calls run concurrently without a process-wide execution mutex. Runtime
+  failures invalidate the cached device, initialization failures use a bounded
+  retry window, and readback waits default to a configurable 10-second timeout.
 
 ### Fixed
 
@@ -82,12 +70,38 @@ Semantic Versioning.
 - Added direct GPU NIF paths for little-endian f32 binaries, structural binary
   dimension checks, GPU-backed CI with lavapipe, Vector/Compute doctests, and an
   explicit Rust 1.91 MSRV check.
+- Aligned transient CPU and GPU top-k overflow semantics with Flat search: only
+  the unrepresentable row is skipped, while valid candidates are retained.
+- Added explicit per-score validity in resident shaders so overflow cannot be
+  mistaken for a zero-valued candidate, including at the finite f32 boundary.
+- Made hardware-dependent parity tests and benchmark preflights aware of f32
+  reduction-order ties. Scores and unambiguous ranks remain checked, while ids
+  may permute inside a numerically tied boundary group.
+- Made the resident GPU benchmark parse metrics through a closed lookup table,
+  fixing its CI preflight in a fresh BEAM where the requested metric atom did
+  not already exist.
+- Added strict resident-GPU parity coverage over committed and freshly inferred
+  384-dimensional `BAAI/bge-small-en-v1.5` document/query embeddings, including
+  semantic retrieval and resident-cache reuse assertions.
+- Rebuilt resident buffers after every effective mutation and cached
+  deterministic build failures by index generation, preventing repeated full
+  snapshots for an unchanged unsupported matrix.
 
 ### Performance
 
 - GPU devices and compiled pipelines are initialized lazily and reused. CPU
   calls skip GPU detection entirely, and GPU mean pooling uploads only selected
   rows rather than the complete model matrix.
+- Flat snapshot sorting, device upload, dispatch, and readback now happen
+  outside the index read lock; writers are blocked only while the immutable host
+  snapshot is copied.
+- Replaced the single-thread-per-chunk resident top-k pass with a 16-lane local
+  reduction followed by the compact final merge.
+- Parallelized GPU mean pooling across 256 lanes per output column and scaled
+  each selected column before accumulation, reducing drift and avoiding
+  representable means overflowing during intermediate f32 sums.
+- Cached failed GPU runtime initialization for ten seconds so hosts without an
+  adapter do not enumerate and request a device on every fallback call.
 
 ## [0.3.4] - 2026-08-23
 

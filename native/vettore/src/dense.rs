@@ -134,6 +134,11 @@ mod tests {
         assert_eq!(metric_f32_le(&left, &right, Metric::InnerProduct), Ok(50.0));
         assert_eq!(normalize_f32_le(&left, 0), Ok(vec![3.0, 4.0]));
         assert_eq!(normalize_f32_le(&left, 1), Ok(vec![0.6, 0.8]));
+        assert!(normalize_f32_le(&left, 2)
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite()));
+        assert_eq!(normalize_f32_le(&left, 3), Ok(vec![0.0, 1.0]));
         assert!(normalize_f32_le(&left, 99).is_err());
         assert!(metric_f32_le(&left, &encode(&[1.0]), Metric::L2).is_err());
     }

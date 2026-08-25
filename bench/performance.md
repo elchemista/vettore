@@ -46,14 +46,15 @@ VETTORE_BENCH_LIMIT=10 \
 mix run bench/gpu_flat_bench.exs
 ```
 
-The script builds identical CPU and GPU collections, verifies top-k ids before
-timing, reports the first GPU query separately (resident-matrix upload plus
-search), and then compares warm resident queries against the contiguous SIMD
-scan. The useful break-even point depends on adapter, driver, dimensions,
-collection size, query concurrency, and mutation frequency. Measure warm and
-cold numbers separately: a workload that rebuilds the matrix after every write
-does not have the same economics as a read-heavy collection loaded with one
-`put_many/2`.
+The script builds identical CPU and GPU collections, verifies rank-by-rank score
+parity and every unambiguous CPU id before timing, and permits id permutations
+only inside an f32-tied top-k boundary. It reports the first GPU query separately
+(resident-matrix upload plus search), then compares warm resident queries
+against the contiguous SIMD scan. The useful break-even point depends on
+adapter, driver, dimensions, collection size, query concurrency, and mutation
+frequency. Measure warm and cold numbers separately: a workload that rebuilds
+the matrix after every write does not have the same economics as a read-heavy
+collection loaded with one `put_many/2`.
 
 Available settings are `VETTORE_BENCH_DIMENSIONS`, `VETTORE_BENCH_BATCH`,
 `VETTORE_BENCH_LIMIT`, `VETTORE_BENCH_METRIC`, `VETTORE_BENCH_SEED`,

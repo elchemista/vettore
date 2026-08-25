@@ -326,6 +326,17 @@ defmodule VettoreGpuComputeTest do
 
         assert {:error, :metric_overflow} =
                  Vettore.Distance.l2_squared([maximum], [0.0], opts)
+
+        repeated_maximum = f32_binary([maximum, maximum])
+
+        assert {:ok, [pooled_maximum]} =
+                 Vector.mean_pool_f32(repeated_maximum, 1, [0, 1],
+                   as: :list,
+                   gpu: true,
+                   gpu_fallback: :error
+                 )
+
+        assert pooled_maximum == maximum
       end
     end
 

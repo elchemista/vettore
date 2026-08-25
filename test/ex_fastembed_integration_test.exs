@@ -3,7 +3,7 @@ Code.require_file("support/fastembed_fixture.ex", __DIR__)
 defmodule VettoreExFastembedIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias Vettore.{Collection, Distance, Embedding, Result}
+  alias Vettore.{Collection, Compute, Distance, Embedding, Nifs, Result}
   alias Vettore.Test.FastembedFixture
 
   setup_all do
@@ -35,6 +35,52 @@ defmodule VettoreExFastembedIntegrationTest do
     end
   end
 
+  test "resident GPU Flat matches SIMD on real FastEmbed embeddings", %{fixture: fixture} do
+    if Compute.gpu_detected?() do
+      {:ok, cpu} =
+        build_collection(:real_fastembed_gpu_cpu, fixture.dimensions,
+          index: :flat,
+          index_options: [gpu: false]
+        )
+
+      {:ok, gpu} =
+        build_collection(:real_fastembed_gpu_strict, fixture.dimensions,
+          index: :flat,
+          index_options: [gpu: true, gpu_fallback: :error, gpu_min_size: 1]
+        )
+
+      on_exit(fn ->
+        Vettore.close(cpu)
+        Vettore.close(gpu)
+      end)
+
+      values = embeddings(fixture)
+      :ok = Collection.put_many(cpu, values)
+      :ok = Collection.put_many(gpu, values)
+      assert {:ok, {0, false}} = Nifs.flat_gpu_cache_info(gpu.index_state)
+
+      for query <- fixture.queries do
+        assert {:ok, cpu_results} = Collection.search(cpu, query.vector, limit: 5)
+        assert {:ok, gpu_results} = Collection.search(gpu, query.vector, limit: 5)
+
+        assert Enum.map(gpu_results, & &1.id) == Enum.map(cpu_results, & &1.id)
+
+        for {expected, actual} <- Enum.zip(cpu_results, gpu_results) do
+          assert_in_delta actual.score, expected.score, max(abs(expected.score) * 1.0e-4, 1.0e-5)
+        end
+
+        assert query.category in (gpu_results
+                                  |> Enum.take(3)
+                                  |> Enum.map(& &1.metadata.category))
+      end
+
+      assert {:ok, {1, true}} = Nifs.flat_gpu_cache_info(gpu.index_state)
+    else
+      refute System.get_env("VETTORE_REQUIRE_GPU") == "1",
+             "VETTORE_REQUIRE_GPU=1 but real-embedding GPU search has no adapter"
+    end
+  end
+
   test "snapshot round trips preserve rankings for real embeddings", %{fixture: fixture} do
     path = temporary_path("fastembed-snapshot")
     {:ok, collection} = build_collection(:fastembed_snapshot, fixture.dimensions)
@@ -56,7 +102,9 @@ defmodule VettoreExFastembedIntegrationTest do
   end
 
   @tag skip: System.get_env("VETTORE_TEST_EX_FASTEMBED") != "1"
-  test "fresh ex_fastembed inference matches the committed artifact", %{fixture: fixture} do
+  test "fresh ex_fastembed inference matches the artifact and searches on the GPU", %{
+    fixture: fixture
+  } do
     generated = FastembedFixture.generate!()
 
     assert generated.model == fixture.model
@@ -68,6 +116,30 @@ defmodule VettoreExFastembedIntegrationTest do
     for {expected, actual} <- Enum.zip(fixture_vectors, generated_vectors) do
       assert {:ok, similarity} = Distance.cosine(expected, actual)
       assert similarity > 0.999_9
+    end
+
+    if Compute.gpu_detected?() do
+      {:ok, gpu} =
+        build_collection(:fresh_fastembed_gpu_strict, generated.dimensions,
+          index: :flat,
+          index_options: [gpu: true, gpu_fallback: :error, gpu_min_size: 1]
+        )
+
+      on_exit(fn -> Vettore.close(gpu) end)
+      :ok = Collection.put_many(gpu, embeddings(generated))
+
+      for query <- generated.queries do
+        assert {:ok, results} = Collection.search(gpu, query.vector, limit: 5)
+
+        assert query.category in (results
+                                  |> Enum.take(3)
+                                  |> Enum.map(& &1.metadata.category))
+      end
+
+      assert {:ok, {1, true}} = Nifs.flat_gpu_cache_info(gpu.index_state)
+    else
+      refute System.get_env("VETTORE_REQUIRE_GPU") == "1",
+             "VETTORE_REQUIRE_GPU=1 but fresh real embeddings cannot reach the GPU"
     end
   end
 
