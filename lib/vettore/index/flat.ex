@@ -3,21 +3,29 @@ defmodule Vettore.Index.Flat do
   Native exact flat-scan index over mirrored ids and vectors.
 
   ETS remains the canonical record store for values and metadata. The native
-  resource keeps only ids and vectors so an exact scan is one native call.
+  resource keeps ids plus a contiguous vector matrix so an exact CPU scan is one
+  native SIMD call. `:gpu`, `:gpu_min_size`, and `:gpu_fallback` index options
+  enable a generation-aware resident matrix: warm searches upload only the
+  query, reduce top-k on the device, and read back compact hits.
+
+  Effective mutations invalidate the device snapshot. The next eligible query
+  rebuilds it once; concurrent warm queries share the immutable matrix and use
+  independent pooled scratch buffers. GPU top-k supports up to 64 returned
+  results and follows the configured fallback policy above that limit.
   """
 
   @behaviour Vettore.Index
 
-  alias Vettore.{Distance, Embedding, Identifier, Index, Nifs, Result}
+  alias Vettore.{Compute, Distance, Embedding, Identifier, Index, Nifs, Result}
 
   @spec new(Distance.metric(), keyword()) :: {:ok, reference()} | {:error, term()}
   @impl Vettore.Index
   def new(metric, opts \\ [])
 
   def new(metric, opts) when is_list(opts) do
-    if Keyword.keyword?(opts) and opts == [],
-      do: new_metric(metric),
-      else: {:error, :invalid_flat_options}
+    with :ok <- validate_options(opts) do
+      new_metric(metric)
+    end
   end
 
   def new(_metric, _opts), do: {:error, :invalid_flat_options}
@@ -60,8 +68,46 @@ defmodule Vettore.Index.Flat do
          limit = Keyword.get(opts, :limit, 10),
          :ok <- Index.validate_limit(limit),
          {:ok, query} <- Index.prepare_query(context, query),
-         {:ok, hits} <- Nifs.flat_search(index_state, query, limit) do
+         {:ok, workload} <- search_workload(context.index_options, index_state),
+         {:ok, hits} <- run_search(context.index_options, workload, index_state, query, limit) do
       {:ok, Index.hydrate_results(context, hits)}
+    end
+  end
+
+  @spec search_workload(keyword(), reference()) :: {:ok, non_neg_integer()} | {:error, term()}
+  defp search_workload(compute_options, index_state) do
+    with {:ok, selection} <- Compute.selection(compute_options) do
+      workload_for_selection(selection, index_state)
+    end
+  end
+
+  @spec workload_for_selection(boolean() | :auto, reference()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  defp workload_for_selection(:auto, index_state) do
+    with {:ok, {rows, dimensions}} <- Nifs.flat_workload(index_state) do
+      {:ok, rows * dimensions}
+    end
+  end
+
+  defp workload_for_selection(_selection, _index_state), do: {:ok, 0}
+
+  @spec run_search(keyword(), non_neg_integer(), reference(), [float()], pos_integer()) ::
+          {:ok, [{String.t(), float()}]} | {:error, term()}
+  defp run_search(compute_options, workload, index_state, query, limit) do
+    Compute.run(
+      compute_options,
+      workload,
+      fn -> Nifs.flat_search(index_state, query, limit) end,
+      fn -> Nifs.flat_gpu_search(index_state, query, limit) end
+    )
+    |> Compute.normalize_search_result()
+  end
+
+  @spec validate_options(keyword()) :: :ok | {:error, term()}
+  defp validate_options(opts) do
+    case Compute.validate_options(opts) do
+      {:error, :invalid_options} -> {:error, :invalid_flat_options}
+      result -> result
     end
   end
 

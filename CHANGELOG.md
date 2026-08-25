@@ -5,6 +5,35 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Added an exact GPU Flat search path with a generation-aware resident embedding
+  matrix, one-query-by-all-rows scoring shaders for every metric, device-side
+  two-stage top-k reduction, and readback of only the final ids and scores.
+- Added batched GPU scoring for exact adaptive/hybrid reranks and a dedicated
+  cold-upload versus warm-query Flat benchmark.
+
+### Changed
+
+- Replaced the Flat index's fragmented vector map with a contiguous row-major
+  matrix plus id-to-row map. CPU exact scans retain portable SIMD kernels with
+  improved locality, while mutations atomically invalidate the optional GPU
+  snapshot.
+- Vectorized the f64 accumulation used by stable cosine scoring and exceptional
+  overflow recovery, so numerical safeguards no longer force those hot loops
+  back to scalar iteration.
+- Flat index options now accept `:gpu`, `:gpu_min_size`, and `:gpu_fallback`.
+  Automatic selection uses the real `rows * dimensions` search workload.
+- GPU Flat queries reuse bounded pools of query, score, top-k, uniform, bind
+  group, and staging resources. Concurrent warm searches do not hold the cache
+  construction lock while dispatching.
+
+### Fixed
+
+- Preserved deterministic external-id tie ordering across CPU and GPU exact
+  search, rebuilt resident buffers after every effective mutation, and routed
+  numerically unsafe device ranges through the configured SIMD fallback.
+
 ## [0.3.5] - Unreleased
 
 ### Added

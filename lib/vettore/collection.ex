@@ -5,7 +5,7 @@ defmodule Vettore.Collection do
   This module provides functions for creating, managing, and querying vector collections.
   """
 
-  alias Vettore.{Distance, Embedding, Identifier, Index, Nifs, Result}
+  alias Vettore.{Compute, Distance, Embedding, Identifier, Index, Nifs, Result}
   alias Vettore.Store.ETS
 
   @type t :: %__MODULE__{
@@ -945,11 +945,16 @@ defmodule Vettore.Collection do
   defp score_embeddings(%__MODULE__{} = collection, embeddings, query, limit, dimensions) do
     with :ok <- validate_runtime_embeddings(embeddings),
          {:ok, vectors} <- scoring_vectors(embeddings, collection.dimensions),
+         workload = length(vectors) * dimensions,
+         compute_options =
+           Keyword.take(collection.index_options, [:gpu, :gpu_fallback, :gpu_min_size]),
          {:ok, hits} <-
-           Nifs.vector_top_k(
+           run_vector_top_k(
+             compute_options,
+             workload,
              vectors,
              query,
-             metric_code(collection.metric),
+             collection.metric,
              dimensions,
              limit
            ) do
@@ -963,6 +968,27 @@ defmodule Vettore.Collection do
          end
        end)}
     end
+  end
+
+  @spec run_vector_top_k(
+          keyword(),
+          non_neg_integer(),
+          [{String.t(), [float()]}],
+          [float()],
+          Distance.metric(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: {:ok, [{String.t(), float()}]} | {:error, term()}
+  defp run_vector_top_k(options, workload, vectors, query, metric, dimensions, limit) do
+    metric = metric_code(metric)
+
+    Compute.run(
+      options,
+      workload,
+      fn -> Nifs.vector_top_k(vectors, query, metric, dimensions, limit) end,
+      fn -> Nifs.gpu_vector_top_k(vectors, query, metric, dimensions, limit) end
+    )
+    |> Compute.normalize_search_result()
   end
 
   @spec scoring_vectors([Embedding.t()], pos_integer()) ::
