@@ -27,13 +27,23 @@ VETTORE_BENCH_CANDIDATES=32 \
 VETTORE_BENCH_TIME=1 \
 VETTORE_BENCH_WARMUP=0 \
 mix run bench/search_modes_bench.exs
+VETTORE_BUILD=1 \
+VETTORE_GPU_ALLOW_SOFTWARE=1 \
+VETTORE_BENCH_DIMENSIONS=16 \
+VETTORE_BENCH_BATCH=64 \
+VETTORE_BENCH_LIMIT=5 \
+VETTORE_BENCH_TIME=1 \
+VETTORE_BENCH_WARMUP=0 \
+mix run bench/gpu_flat_bench.exs
 VETTORE_BUILD=1 mix credo --strict
 VETTORE_BUILD=1 mix dialyzer
 mix hex.audit
 cargo fmt --manifest-path native/vettore/Cargo.toml --all --check
+VETTORE_GPU_ALLOW_SOFTWARE=1 VETTORE_REQUIRE_GPU=1 \
 cargo test --manifest-path native/vettore/Cargo.toml --locked
 cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-features --features nif_version_2_15
 cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-features --features nif_version_2_16
+VETTORE_GPU_ALLOW_SOFTWARE=1 VETTORE_REQUIRE_GPU=1 \
 cargo llvm-cov --manifest-path native/vettore/Cargo.toml --all-features --ignore-filename-regex 'src/(nifs|gpu)\.rs' --summary-only --fail-under-lines 98
 cargo clippy --manifest-path native/vettore/Cargo.toml --all-targets --all-features --locked -- -D warnings
 VETTORE_BUILD=1 mix docs
@@ -49,8 +59,9 @@ through the BEAM and an available hardware or software wgpu adapter. Pure GPU
 validation/reduction logic lives in `src/gpu_math.rs` and remains subject to the
 98% Rust line threshold with every other algorithm module.
 
-The benchmark smoke run must preflight every search mode successfully and print
-overlap against the exact vector and multi-vector baselines before timing.
+The benchmark smoke runs must preflight every search mode and validate GPU Flat
+scores plus all unambiguous ids before timing. Ids inside an f32-tied top-k
+boundary may differ across adapters and reduction orders.
 
 Before creating the tag, open **Actions → Build precompiled NIFs → Run
 workflow**, select the release branch, and run it manually. A manual run builds
@@ -119,4 +130,5 @@ mix hex.publish
 In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3.5"}` without
 Rust installed. Create flat and HNSW collections, insert records with metadata,
 search them, snapshot/reload them, and call `Vettore.close/1`. Finally, mark the
-changelog entry with the release date.
+changelog entry with the release date if it was not already finalized in the
+release commit.

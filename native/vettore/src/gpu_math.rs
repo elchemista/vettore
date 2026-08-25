@@ -16,6 +16,11 @@ pub(crate) struct PreparedNormalization {
     pub(crate) second: f32,
 }
 
+pub(crate) struct PreparedMeanPool {
+    pub(crate) values: Vec<f32>,
+    pub(crate) column_scales: Vec<f32>,
+}
+
 pub(crate) fn metric_code(metric: Metric) -> u32 {
     match metric {
         Metric::L2 => 0,
@@ -257,11 +262,11 @@ fn checked_f32(value: f64) -> Result<f32, String> {
     }
 }
 
-pub(crate) fn selected_matrix_rows(
+pub(crate) fn selected_matrix_values(
     matrix: &[u8],
     dimensions: usize,
     row_indices: &[usize],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<f32>, String> {
     if dimensions == 0 {
         return Err("invalid dimensions".to_string());
     }
@@ -277,21 +282,50 @@ pub(crate) fn selected_matrix_rows(
     }
 
     let row_count = matrix.len() / row_bytes;
-    let selected_size = row_bytes
+    let selected_size = dimensions
         .checked_mul(row_indices.len())
         .ok_or_else(|| "matrix shape mismatch".to_string())?;
-    let mut selected_matrix = Vec::with_capacity(selected_size);
+    let mut selected_values = Vec::with_capacity(selected_size);
 
     for &row_index in row_indices {
         if row_index >= row_count {
             return Err("invalid row index".to_string());
         }
         let start = row_index * row_bytes;
-        crate::dense::decode_f32_le(&matrix[start..start + row_bytes])?;
-        selected_matrix.extend_from_slice(&matrix[start..start + row_bytes]);
+        selected_values.extend(crate::dense::decode_f32_le(
+            &matrix[start..start + row_bytes],
+        )?);
     }
 
-    Ok(selected_matrix)
+    Ok(selected_values)
+}
+
+pub(crate) fn prepare_mean_pool(
+    matrix: &[u8],
+    dimensions: usize,
+    row_indices: &[usize],
+) -> Result<PreparedMeanPool, String> {
+    let mut values = selected_matrix_values(matrix, dimensions, row_indices)?;
+    let mut column_scales = vec![0.0f32; dimensions];
+
+    for row in values.chunks_exact(dimensions) {
+        for (scale, value) in column_scales.iter_mut().zip(row) {
+            *scale = scale.max(value.abs());
+        }
+    }
+
+    for row in values.chunks_exact_mut(dimensions) {
+        for (value, scale) in row.iter_mut().zip(&column_scales) {
+            if *scale != 0.0 {
+                *value /= *scale;
+            }
+        }
+    }
+
+    Ok(PreparedMeanPool {
+        values,
+        column_scales,
+    })
 }
 
 #[cfg(test)]
@@ -334,6 +368,11 @@ mod tests {
         );
         assert_eq!(finish_metric(Metric::Jaccard, &[[0.0; 4]]), Ok(0.0));
         assert!(finish_metric(Metric::L2Squared, &[[f32::INFINITY; 4]]).is_err());
+        assert!(finish_metric(
+            Metric::L2Squared,
+            &[[f32::MAX, 0.0, 0.0, 0.0], [f32::MAX, 0.0, 0.0, 0.0]]
+        )
+        .is_err());
     }
 
     #[test]
@@ -377,6 +416,10 @@ mod tests {
         let l2 = prepare_normalization(&[1.0e-23; 4], 1).unwrap();
         assert_eq!(l2.vector, vec![1.0; 4]);
         assert_eq!(l2.first, 2.0);
+        assert_eq!(
+            prepare_normalization(&[0.0, 0.0], 1).unwrap().vector,
+            [0.0, 0.0]
+        );
 
         let zscore = prepare_normalization(&[10_000.0, 10_000.1], 2).unwrap();
         assert_eq!(zscore.first, 0.0);
@@ -392,27 +435,40 @@ mod tests {
     }
 
     #[test]
-    fn selected_rows_match_the_cpu_matrix_contract() {
+    fn selected_values_match_the_cpu_matrix_contract() {
         let matrix = [1.0f32, 2.0, 3.0, 4.0]
             .into_iter()
             .flat_map(f32::to_le_bytes)
             .collect::<Vec<_>>();
         assert_eq!(
-            selected_matrix_rows(&matrix, 2, &[0, 1]),
-            Ok(matrix.clone())
+            selected_matrix_values(&matrix, 2, &[0, 1]),
+            Ok(vec![1.0, 2.0, 3.0, 4.0])
         );
         assert_eq!(
-            selected_matrix_rows(&matrix, 2, &[1, 1]),
-            Ok([&matrix[8..], &matrix[8..]].concat())
+            selected_matrix_values(&matrix, 2, &[1, 1]),
+            Ok(vec![3.0, 4.0, 3.0, 4.0])
         );
-        assert!(selected_matrix_rows(&matrix, 0, &[0]).is_err());
-        assert!(selected_matrix_rows(&matrix, usize::MAX, &[0]).is_err());
-        assert!(selected_matrix_rows(&matrix, 2, &[]).is_err());
-        assert!(selected_matrix_rows(&[], 2, &[0]).is_err());
-        assert!(selected_matrix_rows(&matrix[..15], 2, &[0]).is_err());
-        assert!(selected_matrix_rows(&matrix, 2, &[2]).is_err());
+        assert!(selected_matrix_values(&matrix, 0, &[0]).is_err());
+        assert!(selected_matrix_values(&matrix, usize::MAX, &[0]).is_err());
+        assert!(selected_matrix_values(&matrix, 2, &[]).is_err());
+        assert!(selected_matrix_values(&[], 2, &[0]).is_err());
+        assert!(selected_matrix_values(&matrix[..15], 2, &[0]).is_err());
+        assert!(selected_matrix_values(&matrix, 2, &[2]).is_err());
 
         let nan = f32::NAN.to_le_bytes();
-        assert!(selected_matrix_rows(&nan, 1, &[0]).is_err());
+        assert!(selected_matrix_values(&nan, 1, &[0]).is_err());
+    }
+
+    #[test]
+    fn mean_pool_preparation_scales_each_column_without_losing_row_selection() {
+        let matrix = [1.0f32, 1.0e30, -2.0, 5.0e29, 4.0, -1.0e30]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let prepared = prepare_mean_pool(&matrix, 2, &[2, 0]).unwrap();
+
+        assert_eq!(prepared.column_scales, [4.0, 1.0e30]);
+        assert_eq!(prepared.values, [1.0, -1.0, 0.25, 1.0]);
+        assert!(prepare_mean_pool(&matrix, 2, &[]).is_err());
     }
 }

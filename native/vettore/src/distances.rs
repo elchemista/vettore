@@ -674,6 +674,7 @@ mod tests {
 
         assert!(compute(Metric::L2Squared, &[large], &[0.0]).is_err());
         assert!(compute(Metric::L2, &[max, max], &[0.0, 0.0]).is_err());
+        assert!(compute(Metric::L2, &[max; 4], &[0.0; 4]).is_err());
         assert!(compute(Metric::Manhattan, &[max, max], &[0.0, 0.0]).is_err());
         assert!(compute(Metric::Chebyshev, &[max], &[-max]).is_err());
         assert_eq!(compute(Metric::Jaccard, &[0.0, 0.0], &[0.0, 0.0]), Ok(0.0));

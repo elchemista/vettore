@@ -119,6 +119,7 @@ defmodule VettoreGpuFlatSearchTest do
         assert {:ok, {1, true}} = Nifs.flat_gpu_cache_info(gpu.index_state)
 
         assert {:ok, repeated} = Collection.search(gpu, query, limit: 7)
+        assert Enum.map(repeated, & &1.id) == Enum.map(gpu_results, & &1.id)
         assert_same_results(gpu_results, repeated, metric)
         assert {:ok, {1, true}} = Nifs.flat_gpu_cache_info(gpu.index_state)
 
@@ -180,14 +181,25 @@ defmodule VettoreGpuFlatSearchTest do
         assert {:ok, expected} = Nifs.vector_top_k(vectors, query, code, 8, 7)
         assert {:ok, actual} = Nifs.gpu_vector_top_k(vectors, query, code, 8, 7)
 
-        assert Enum.map(actual, &elem(&1, 0)) == Enum.map(expected, &elem(&1, 0)),
-               "transient GPU ids differ for #{inspect(metric)}"
-
-        Enum.zip(expected, actual)
-        |> Enum.each(fn {{_, expected}, {_, actual}} ->
-          assert_in_delta actual, expected, max(abs(expected) * 1.0e-4, 1.0e-5)
-        end)
+        assert_top_k_parity(expected, actual, "transient GPU results for #{inspect(metric)}")
       end
+    else
+      assert true
+    end
+  end
+
+  test "transient CPU and GPU reranks both skip only overflowing rows" do
+    if Compute.gpu_detected?() do
+      maximum = 3.402_823_466_385_288_6e38
+      vectors = [{"safe", [maximum]}, {"overflow", [-maximum]}]
+
+      assert {:ok, [{"safe", cpu_score}]} = Nifs.vector_top_k(vectors, [maximum], 0, 1, 2)
+
+      assert {:ok, [{"safe", gpu_score}]} =
+               Nifs.gpu_vector_top_k(vectors, [maximum], 0, 1, 2)
+
+      assert cpu_score == 0.0
+      assert gpu_score == cpu_score
     else
       assert true
     end
@@ -273,13 +285,40 @@ defmodule VettoreGpuFlatSearchTest do
     do: rem(row * 17 + column * 11, 97) / 19.0 - 2.5
 
   defp assert_same_results(expected, actual, metric) do
-    assert Enum.map(actual, & &1.id) == Enum.map(expected, & &1.id),
-           "resident Flat ids differ for #{inspect(metric)}"
+    assert_top_k_parity(expected, actual, "resident Flat results for #{inspect(metric)}")
+  end
+
+  defp assert_top_k_parity(expected, actual, label) do
+    assert length(actual) == length(expected), "#{label}: hit counts differ"
 
     Enum.zip(expected, actual)
     |> Enum.each(fn {expected, actual} ->
-      tolerance = max(abs(expected.score) * 1.0e-4, 1.0e-5)
-      assert_in_delta actual.score, expected.score, tolerance
+      expected_score = hit_score(expected)
+      actual_score = hit_score(actual)
+      tolerance = score_tolerance(expected_score)
+      assert_in_delta actual_score, expected_score, tolerance, label
     end)
+
+    boundary_score = expected |> List.last() |> hit_score()
+
+    required_ids =
+      expected
+      |> Enum.reject(&scores_tied?(hit_score(&1), boundary_score))
+      |> MapSet.new(&hit_id/1)
+
+    actual_ids = MapSet.new(actual, &hit_id/1)
+
+    assert MapSet.subset?(required_ids, actual_ids),
+           "#{label}: an unambiguous CPU hit is missing"
   end
+
+  defp hit_id(%Result{id: id}), do: id
+  defp hit_id({id, _score}), do: id
+  defp hit_score(%Result{score: score}), do: score
+  defp hit_score({_id, score}), do: score
+
+  defp scores_tied?(left, right),
+    do: abs(left - right) <= max(score_tolerance(left), score_tolerance(right))
+
+  defp score_tolerance(score), do: max(abs(score) * 1.0e-4, 1.0e-5)
 end

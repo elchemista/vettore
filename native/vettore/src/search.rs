@@ -53,7 +53,12 @@ pub fn vector_top_k(
             return Err("dimension mismatch".to_string());
         }
         crate::distances::validate_finite_vector(&vector[..dimensions])?;
-        let raw = crate::distances::compute(metric, &query[..dimensions], &vector[..dimensions])?;
+        let raw =
+            match crate::distances::compute(metric, &query[..dimensions], &vector[..dimensions]) {
+                Ok(raw) => raw,
+                Err(reason) if crate::distances::is_metric_overflow(&reason) => continue,
+                Err(reason) => return Err(reason),
+            };
         push_top_k(
             &mut heap,
             Hit {
@@ -248,6 +253,19 @@ mod tests {
         );
         assert!(
             vector_top_k(vec![("a".into(), vec![f32::NAN])], &[1.0], Metric::L2, 1, 1).is_err()
+        );
+    }
+
+    #[test]
+    fn vector_top_k_skips_only_rows_whose_score_overflows() {
+        let vectors = vec![
+            ("safe".into(), vec![0.0]),
+            ("overflow".into(), vec![-f32::MAX]),
+        ];
+
+        assert_eq!(
+            vector_top_k(vectors, &[f32::MAX], Metric::L2, 1, 2),
+            Ok(vec![("safe".into(), f32::MAX)])
         );
     }
 

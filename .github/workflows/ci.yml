@@ -72,14 +72,14 @@ jobs:
         run: mix format --check-formatted
 
       - name: Compile project
-        run: mix compile
+        run: mix compile --warnings-as-errors
 
       - name: Run tests and enforce coverage
         env:
           VETTORE_TEST_EX_FASTEMBED: "1"
           VETTORE_GPU_ALLOW_SOFTWARE: "1"
           VETTORE_REQUIRE_GPU: "1"
-        run: mix test --cover
+        run: mix test --cover --warnings-as-errors
 
       - name: Preflight every search-mode benchmark
         env:

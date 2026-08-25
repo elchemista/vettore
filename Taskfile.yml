@@ -59,13 +59,16 @@ tasks:
     cmd: mix dialyzer
 
   clippy:
-    desc: Run clippy
+    desc: Run the release Clippy gate
     dir: "native/{{.PROJECT_DIR_NAME}}"
-    cmd: cargo clippy
+    cmd: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   rust-coverage:
     desc: Enforce Rust algorithm coverage (requires cargo-llvm-cov)
     dir: "native/{{.PROJECT_DIR_NAME}}"
+    env:
+      VETTORE_GPU_ALLOW_SOFTWARE: 1
+      VETTORE_REQUIRE_GPU: 1
     cmd: cargo llvm-cov --all-features --ignore-filename-regex 'src/(nifs|gpu)\.rs' --summary-only --fail-under-lines 98
 
   clean:
@@ -86,6 +89,13 @@ tasks:
     env:
       VETTORE_BUILD: 1
     cmd: mix run bench/search_modes_bench.exs
+
+  benchmark-gpu:
+    desc: Benchmark and preflight resident GPU Flat search
+    env:
+      VETTORE_BUILD: 1
+      VETTORE_GPU_ALLOW_SOFTWARE: 1
+    cmd: mix run bench/gpu_flat_bench.exs
 
   rustler-precompiled-download:
     desc: Download precompiled files info
