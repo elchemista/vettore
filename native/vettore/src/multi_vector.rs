@@ -251,6 +251,24 @@ mod tests {
             score(&query, &document, Metric::InnerProduct),
             Err("score overflow".into())
         );
+        assert_eq!(
+            top_k(
+                vec![("document".into(), document)],
+                &query,
+                Metric::InnerProduct,
+                1
+            ),
+            Err("score overflow".into())
+        );
+        let query = vec![vec![f32::MAX]];
+        let documents = vec![
+            ("finite".into(), vec![vec![0.0]]),
+            ("overflow".into(), vec![vec![f32::MAX]]),
+        ];
+        assert_eq!(
+            top_k(documents, &query, Metric::InnerProduct, 2),
+            Err(crate::distances::METRIC_OVERFLOW.into())
+        );
     }
 
     #[test]

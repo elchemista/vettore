@@ -1,6 +1,6 @@
 [package]
 name = "vettore"
-version = "0.3.5"
+version = "0.3.6"
 authors = []
 edition = "2021"
 rust-version = "1.91"
@@ -24,6 +24,14 @@ naga = { version = "30.0.1", features = ["wgsl-in"] }
 default = ["nif_version_2_15"]
 nif_version_2_15 = ["rustler/nif_version_2_15"]
 nif_version_2_16 = ["rustler/nif_version_2_16"]
+
+[[bench]]
+name = "l2_duplicates"
+harness = false
+
+[[bench]]
+name = "dot_orthogonal"
+harness = false
 
 [profile.release]
 codegen-units = 1

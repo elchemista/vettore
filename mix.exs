@@ -1,7 +1,7 @@
 defmodule Vettore.MixProject do
   use Mix.Project
 
-  @version "0.3.5"
+  @version "0.3.6"
 
   def project do
     [
@@ -76,6 +76,7 @@ defmodule Vettore.MixProject do
              native/vettore/Cargo.toml
              native/vettore/Cargo.lock
              native/vettore/src
+             native/vettore/benches
       ),
       licenses: ["Apache-2.0"],
       links: %{

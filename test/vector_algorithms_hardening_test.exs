@@ -277,6 +277,16 @@ defmodule VettoreAlgorithmsHardeningTest do
       assert {:error, :invalid_mmr_args} =
                Distance.mmr_rerank([{"a", 1.0}, {"a", 0.5}], embeddings, :l2, 0.5, 1)
     end
+
+    test "MMR reports pairwise overflow without returning a partial rerank" do
+      max = 3.402_823_466_385_288_6e38
+      initial = [{"a", 1.0}, {"b", 0.9}, {"c", 0.8}]
+
+      for {metric, other} <- [{:l2, -max}, {:inner_product, max}, {:negative_inner_product, max}] do
+        vectors = [{"a", [max]}, {"b", [other]}, {"c", [0.0]}]
+        assert {:error, :metric_overflow} = Distance.mmr_rerank(initial, vectors, metric, 0.5, 3)
+      end
+    end
   end
 
   describe "MUVERA validation" do

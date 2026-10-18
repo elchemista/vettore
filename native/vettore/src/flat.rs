@@ -22,29 +22,29 @@ pub struct FlatIndex {
 }
 
 #[derive(Debug)]
-struct FlatHit {
-    id: String,
+struct FlatHit<'a> {
+    id: &'a str,
     raw: f32,
     rank: f32,
 }
 
-impl Eq for FlatHit {}
+impl Eq for FlatHit<'_> {}
 
-impl PartialEq for FlatHit {
+impl PartialEq for FlatHit<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.rank.total_cmp(&other.rank) == Ordering::Equal && self.id == other.id
     }
 }
 
-impl Ord for FlatHit {
+impl Ord for FlatHit<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.rank
             .total_cmp(&other.rank)
-            .then_with(|| self.id.cmp(&other.id))
+            .then_with(|| self.id.cmp(other.id))
     }
 }
 
-impl PartialOrd for FlatHit {
+impl PartialOrd for FlatHit<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -150,7 +150,7 @@ impl FlatIndex {
                 Err(reason) => return Err(reason),
             };
             let hit = FlatHit {
-                id: self.ids[row].clone(),
+                id: &self.ids[row],
                 raw,
                 rank: crate::distances::rank_value(self.metric, raw),
             };
@@ -166,7 +166,10 @@ impl FlatIndex {
         let mut hits = hits.into_vec();
         hits.sort();
 
-        Ok(hits.into_iter().map(|hit| (hit.id, hit.raw)).collect())
+        Ok(hits
+            .into_iter()
+            .map(|hit| (hit.id.to_owned(), hit.raw))
+            .collect())
     }
 
     fn validate_vector(&self, vector: &[f32]) -> Result<(), String> {
@@ -506,6 +509,9 @@ impl FlatResource {
     }
 
     fn read_index(&self) -> Result<std::sync::RwLockReadGuard<'_, FlatIndex>, String> {
+        // A writer panic can interrupt updates of ids, positions and vectors.
+        // Fail closed: unlike a disposable cache, this mirror cannot safely
+        // recover via into_inner(). Rebuild the index from canonical records.
         self.index
             .read()
             .map_err(|_| "flat lock poisoned".to_string())
@@ -538,6 +544,70 @@ fn cacheable_gpu_build_failure(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panicking_writer_leaves_the_index_closed_to_reads_and_writes() {
+        let resource = FlatResource::new(Metric::L2);
+        resource.insert("a".into(), vec![1.0]).unwrap();
+        let panic = std::panic::catch_unwind(|| {
+            let mut index = resource.index.write().unwrap();
+            index.ids.clear(); // Simulate an interrupted multi-field mutation.
+            panic!("interrupted writer");
+        });
+        assert!(panic.is_err());
+        assert_eq!(resource.workload(), Err("flat lock poisoned".into()));
+        assert_eq!(resource.search(&[1.0], 1), Err("flat lock poisoned".into()));
+        assert_eq!(
+            resource.search_gpu(&[1.0], 1),
+            Err("flat lock poisoned".into())
+        );
+        assert_eq!(
+            resource.insert("b".into(), vec![2.0]),
+            Err("flat lock poisoned".into())
+        );
+        assert_eq!(resource.clear(), Err("flat lock poisoned".into()));
+    }
+
+    #[test]
+    fn workload_reads_wait_for_a_consistent_completed_write() {
+        let resource = Arc::new(FlatResource::new(Metric::L2));
+        let mut writer = resource.write_index().unwrap();
+        let reader_resource = Arc::clone(&resource);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            reader_resource.workload()
+        });
+        started_rx.recv().unwrap();
+        writer.insert("row".into(), vec![1.0, 2.0]).unwrap();
+        drop(writer);
+        assert_eq!(reader.join().unwrap(), Ok((1, 2)));
+    }
+
+    #[test]
+    fn an_inflight_gpu_snapshot_survives_writes_without_republishing_stale_data() {
+        if !crate::gpu::detected() {
+            assert_ne!(std::env::var("VETTORE_REQUIRE_GPU").as_deref(), Ok("1"));
+            return;
+        }
+        let resource = FlatResource::new(Metric::L2);
+        resource.insert("old".into(), vec![1.0]).unwrap();
+        let snapshot = resource.build_gpu_cache(&[0.0], 1).unwrap().unwrap();
+        resource.delete("old").unwrap();
+        resource.insert("new".into(), vec![2.0]).unwrap();
+        // In-flight searches own one immutable generation, even after a writer.
+        assert_eq!(snapshot.ids, ["old"]);
+        assert_eq!(snapshot.matrix.search(&[0.0], 1).unwrap(), [(0, 1.0)]);
+        resource
+            .publish_gpu_state(snapshot.generation, FlatGpuCacheState::Ready(snapshot))
+            .unwrap();
+        assert_eq!(resource.gpu_cache_info(), Ok((1, false)));
+        assert_eq!(
+            resource.search_gpu(&[0.0], 1),
+            Ok(vec![("new".into(), 2.0)])
+        );
+        assert_eq!(resource.gpu_cache_info(), Ok((2, true)));
+    }
 
     fn all_metrics() -> [Metric; 9] {
         [
@@ -691,17 +761,17 @@ mod tests {
     #[test]
     fn heap_hit_equality_and_partial_order_include_the_external_id() {
         let first = FlatHit {
-            id: "a".into(),
+            id: "a",
             raw: 1.0,
             rank: 1.0,
         };
         let equal = FlatHit {
-            id: "a".into(),
+            id: "a",
             raw: 99.0,
             rank: 1.0,
         };
         let other_id = FlatHit {
-            id: "b".into(),
+            id: "b",
             raw: 1.0,
             rank: 1.0,
         };

@@ -5,6 +5,7 @@
 //! one BEAM term per coordinate before native vector work can begin.
 
 use crate::distances::{self, Metric};
+use std::borrow::Cow;
 
 const INVALID_F32_BINARY: &str = "invalid f32 binary";
 const INVALID_DIMENSIONS: &str = "invalid dimensions";
@@ -31,9 +32,19 @@ pub fn decode_f32_le(binary: &[u8]) -> Result<Vec<f32>, String> {
 
 /// Computes any named metric directly over two little-endian f32 binaries.
 pub fn metric_f32_le(left: &[u8], right: &[u8], metric: Metric) -> Result<f32, String> {
-    let left = decode_f32_le(left)?;
-    let right = decode_f32_le(right)?;
+    let left = borrow_f32_le(left)?;
+    let right = borrow_f32_le(right)?;
     distances::compute(metric, &left, &right)
+}
+
+fn borrow_f32_le(binary: &[u8]) -> Result<Cow<'_, [f32]>, String> {
+    #[cfg(target_endian = "little")]
+    if let Ok(values) = bytemuck::try_cast_slice::<u8, f32>(binary) {
+        distances::validate_finite_vector(values)?;
+        return Ok(Cow::Borrowed(values));
+    }
+    // BEAM sub-binaries may be unaligned; big-endian hosts also need decoding.
+    decode_f32_le(binary).map(Cow::Owned)
 }
 
 /// Normalizes a little-endian f32 binary and returns native f32 coordinates.
@@ -82,9 +93,13 @@ pub fn mean_pool_f32_le(
         }
 
         let start = row_index * row_bytes;
-        let row = decode_f32_le(&matrix[start..start + row_bytes])?;
+        let row = &matrix[start..start + row_bytes];
 
-        for (sum, value) in sums.iter_mut().zip(row) {
+        for (sum, bytes) in sums.iter_mut().zip(row.as_chunks::<4>().0) {
+            let value = f32::from_le_bytes(*bytes);
+            if !value.is_finite() {
+                return Err("vector contains a non-finite value".to_string());
+            }
             *sum += f64::from(value);
         }
     }
@@ -111,6 +126,41 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect()
+    }
+
+    #[test]
+    fn binary_metrics_accept_unaligned_sub_binaries_and_reject_non_finite_values() {
+        let values = [3.0f32, 4.0];
+        let bytes = encode(&values);
+        let mut unaligned = vec![0u32; 3];
+        let storage = bytemuck::cast_slice_mut::<u32, u8>(&mut unaligned);
+        storage[1..9].copy_from_slice(&bytes);
+        assert_eq!(
+            metric_f32_le(&storage[1..9], &bytes, Metric::InnerProduct),
+            Ok(25.0)
+        );
+        assert!(metric_f32_le(&[1, 2, 3], &bytes, Metric::L2).is_err());
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(metric_f32_le(&encode(&[invalid]), &encode(&[0.0]), Metric::L2).is_err());
+        }
+    }
+
+    #[test]
+    fn pooling_validates_only_selected_rows_and_keeps_extreme_means_finite() {
+        let bytes = encode(&[
+            f32::MAX,
+            -f32::MAX,
+            f32::MAX,
+            -f32::MAX,
+            f32::NAN,
+            f32::INFINITY,
+        ]);
+        assert_eq!(
+            mean_pool_f32_le(&bytes, 2, &[0, 1, 0]),
+            Ok(vec![f32::MAX, -f32::MAX])
+        );
+        assert!(mean_pool_f32_le(&bytes, 2, &[2]).is_err());
+        assert!(mean_pool_f32_le(&bytes, usize::MAX, &[0]).is_err());
     }
 
     #[test]

@@ -20,6 +20,10 @@ defmodule Vettore.MultiVector do
   For each query vector, this finds the best matching document vector and sums
   those best scores.
 
+  Pairwise metric overflow or overflow of the accumulated score fails the
+  request. Batched MaxSim search follows the same policy and does not return
+  partial results when a document cannot be scored.
+
   ## Examples
 
       iex> Vettore.MultiVector.chamfer(

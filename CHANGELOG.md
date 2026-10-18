@@ -5,6 +5,58 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.3.6] - Unreleased
+
+### Fixed
+
+- Recover tiny L2 distances before rounding their squared intermediate to f32;
+  preserve representable subnormal L2Squared results and native index rankings.
+- Recompute tiny inner products in f64 before rounding the final sum, preserving
+  subnormal scores and InnerProduct/NegativeInnerProduct rankings.
+- Canonicalize signed-zero rank keys so scores rounded below f32's final range
+  still use the documented id tiebreaker in Flat, HNSW, and batched top-k.
+- Reject tiny product scales in resident GPU ranking and apply the configured
+  CPU/error fallback instead of silently tying distinct subnormal scores.
+- Keep distinct cosine similarities ordered by their raw values on CPU and GPU,
+  and avoid cancellation in Jaccard distances for nearly identical sets.
+- Schedule `flat_workload` on DirtyCpu so automatic device selection cannot
+  block a normal BEAM scheduler while waiting for a native writer.
+- Try subsequent GPU adapters after device or pipeline initialization failures,
+  and observe device loss through a callback before reusing resident buffers.
+- Report failed GPU adapters under a single initialization-error prefix.
+- Discard GPU scratch buffers after failed searches so pending readbacks cannot
+  be reused by concurrent callers after a timeout.
+
+### Performance
+
+- Borrow aligned little-endian f32 metric inputs, decode pooling rows without
+  per-row allocations, and clone only the final Flat result ids.
+- Skip f64 L2/L2Squared recovery for truly identical inputs; include a native
+  duplicate/near-duplicate/distinct-vector microbenchmark.
+- Find HNSW incoming edges directly by node and layer during deletion, avoiding
+  a scan of the reverse-edge map. Neighbor repair remains unchanged.
+
+### Tests
+
+- Add independent f64 numerical oracles, tiny-value and ranking regressions,
+  NIF scheduling checks, concurrent writes, poisoned-index behavior, immutable
+  GPU generations, and isolated device-loss and timeout-recovery tests.
+- Extend committed and freshly inferred `ex_fastembed` coverage to list/binary
+  metric parity, all retrieval modes, mutation invalidation, and parallel GPU
+  queries. Move pure resident GPU helpers and adapter policy into covered modules.
+- Document explicit poisoned-index recovery through ETS snapshots and test that
+  it preserves real embeddings, metadata, configuration, and search results.
+- Exercise dimensions 787, 1024, 1536, and 3072 in numerical oracles and
+  Flat/HNSW/resident-GPU retrieval, with signal in the final coordinates.
+- Isolate Flat/HNSW snapshot recovery in `index_recovery_test.exs`, benchmark
+  orthogonal dot products, and cover MMR/MaxSim overflow plus rounded display
+  scores that retain distinct raw rankings.
+
+### Release tooling
+
+- Generate the complete NIF checksum artifact on manual workflow runs as well
+  as tags; GitHub Release publication remains conditional on a version tag.
+
 ## [0.3.5] - 2026-08-25
 
 ### Added

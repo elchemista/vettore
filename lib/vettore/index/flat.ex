@@ -12,6 +12,18 @@ defmodule Vettore.Index.Flat do
   rebuilds it once; concurrent warm queries share the immutable matrix and use
   independent pooled scratch buffers. GPU top-k supports up to 64 returned
   results and follows the configured fallback policy above that limit.
+
+  An in-flight native search may finish against the immutable generation from
+  before a concurrent write. Its stale snapshot is never installed as the
+  current cache. Result hydration reads the current ETS records, omitting ids
+  that have been deleted in the meantime.
+
+  A native panic while holding the write lock leaves the index unavailable:
+  operations return `{:error, "flat lock poisoned"}`. Recovery is explicit.
+  Quiesce callers, use `Vettore.snapshot/2` on the canonical ETS store, and
+  rebuild with `Vettore.load_snapshot/2`. Replace all collection handles before
+  resuming operations, then close the old collection. Closing still releases
+  its ETS store even when clearing the poisoned native index returns an error.
   """
 
   @behaviour Vettore.Index

@@ -79,11 +79,10 @@ jobs:
           path: ${{ steps.build-crate.outputs.file-path }}
           if-no-files-found: error
 
-  publish_release:
-    name: Publish release archives
+  prepare_release:
+    name: Assemble archives and checksums
     runs-on: ubuntu-22.04
     needs: build_release
-    if: github.ref_type == 'tag'
 
     steps:
       - name: Checkout source code
@@ -93,13 +92,21 @@ jobs:
         uses: actions/download-artifact@v8.0.1
         with:
           path: release-artifacts
+          pattern: '*-nif-*.tar.gz'
           merge-multiple: true
 
       - name: Generate Rustler checksum file
         shell: bash
         run: |
           checksum_file="checksum-Elixir.Vettore.Nifs.exs"
-          release_version="${GITHUB_REF_NAME#v}"
+          release_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)
+          test -n "${release_version}"
+          # Every one of the 10 targets must provide both supported NIF versions.
+          archive_count=$(find release-artifacts -maxdepth 1 -type f -name '*.tar.gz' | wc -l)
+          if [ "${archive_count}" -ne 20 ]; then
+            echo "Expected 20 NIF archives, found ${archive_count}" >&2
+            exit 1
+          fi
           mismatched=$(find release-artifacts -maxdepth 1 -type f ! -name "*-v${release_version}-*" -print -quit)
           if [ -n "${mismatched}" ]; then
             echo "Artifact version does not match v${release_version}: ${mismatched}" >&2
@@ -122,6 +129,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish archives and packages
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3.0.2
         with:
           generate_release_notes: true

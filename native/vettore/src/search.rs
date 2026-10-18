@@ -93,6 +93,8 @@ pub fn binary_top_k(
 }
 
 /// Runs Maximal Marginal Relevance in one native call and returns selected ids.
+/// Pairwise diversity-score overflow fails the rerank: dropping that comparison
+/// or candidate would change the MMR objective, unlike a query top-k filter.
 pub fn mmr_rerank(
     initial: Vec<(String, f64)>,
     embeddings: Vec<(String, Vec<f32>)>,
@@ -286,6 +288,26 @@ mod tests {
             binary_top_k(vectors, &query, 3, 2).unwrap(),
             vec![("a".into(), 0.0), ("b".into(), 1.0)]
         );
+    }
+
+    #[test]
+    fn mmr_reports_pairwise_overflow_instead_of_returning_a_partial_rerank() {
+        let initial = vec![("a".into(), 1.0), ("b".into(), 0.9), ("c".into(), 0.8)];
+        for (metric, opposite) in [
+            (Metric::L2, -f32::MAX),
+            (Metric::InnerProduct, f32::MAX),
+            (Metric::NegativeInnerProduct, f32::MAX),
+        ] {
+            let vectors = vec![
+                ("a".into(), vec![f32::MAX]),
+                ("b".into(), vec![opposite]),
+                ("c".into(), vec![0.0]),
+            ];
+            assert_eq!(
+                mmr_rerank(initial.clone(), vectors, metric, 0.5, 3),
+                Err(crate::distances::METRIC_OVERFLOW.into())
+            );
+        }
     }
 
     #[test]

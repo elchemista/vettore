@@ -493,6 +493,23 @@ defmodule VettoreAdversarialTest do
     assert {:error, :closed} = Vettore.ETSOwner.insert(foreign, {:key, :value})
   end
 
+  @tag :capture_log
+  test "ETS startup failures are returned and later startup can recover" do
+    assert :ok = Application.stop(:vettore)
+    {:ok, blocker} = Agent.start_link(fn -> nil end, name: Vettore.Supervisor)
+    on_exit(fn -> Application.ensure_all_started(:vettore) end)
+
+    try do
+      assert {:error, :vettore} =
+               Vettore.ETSOwner.start_table(:startup_failure, [:set])
+    after
+      Agent.stop(blocker)
+    end
+
+    assert {:ok, {owner, _table}} = Vettore.ETSOwner.start_table(:recovered_startup, [:set])
+    assert :ok = Vettore.ETSOwner.close(owner)
+  end
+
   defp scripted_collection(state, results \\ []) do
     %Collection{
       name: :scripted,
