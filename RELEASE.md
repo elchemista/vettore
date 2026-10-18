@@ -54,11 +54,10 @@ VETTORE_BUILD=1 mix hex.build
 
 Confirm CI is green and `git diff --check` has no output.
 
-Release 0.3.6 source metadata is prepared on the release branch. Until the
-complete native build matrix produces its archives, the checked-in 0.3.5
-checksums remain unchanged: use `VETTORE_BUILD=1` for branch verification.
-Do not merge the version bump into master or publish the package with those
-previous-release checksums.
+During release preparation, the version bump may precede the native builds.
+While the checked-in checksums still describe the previous published version,
+use `VETTORE_BUILD=1` for branch verification. Do not merge the version bump
+into master or publish the package with previous-release checksums.
 
 The Rust coverage gate excludes the external runtime boundaries in
 `src/nifs.rs` and `src/gpu.rs`: Rustler entry functions and hardware/driver I/O
