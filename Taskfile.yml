@@ -102,7 +102,7 @@ tasks:
     env:
       VETTORE_BUILD: 1
     cmds:
-      - "mix rustler_precompiled.download {{.PROJECT_NAME}} --all --print"
+      - "mix rustler_precompiled.download {{.PROJECT_NAME}}.Nifs --all --print"
 
   publish:
     desc: Publish to hex.pm

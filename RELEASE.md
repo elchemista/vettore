@@ -71,12 +71,19 @@ The benchmark smoke runs must preflight every search mode and validate GPU Flat
 scores plus all unambiguous ids before timing. Ids inside an f32-tied top-k
 boundary may differ across adapters and reduction orders.
 
-Before creating the tag, open **Actions → Build precompiled NIFs → Run
-workflow**, select the release branch, and run it manually. A manual run builds
-and uploads all 20 NIF/target archives plus the `rustler-checksum` artifact, but
-skips the GitHub Release publishing step. Download `rustler-checksum` from that
-run, inspect its versioned keys, and commit the checksum file on the release
-branch. Only a tag matching the version in `mix.exs` publishes assets.
+Prepare `.github/releases/<version>.md` with the release title on its first
+line (`# Vettore <version> - <summary>`), a blank line, and the release body.
+The workflow uses this title and body for the GitHub Release.
+
+Before creating the tag, push the `release/<version>` branch. Source changes
+automatically build and upload all 20 NIF/target archives plus the
+`rustler-checksum` artifact, without publishing a GitHub Release. Pushes that
+only update Markdown or checksum files skip this preliminary build. You can
+also open **Actions → Build precompiled NIFs → Run workflow**, select the
+release branch, and run it manually. Download `rustler-checksum` from the
+successful run, inspect its versioned keys, and commit the checksum file on
+the release branch. Only a tag matching the version in `mix.exs` publishes
+assets; tag builds run regardless of the changed paths.
 
 Checksums belong to the exact downloaded archives. A later tag build may produce
 different archive bytes; install its checksum file again before the final
@@ -90,8 +97,8 @@ the matching tag. Keep master on the published version until the new archives
 and their checksums pass the precompiled smoke test below:
 
 ```bash
-release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
-git tag -s "v${release_version}" -m "Vettore ${release_version}"
+release_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)
+git tag -a "v${release_version}" -m "Vettore ${release_version}"
 git push origin "v${release_version}"
 ```
 
@@ -105,7 +112,7 @@ GitHub release, and attaches both the archives and
 After the release workflow succeeds:
 
 ```bash
-release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+release_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)
 gh release download "v${release_version}" \
   --pattern 'checksum-Elixir.Vettore.Nifs.exs' \
   --clobber
@@ -116,7 +123,7 @@ Every checksum key must contain the current release version. Commit the
 generated checksum file. Verify that mechanically before building the package:
 
 ```bash
-release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+release_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)
 test "$(grep -c '=>' checksum-Elixir.Vettore.Nifs.exs)" -gt 0
 test "$(grep -vc -- "-v${release_version}-" checksum-Elixir.Vettore.Nifs.exs)" -eq 2
 ```
@@ -125,9 +132,11 @@ The two non-matching lines are the opening and closing map delimiters. Then
 verify a clean precompiled build without `VETTORE_BUILD`:
 
 ```bash
+unset VETTORE_BUILD RUSTLER_PRECOMPILED_FORCE_BUILD_ALL
 MIX_ENV=prod mix clean
-MIX_ENV=prod mix compile --force
-mix test
+MIX_ENV=prod mix compile --force --warnings-as-errors
+MIX_ENV=test mix compile --force --warnings-as-errors
+mix test --warnings-as-errors
 mix hex.build
 mix hex.publish --dry-run
 ```
