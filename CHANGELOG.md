@@ -26,6 +26,9 @@ Semantic Versioning.
 - Report failed GPU adapters under a single initialization-error prefix.
 - Discard GPU scratch buffers after failed searches so pending readbacks cannot
   be reused by concurrent callers after a timeout.
+- Normalize MaxSim pairwise overflow to `:metric_overflow` in direct scoring,
+  collection search, and hybrid reranking, distinct from `:score_overflow` when
+  accumulating otherwise finite scores.
 
 ### Performance
 

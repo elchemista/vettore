@@ -272,6 +272,10 @@ defmodule Vettore do
   @doc """
   Runs ColBERT-style late interaction over multi-vector records.
 
+  Returns `{:error, :metric_overflow}` when a pairwise metric overflows, or
+  `{:error, :score_overflow}` when a document's accumulated score overflows.
+  Either error fails the whole search without partial results.
+
   ## Examples
 
       iex> {:ok, collection} = Vettore.new(dimensions: 2, metric: :inner_product)
