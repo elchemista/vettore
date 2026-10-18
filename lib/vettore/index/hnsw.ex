@@ -4,6 +4,13 @@ defmodule Vettore.Index.HNSW do
 
   ETS remains the canonical store. This resource stores ids and normalized
   vectors only for ANN search.
+
+  A native panic while holding the write lock leaves the index unavailable:
+  operations return `{:error, "hnsw lock poisoned"}`. Quiesce callers, snapshot
+  the canonical ETS store with `Vettore.snapshot/2`, and rebuild with
+  `Vettore.load_snapshot/2`. Replace all collection handles before resuming
+  operations, then close the old collection. Its ETS store is still closed
+  even when clearing the poisoned native index returns an error.
   """
 
   @behaviour Vettore.Index

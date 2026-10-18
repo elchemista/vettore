@@ -46,11 +46,18 @@ cargo check --manifest-path native/vettore/Cargo.toml --locked --no-default-feat
 VETTORE_GPU_ALLOW_SOFTWARE=1 VETTORE_REQUIRE_GPU=1 \
 cargo llvm-cov --manifest-path native/vettore/Cargo.toml --all-features --ignore-filename-regex 'src/(nifs|gpu)\.rs' --summary-only --fail-under-lines 98
 cargo clippy --manifest-path native/vettore/Cargo.toml --all-targets --all-features --locked -- -D warnings
+cargo bench --manifest-path native/vettore/Cargo.toml --bench l2_duplicates --locked
+cargo bench --manifest-path native/vettore/Cargo.toml --bench dot_orthogonal --locked
 VETTORE_BUILD=1 mix docs
 VETTORE_BUILD=1 mix hex.build
 ```
 
 Confirm CI is green and `git diff --check` has no output.
+
+During release preparation, the version bump may precede the native builds.
+While the checked-in checksums still describe the previous published version,
+use `VETTORE_BUILD=1` for branch verification. Do not merge the version bump
+into master or publish the package with previous-release checksums.
 
 The Rust coverage gate excludes the external runtime boundaries in
 `src/nifs.rs` and `src/gpu.rs`: Rustler entry functions and hardware/driver I/O
@@ -63,19 +70,34 @@ The benchmark smoke runs must preflight every search mode and validate GPU Flat
 scores plus all unambiguous ids before timing. Ids inside an f32-tied top-k
 boundary may differ across adapters and reduction orders.
 
-Before creating the tag, open **Actions → Build precompiled NIFs → Run
-workflow**, select the release branch, and run it manually. A manual run builds
-and uploads the complete NIF/target artifact matrix for inspection but skips the
-GitHub Release publishing job. Only a tag matching the version in `mix.exs`
-publishes assets.
+Prepare `.github/releases/<version>.md` with the release title on its first
+line (`# Vettore <version> - <summary>`), a blank line, and the release body.
+The workflow uses this title and body for the GitHub Release.
+
+Before creating the tag, push the `release/<version>` branch. Source changes
+automatically build and upload all 20 NIF/target archives plus the
+`rustler-checksum` artifact, without publishing a GitHub Release. Pushes that
+only update Markdown or checksum files skip this preliminary build. You can
+also open **Actions → Build precompiled NIFs → Run workflow**, select the
+release branch, and run it manually. Download `rustler-checksum` from the
+successful run, inspect its versioned keys, and commit the checksum file on
+the release branch. Only a tag matching the version in `mix.exs` publishes
+assets; tag builds run regardless of the changed paths.
+
+Checksums belong to the exact downloaded archives. A later tag build may produce
+different archive bytes; install its checksum file again before the final
+precompiled smoke test and merge. Do not substitute checksums from a local build
+or rename keys from the previous release.
 
 ## 2. Build and publish native archives
 
-Merge the release commit, then create and push the matching tag:
+Once the release branch has passed its checks, the maintainer creates and pushes
+the matching tag. Keep master on the published version until the new archives
+and their checksums pass the precompiled smoke test below:
 
 ```bash
-release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
-git tag -s "v${release_version}" -m "Vettore ${release_version}"
+release_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)
+git tag -a "v${release_version}" -m "Vettore ${release_version}"
 git push origin "v${release_version}"
 ```
 
@@ -89,7 +111,7 @@ GitHub release, and attaches both the archives and
 After the release workflow succeeds:
 
 ```bash
-release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+release_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)
 gh release download "v${release_version}" \
   --pattern 'checksum-Elixir.Vettore.Nifs.exs' \
   --clobber
@@ -100,7 +122,7 @@ Every checksum key must contain the current release version. Commit the
 generated checksum file. Verify that mechanically before building the package:
 
 ```bash
-release_version="$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+release_version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)
 test "$(grep -c '=>' checksum-Elixir.Vettore.Nifs.exs)" -gt 0
 test "$(grep -vc -- "-v${release_version}-" checksum-Elixir.Vettore.Nifs.exs)" -eq 2
 ```
@@ -109,9 +131,11 @@ The two non-matching lines are the opening and closing map delimiters. Then
 verify a clean precompiled build without `VETTORE_BUILD`:
 
 ```bash
+unset VETTORE_BUILD RUSTLER_PRECOMPILED_FORCE_BUILD_ALL
 MIX_ENV=prod mix clean
-MIX_ENV=prod mix compile --force
-mix test
+MIX_ENV=prod mix compile --force --warnings-as-errors
+MIX_ENV=test mix compile --force --warnings-as-errors
+mix test --warnings-as-errors
 mix hex.build
 mix hex.publish --dry-run
 ```
@@ -120,6 +144,7 @@ The production compile must download and load the current release archive
 successfully.
 Inspect the Hex package listing and confirm it contains the new checksum,
 `CHANGELOG.md`, `RELEASE.md`, Elixir sources, and Rust sources.
+Merge the release branch only after these checks pass.
 
 ## 4. Publish and smoke-test
 
@@ -127,7 +152,7 @@ Inspect the Hex package listing and confirm it contains the new checksum,
 mix hex.publish
 ```
 
-In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3.5"}` without
+In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3.6"}` without
 Rust installed. Create flat and HNSW collections, insert records with metadata,
 search them, snapshot/reload them, and call `Vettore.close/1`. Finally, mark the
 changelog entry with the release date if it was not already finalized in the

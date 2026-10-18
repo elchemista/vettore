@@ -5,7 +5,9 @@
 //! generation-aware matrix and bounded query scratch pool on-device. CPU/SIMD
 //! remains the caller-controlled fallback for unavailable or unsafe workloads.
 
+use crate::gpu_policy::{initialize_first, runtime_error_requires_reinitialization};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -13,7 +15,9 @@ use wgpu::util::DeviceExt;
 
 use crate::distances::{self, Metric};
 use crate::gpu_math::{
-    finish_prepared_metric, metric_code, prepare_mean_pool, prepare_metric, prepare_normalization,
+    decode_resident_candidates, finish_prepared_metric, metric_code, prepare_mean_pool,
+    prepare_metric, prepare_normalization, prepare_resident_matrix, prepare_resident_query,
+    resident_scale, unsafe_gpu_dynamic_range, unsafe_resident_scale,
 };
 
 const WORKGROUP_SIZE: u32 = 256;
@@ -22,7 +26,6 @@ const FLAT_TOP_K_CHUNK_ROWS: u32 = 8_192;
 const MAX_RESIDENT_SCRATCHES: usize = 4;
 const DEFAULT_GPU_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const GPU_INIT_RETRY_DELAY: Duration = Duration::from_secs(10);
-const GPU_NOT_DETECTED: &str = "gpu not detected";
 
 const METRIC_SHADER: &str = r#"
 struct Params {
@@ -362,7 +365,7 @@ fn main(
             raw = checked.x;
             valid = u32(checked.y);
         } else if (operation == 8u) {
-            raw = select(1.0 - raw / scratch_b[0], 0.0, scratch_b[0] == 0.0);
+            raw = select((scratch_b[0] - raw) / scratch_b[0], 0.0, scratch_b[0] == 0.0);
         }
         let maximum = bitcast<f32>(0x7f7fffffu);
         if (!(raw >= -maximum && raw <= maximum)) {
@@ -399,7 +402,7 @@ var<workgroup> lane_best_index: array<u32, 1024>;
 
 fn rank_value(operation: u32, raw: f32) -> f32 {
     if (operation == 2u) {
-        return 1.0 - raw;
+        return select(-raw, 0.0, raw == 0.0);
     }
     if (operation == 3u) {
         return -raw;
@@ -580,7 +583,7 @@ struct Params {
 
 fn rank_value(operation: u32, raw: f32) -> f32 {
     if (operation == 2u) {
-        return 1.0 - raw;
+        return select(-raw, 0.0, raw == 0.0);
     }
     if (operation == 3u) {
         return -raw;
@@ -682,6 +685,7 @@ struct GpuRuntime {
     flat_final_top_k_pipeline: wgpu::ComputePipeline,
     limits: wgpu::Limits,
     info: GpuInfo,
+    lost: Arc<AtomicBool>,
 }
 
 pub(crate) struct ResidentMatrix {
@@ -858,10 +862,9 @@ pub(crate) fn resident_matrix(
     let rows = u32::try_from(rows).map_err(|_| "gpu workload too large".to_string())?;
     let dimensions = u32::try_from(dimensions).map_err(|_| "gpu workload too large".to_string())?;
     let (prepared, row_metadata) = prepare_resident_matrix(vectors, dimensions as usize, metric);
-    if metric_uses_absolute_scale(metric)
-        && row_metadata
-            .iter()
-            .any(|metadata| unsafe_gpu_scale(metadata[0]))
+    if row_metadata
+        .iter()
+        .any(|metadata| unsafe_resident_scale(metadata[0], metric))
     {
         return Err("gpu numeric range unsupported".to_string());
     }
@@ -942,7 +945,7 @@ pub(crate) fn validate_resident_query(query: &[f32], metric: Metric) -> Result<(
     }
 
     let scale = resident_scale(query, metric);
-    if metric_uses_absolute_scale(metric) && unsafe_gpu_scale(scale) {
+    if unsafe_resident_scale(scale, metric) {
         return Err("gpu numeric range unsupported".to_string());
     }
     Ok(())
@@ -981,7 +984,6 @@ impl ResidentMatrix {
         let (prepared_query, query_scale, query_norm_squared) =
             prepare_resident_query(query, self.inner.metric);
         let mut scratch = self.inner.take_scratch()?;
-        let runtime = Arc::clone(&self.inner.runtime);
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.inner.execute_search(
                 &mut scratch,
@@ -992,12 +994,22 @@ impl ResidentMatrix {
             )
         }))
         .unwrap_or_else(|_| Err("gpu operation panicked".to_string()));
-        self.inner.return_scratch(scratch);
+        self.finish_search(scratch, result)
+    }
 
+    fn finish_search(
+        &self,
+        scratch: FlatSearchScratch,
+        result: Result<Vec<(usize, f32)>, String>,
+    ) -> Result<Vec<(usize, f32)>, String> {
         if let Err(error) = &result {
+            // A timeout or mapping failure may leave work pending. Never let
+            // another in-flight search borrow those buffers from the pool.
             if runtime_error_requires_reinitialization(error) {
-                invalidate_runtime(&runtime);
+                invalidate_runtime(&self.inner.runtime);
             }
+        } else {
+            self.inner.return_scratch(scratch);
         }
 
         result
@@ -1279,139 +1291,35 @@ impl ResidentMatrixInner {
     }
 }
 
-fn prepare_resident_matrix(
-    mut vectors: Vec<f32>,
-    dimensions: usize,
-    metric: Metric,
-) -> (Vec<f32>, Vec<[f32; 2]>) {
-    let mut metadata = Vec::with_capacity(vectors.len() / dimensions);
-
-    for row in vectors.chunks_exact_mut(dimensions) {
-        let scale = resident_scale(row, metric);
-        if matches!(metric, Metric::Hamming | Metric::Jaccard) {
-            for value in row.iter_mut() {
-                *value = if *value == 0.0 { 0.0 } else { 1.0 };
-            }
-        } else if scale != 0.0 {
-            for value in row.iter_mut() {
-                *value /= scale;
-            }
-        }
-        let norm_squared = row
-            .iter()
-            .map(|value| f64::from(*value) * f64::from(*value))
-            .sum::<f64>() as f32;
-        metadata.push([scale, norm_squared]);
-    }
-
-    (vectors, metadata)
-}
-
-fn prepare_resident_query(query: &[f32], metric: Metric) -> (Vec<f32>, f32, f32) {
-    prepare_resident_values(query, metric)
-}
-
-fn prepare_resident_values(values: &[f32], metric: Metric) -> (Vec<f32>, f32, f32) {
-    if matches!(metric, Metric::Hamming | Metric::Jaccard) {
-        let prepared = values
-            .iter()
-            .map(|value| if *value == 0.0 { 0.0 } else { 1.0 })
-            .collect::<Vec<_>>();
-        let norm_squared = prepared.iter().map(|value| value * value).sum();
-        return (prepared, 1.0, norm_squared);
-    }
-
-    let scale = resident_scale(values, metric);
-    if scale == 0.0 {
-        return (vec![0.0; values.len()], 0.0, 0.0);
-    }
-
-    let prepared = values
-        .iter()
-        .map(|value| *value / scale)
-        .collect::<Vec<_>>();
-    let norm_squared = prepared
-        .iter()
-        .map(|value| f64::from(*value) * f64::from(*value))
-        .sum::<f64>() as f32;
-    (prepared, scale, norm_squared)
-}
-
-fn resident_scale(values: &[f32], metric: Metric) -> f32 {
-    if matches!(metric, Metric::Hamming | Metric::Jaccard) {
-        1.0
-    } else {
-        values
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0f32, f32::max)
-    }
-}
-
-fn metric_uses_absolute_scale(metric: Metric) -> bool {
-    !matches!(metric, Metric::Cosine | Metric::Hamming | Metric::Jaccard)
-}
-
-fn unsafe_gpu_scale(scale: f32) -> bool {
-    scale != 0.0 && !scale.is_normal()
-}
-
-fn unsafe_gpu_dynamic_range(values: &[f32]) -> bool {
-    let mut minimum = f32::INFINITY;
-    let mut maximum = 0.0f32;
-    for value in values {
-        let absolute = value.abs();
-        if absolute != 0.0 {
-            minimum = minimum.min(absolute);
-            maximum = maximum.max(absolute);
-        }
-    }
-
-    if maximum == 0.0 {
-        return false;
-    }
-    let normalized_minimum = minimum / maximum;
-    normalized_minimum == 0.0 || !normalized_minimum.is_normal()
-}
-
-fn decode_resident_candidates(bytes: &[u8], row_count: usize) -> Vec<(usize, f32)> {
-    let mut hits = Vec::with_capacity(bytes.len() / 8);
-    for candidate in bytes.as_chunks::<8>().0 {
-        let raw = f32::from_ne_bytes(candidate[..4].try_into().expect("four-byte score"));
-        let index = u32::from_ne_bytes(candidate[4..].try_into().expect("four-byte index"));
-        if index == u32::MAX || index as usize >= row_count || !raw.is_finite() {
-            continue;
-        }
-        hits.push((index as usize, raw));
-    }
-    hits
-}
-
 impl GpuRuntime {
     fn new_with_software_adapter(allow_software: bool) -> Result<Self, String> {
         let instance = wgpu::Instance::default();
-        let mut adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        initialize_first(
+            adapters
+                .into_iter()
+                .map(|adapter| (adapter.get_info(), adapter))
+                .collect(),
+            allow_software,
+            Self::from_adapter,
+        )
+    }
 
-        adapters.retain(|adapter| {
-            let info = adapter.get_info();
-            hardware_gpu(&info)
-                || (allow_software
-                    && info.backend != wgpu::Backend::Noop
-                    && info.device_type == wgpu::DeviceType::Cpu)
-        });
-        adapters.sort_by_key(|adapter| adapter_priority(adapter.get_info().device_type));
-
-        let adapter = adapters
-            .into_iter()
-            .next()
-            .ok_or_else(|| GPU_NOT_DETECTED.to_string())?;
+    fn from_adapter(adapter: wgpu::Adapter) -> Result<Self, String> {
         let adapter_info = adapter.get_info();
         let descriptor = wgpu::DeviceDescriptor {
             required_limits: adapter.limits(),
             ..wgpu::DeviceDescriptor::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
-            .map_err(|error| format!("gpu device initialization failed: {error}"))?;
+            .map_err(|error| error.to_string())?;
+
+        let lost = Arc::new(AtomicBool::new(false));
+        let lost_callback = Arc::clone(&lost);
+        // The driver callback must never acquire the runtime/cache locks.
+        device.set_device_lost_callback(move |_reason, _message| {
+            lost_callback.store(true, Ordering::Release);
+        });
 
         let metric_pipeline = create_pipeline(&device, "vettore metric", METRIC_SHADER);
         let normalize_pipeline = create_pipeline(&device, "vettore normalize", NORMALIZE_SHADER);
@@ -1424,6 +1332,7 @@ impl GpuRuntime {
         let limits = device.limits();
 
         Ok(Self {
+            lost,
             device,
             queue,
             metric_pipeline,
@@ -1656,7 +1565,9 @@ fn runtime() -> Result<Arc<GpuRuntime>, String> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     match &*cached {
-        RuntimeCache::Ready(runtime) => return Ok(Arc::clone(runtime)),
+        RuntimeCache::Ready(runtime) if !runtime.lost.load(Ordering::Acquire) => {
+            return Ok(Arc::clone(runtime))
+        }
         RuntimeCache::Failed {
             error,
             allow_software: cached_allow_software,
@@ -1664,7 +1575,7 @@ fn runtime() -> Result<Arc<GpuRuntime>, String> {
         } if *cached_allow_software == allow_software && Instant::now() < *retry_at => {
             return Err(error.clone());
         }
-        RuntimeCache::Empty | RuntimeCache::Failed { .. } => {}
+        RuntimeCache::Empty | RuntimeCache::Failed { .. } | RuntimeCache::Ready(_) => {}
     }
 
     let initialized = catch_unwind(|| GpuRuntime::new_with_software_adapter(allow_software))
@@ -1713,8 +1624,10 @@ fn cached_runtime() -> Option<Arc<GpuRuntime>> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match &*cached {
-        RuntimeCache::Ready(runtime) => Some(Arc::clone(runtime)),
-        RuntimeCache::Empty | RuntimeCache::Failed { .. } => None,
+        RuntimeCache::Ready(runtime) if !runtime.lost.load(Ordering::Acquire) => {
+            Some(Arc::clone(runtime))
+        }
+        RuntimeCache::Empty | RuntimeCache::Failed { .. } | RuntimeCache::Ready(_) => None,
     }
 }
 
@@ -1741,13 +1654,6 @@ fn gpu_poll_timeout() -> Duration {
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_GPU_POLL_TIMEOUT)
     })
-}
-
-fn runtime_error_requires_reinitialization(error: &str) -> bool {
-    error.starts_with("gpu synchronization")
-        || error.starts_with("gpu mapping")
-        || error.starts_with("gpu readback")
-        || error == "gpu operation panicked"
 }
 
 fn aligned_readback_size(size: u64) -> u64 {
@@ -1843,20 +1749,6 @@ fn bind_group(
     })
 }
 
-fn hardware_gpu(info: &wgpu::AdapterInfo) -> bool {
-    info.backend != wgpu::Backend::Noop && info.device_type != wgpu::DeviceType::Cpu
-}
-
-fn adapter_priority(device_type: wgpu::DeviceType) -> u8 {
-    match device_type {
-        wgpu::DeviceType::DiscreteGpu => 0,
-        wgpu::DeviceType::IntegratedGpu => 1,
-        wgpu::DeviceType::VirtualGpu => 2,
-        wgpu::DeviceType::Other => 3,
-        wgpu::DeviceType::Cpu => 4,
-    }
-}
-
 fn device_type_name(device_type: wgpu::DeviceType) -> &'static str {
     match device_type {
         wgpu::DeviceType::DiscreteGpu => "discrete_gpu",
@@ -1873,10 +1765,62 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
+    fn runtime_failures_rebuild_resident_buffers_and_device_loss_is_observed() {
+        const CHILD: &str = "VETTORE_GPU_RECOVERY_TEST_CHILD";
+        // Isolate intentional device invalidation from other parallel GPU tests.
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "gpu::tests::runtime_failures_rebuild_resident_buffers_and_device_loss_is_observed", "--nocapture"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        if !detected() {
+            assert_ne!(std::env::var("VETTORE_REQUIRE_GPU").as_deref(), Ok("1"));
+            return;
+        }
+        let index = crate::flat::FlatResource::new(Metric::L2);
+        index.insert("row".into(), vec![3.0, 4.0]).unwrap();
+        let expected = vec![("row".to_string(), 5.0)];
+        assert_eq!(index.search_gpu(&[0.0, 0.0], 1), Ok(expected.clone()));
+        assert_eq!(index.gpu_cache_info(), Ok((1, true)));
+        let old = runtime().unwrap();
+        let resident = resident_matrix(vec![3.0, 4.0], 1, 2, Metric::L2).unwrap();
+        assert_eq!(resident.search(&[0.0, 0.0], 1), Ok(vec![(0, 5.0)]));
+        assert_eq!(resident.inner.scratch_pool.lock().unwrap().len(), 1);
+        let scratch = resident.inner.take_scratch().unwrap();
+        let failure = resident.finish_search(
+            scratch,
+            Err("gpu synchronization failed: injected timeout".into()),
+        );
+        assert!(failure.is_err());
+        assert!(resident.inner.scratch_pool.lock().unwrap().is_empty());
+        assert_eq!(index.gpu_cache_info(), Ok((1, false)));
+        assert_eq!(index.search_gpu(&[0.0, 0.0], 1), Ok(expected.clone()));
+        assert_eq!(index.gpu_cache_info(), Ok((2, true)));
+        // A late failure from an older device must not evict the replacement.
+        invalidate_runtime(&old);
+        assert_eq!(index.gpu_cache_info(), Ok((2, true)));
+        let current = runtime().unwrap();
+        current.device.destroy();
+        let _ = current.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(2)),
+        });
+        assert!(current.lost.load(Ordering::Acquire));
+        assert_eq!(index.gpu_cache_info(), Ok((2, false)));
+        assert_eq!(index.search_gpu(&[0.0, 0.0], 1), Ok(expected));
+        assert_eq!(index.gpu_cache_info(), Ok((3, true)));
+    }
+
+    #[test]
     fn adapter_selection_prefers_hardware_and_reports_stable_names() {
-        assert_eq!(adapter_priority(wgpu::DeviceType::DiscreteGpu), 0);
-        assert_eq!(adapter_priority(wgpu::DeviceType::IntegratedGpu), 1);
-        assert_eq!(adapter_priority(wgpu::DeviceType::Cpu), 4);
         assert_eq!(
             device_type_name(wgpu::DeviceType::VirtualGpu),
             "virtual_gpu"
@@ -1901,36 +1845,6 @@ mod tests {
             .validate(&module)
             .unwrap();
         }
-    }
-
-    #[test]
-    fn resident_preparation_guards_dynamic_range_and_decodes_final_candidates() {
-        assert!(!unsafe_gpu_dynamic_range(&[0.0, 1.0, -2.0]));
-        assert!(unsafe_gpu_dynamic_range(&[1.0e38, 1.0e-7]));
-        assert!(unsafe_gpu_scale(f32::from_bits(1)));
-        assert!(!unsafe_gpu_scale(1.0));
-
-        let (binary, scale, norm) = prepare_resident_values(&[0.0, -2.0, 3.0], Metric::Hamming);
-        assert_eq!(binary, [0.0, 1.0, 1.0]);
-        assert_eq!(scale, 1.0);
-        assert_eq!(norm, 2.0);
-
-        let candidates = [(1.0f32, 0u32), (1.0, 1), (2.0, 2)];
-        let bytes = candidates
-            .into_iter()
-            .flat_map(|(raw, index)| raw.to_ne_bytes().into_iter().chain(index.to_ne_bytes()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            decode_resident_candidates(&bytes, 4),
-            [(0, 1.0), (1, 1.0), (2, 2.0)]
-        );
-
-        let similarity_candidates = [(2.0f32, 0u32), (0.5, 1)];
-        let bytes = similarity_candidates
-            .into_iter()
-            .flat_map(|(raw, index)| raw.to_ne_bytes().into_iter().chain(index.to_ne_bytes()))
-            .collect::<Vec<_>>();
-        assert_eq!(decode_resident_candidates(&bytes, 3), [(0, 2.0), (1, 0.5)]);
     }
 
     #[test]

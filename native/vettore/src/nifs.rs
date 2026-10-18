@@ -418,7 +418,7 @@ fn flat_clear(index: ResourceArc<FlatResource>) -> Result<(), String> {
     index.clear()
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 /// Returns row and dimension counts for compute-device selection.
 fn flat_workload(index: ResourceArc<FlatResource>) -> Result<(usize, usize), String> {
     index.workload()

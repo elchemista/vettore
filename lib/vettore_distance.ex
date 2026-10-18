@@ -358,6 +358,9 @@ defmodule Vettore.Distance do
   @doc """
   Collection-agnostic MMR reranker.
 
+  Returns `{:error, :metric_overflow}` if a pairwise diversity metric cannot be
+  represented as f32. It does not return a partially reranked candidate list.
+
   ## Examples
 
       iex> initial = [{"a", 0.9}, {"b", 0.8}, {"c", 0.1}]
@@ -375,7 +378,7 @@ defmodule Vettore.Distance do
           pos_integer()
         ) ::
           {:ok, [{String.t(), number()}]}
-          | {:error, :invalid_mmr_args | {:unknown_metric, term()}}
+          | {:error, :invalid_mmr_args | :metric_overflow | {:unknown_metric, term()}}
   def mmr_rerank(initial, embeddings, metric, alpha, final_k)
       when is_list(initial) and is_list(embeddings) and is_number(alpha) and alpha >= 0 and
              alpha <= 1 and is_integer(final_k) and final_k > 0 do

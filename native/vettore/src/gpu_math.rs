@@ -328,9 +328,187 @@ pub(crate) fn prepare_mean_pool(
     })
 }
 
+pub(crate) fn prepare_resident_matrix(
+    mut vectors: Vec<f32>,
+    dimensions: usize,
+    metric: Metric,
+) -> (Vec<f32>, Vec<[f32; 2]>) {
+    let mut metadata = Vec::with_capacity(vectors.len() / dimensions);
+
+    for row in vectors.chunks_exact_mut(dimensions) {
+        let scale = resident_scale(row, metric);
+        if matches!(metric, Metric::Hamming | Metric::Jaccard) {
+            for value in row.iter_mut() {
+                *value = if *value == 0.0 { 0.0 } else { 1.0 };
+            }
+        } else if scale != 0.0 {
+            for value in row.iter_mut() {
+                *value /= scale;
+            }
+        }
+        let norm_squared = row
+            .iter()
+            .map(|value| f64::from(*value) * f64::from(*value))
+            .sum::<f64>() as f32;
+        metadata.push([scale, norm_squared]);
+    }
+
+    (vectors, metadata)
+}
+
+pub(crate) fn prepare_resident_query(query: &[f32], metric: Metric) -> (Vec<f32>, f32, f32) {
+    prepare_resident_values(query, metric)
+}
+
+pub(crate) fn prepare_resident_values(values: &[f32], metric: Metric) -> (Vec<f32>, f32, f32) {
+    if matches!(metric, Metric::Hamming | Metric::Jaccard) {
+        let prepared = values
+            .iter()
+            .map(|value| if *value == 0.0 { 0.0 } else { 1.0 })
+            .collect::<Vec<_>>();
+        let norm_squared = prepared.iter().map(|value| value * value).sum();
+        return (prepared, 1.0, norm_squared);
+    }
+
+    let scale = resident_scale(values, metric);
+    if scale == 0.0 {
+        return (vec![0.0; values.len()], 0.0, 0.0);
+    }
+
+    let prepared = values
+        .iter()
+        .map(|value| *value / scale)
+        .collect::<Vec<_>>();
+    let norm_squared = prepared
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>() as f32;
+    (prepared, scale, norm_squared)
+}
+
+pub(crate) fn resident_scale(values: &[f32], metric: Metric) -> f32 {
+    if matches!(metric, Metric::Hamming | Metric::Jaccard) {
+        1.0
+    } else {
+        values
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max)
+    }
+}
+
+pub(crate) fn metric_uses_absolute_scale(metric: Metric) -> bool {
+    !matches!(metric, Metric::Cosine | Metric::Hamming | Metric::Jaccard)
+}
+
+pub(crate) fn unsafe_gpu_scale(scale: f32) -> bool {
+    scale != 0.0 && !scale.is_normal()
+}
+
+pub(crate) fn unsafe_resident_scale(scale: f32, metric: Metric) -> bool {
+    // Resident top-k compares scores on the device, where subnormals may be
+    // flushed to zero. Unlike primitive metrics, no host f64 rescaling occurs.
+    // Conservatively reject tiny scales for product metrics, even if a large
+    // counterpart or dimension count could make the final score normal.
+    metric_uses_absolute_scale(metric)
+        && (unsafe_gpu_scale(scale)
+            || (matches!(
+                metric,
+                Metric::InnerProduct | Metric::NegativeInnerProduct | Metric::L2Squared
+            ) && scale != 0.0
+                && f64::from(scale).powi(2) < f64::from(f32::MIN_POSITIVE)))
+}
+
+pub(crate) fn unsafe_gpu_dynamic_range(values: &[f32]) -> bool {
+    let mut minimum = f32::INFINITY;
+    let mut maximum = 0.0f32;
+    for value in values {
+        let absolute = value.abs();
+        if absolute != 0.0 {
+            minimum = minimum.min(absolute);
+            maximum = maximum.max(absolute);
+        }
+    }
+
+    if maximum == 0.0 {
+        return false;
+    }
+    let normalized_minimum = minimum / maximum;
+    normalized_minimum == 0.0 || !normalized_minimum.is_normal()
+}
+
+pub(crate) fn decode_resident_candidates(bytes: &[u8], row_count: usize) -> Vec<(usize, f32)> {
+    let mut hits = Vec::with_capacity(bytes.len() / 8);
+    for candidate in bytes.as_chunks::<8>().0 {
+        let raw = f32::from_ne_bytes(candidate[..4].try_into().expect("four-byte score"));
+        let index = u32::from_ne_bytes(candidate[4..].try_into().expect("four-byte index"));
+        if index == u32::MAX || index as usize >= row_count || !raw.is_finite() {
+            continue;
+        }
+        hits.push((index as usize, raw));
+    }
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_product_scales_reject_underflow_before_device_ranking() {
+        let boundary = 2.0_f32.powi(-63);
+        for metric in [
+            Metric::InnerProduct,
+            Metric::NegativeInnerProduct,
+            Metric::L2Squared,
+        ] {
+            assert!(unsafe_resident_scale(1.0e-23, metric));
+            assert!(unsafe_resident_scale(
+                f32::from_bits(boundary.to_bits() - 1),
+                metric
+            ));
+            assert!(!unsafe_resident_scale(boundary, metric));
+            assert!(!unsafe_resident_scale(1.0, metric));
+            assert!(!unsafe_resident_scale(0.0, metric));
+        }
+        for metric in [Metric::L2, Metric::Manhattan, Metric::Chebyshev] {
+            assert!(!unsafe_resident_scale(1.0e-23, metric));
+            assert!(unsafe_resident_scale(f32::from_bits(1), metric));
+        }
+        for metric in [Metric::Cosine, Metric::Hamming, Metric::Jaccard] {
+            assert!(!unsafe_resident_scale(f32::from_bits(1), metric));
+        }
+    }
+
+    #[test]
+    fn resident_preparation_guards_dynamic_range_and_decodes_final_candidates() {
+        assert!(!unsafe_gpu_dynamic_range(&[0.0, 1.0, -2.0]));
+        assert!(unsafe_gpu_dynamic_range(&[1.0e38, 1.0e-7]));
+        assert!(unsafe_gpu_scale(f32::from_bits(1)));
+        assert!(!unsafe_gpu_scale(1.0));
+
+        let (binary, scale, norm) = prepare_resident_values(&[0.0, -2.0, 3.0], Metric::Hamming);
+        assert_eq!(binary, [0.0, 1.0, 1.0]);
+        assert_eq!(scale, 1.0);
+        assert_eq!(norm, 2.0);
+
+        let candidates = [(1.0f32, 0u32), (1.0, 1), (2.0, 2)];
+        let bytes = candidates
+            .into_iter()
+            .flat_map(|(raw, index)| raw.to_ne_bytes().into_iter().chain(index.to_ne_bytes()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decode_resident_candidates(&bytes, 4),
+            [(0, 1.0), (1, 1.0), (2, 2.0)]
+        );
+
+        let similarity_candidates = [(2.0f32, 0u32), (0.5, 1)];
+        let bytes = similarity_candidates
+            .into_iter()
+            .flat_map(|(raw, index)| raw.to_ne_bytes().into_iter().chain(index.to_ne_bytes()))
+            .collect::<Vec<_>>();
+        assert_eq!(decode_resident_candidates(&bytes, 3), [(0, 2.0), (1, 0.5)]);
+    }
 
     #[test]
     fn metric_codes_and_reductions_cover_every_semantic() {

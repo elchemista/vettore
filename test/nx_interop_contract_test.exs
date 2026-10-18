@@ -18,7 +18,40 @@ defmodule VettoreNxInteropContractTest do
       end)
     end
 
-    :ok
+    {:ok, created_stub?: created_stub?}
+  end
+
+  test "a host Nx implementation can omit optional type and transfer operations", %{
+    created_stub?: created_stub?
+  } do
+    if created_stub? do
+      nx = Module.concat(["Nx"])
+      :code.purge(nx)
+      :code.delete(nx)
+
+      try do
+        Module.create(
+          nx,
+          quote do
+            def tensor(values, _opts), do: values
+            def to_flat_list(%{values: values}), do: values
+          end,
+          Macro.Env.location(__ENV__)
+        )
+
+        tensor = %{__struct__: Module.concat(["Nx", "Tensor"]), values: [1.0]}
+        assert NxInterop.available?()
+        assert {:error, :nx_not_available} = NxInterop.type(tensor)
+        assert {:error, :nx_not_available} = NxInterop.transfer(tensor, :host)
+        assert {:ok, [1.0]} = NxInterop.to_list(tensor)
+      after
+        :code.purge(nx)
+        :code.delete(nx)
+        :code.purge(Module.concat(["Nx", "Tensor"]))
+        :code.delete(Module.concat(["Nx", "Tensor"]))
+        create_nx_stub()
+      end
+    end
   end
 
   test "runtime adapter round-trips tensors without a Vettore Nx dependency" do

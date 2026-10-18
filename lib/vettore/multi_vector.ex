@@ -7,10 +7,19 @@ defmodule Vettore.MultiVector do
 
   @type vector :: [number()]
   @type metric :: Distance.metric() | atom()
+  @type error ::
+          :dimension_mismatch
+          | :invalid_multi_vector
+          | :invalid_options
+          | :metric_overflow
+          | :score_overflow
+          | {:unknown_metric, term()}
+          | String.t()
 
   @native_error_reasons %{
     "dimension mismatch" => :dimension_mismatch,
     "vector contains a non-finite value" => :invalid_multi_vector,
+    "metric overflow" => :metric_overflow,
     "score overflow" => :score_overflow
   }
 
@@ -19,6 +28,11 @@ defmodule Vettore.MultiVector do
 
   For each query vector, this finds the best matching document vector and sums
   those best scores.
+
+  Returns `{:error, :metric_overflow}` when a pairwise metric overflows, or
+  `{:error, :score_overflow}` when the accumulated score overflows. Batched
+  MaxSim search follows the same policy and does not return partial results
+  when a document cannot be scored.
 
   ## Examples
 
@@ -30,7 +44,7 @@ defmodule Vettore.MultiVector do
       {:ok, 2.0}
   """
   @spec chamfer([vector()], [vector()], keyword()) ::
-          {:ok, float()} | {:error, term()}
+          {:ok, float()} | {:error, error()}
   def chamfer(query_vectors, document_vectors, opts \\ [])
 
   def chamfer(query_vectors, document_vectors, opts)
@@ -56,7 +70,7 @@ defmodule Vettore.MultiVector do
 
   This is an explicit alias for Chamfer/MaxSim scoring: each query vector takes
   its best match from the document vectors, then the best-match scores are
-  summed.
+  summed. It returns the same errors as `chamfer/3`.
 
   ## Examples
 
@@ -68,7 +82,7 @@ defmodule Vettore.MultiVector do
       {:ok, 2.0}
   """
   @spec colbert_score([vector()], [vector()], keyword()) ::
-          {:ok, float()} | {:error, term()}
+          {:ok, float()} | {:error, error()}
   def colbert_score(query_vectors, document_vectors, opts \\ []) do
     chamfer(query_vectors, document_vectors, opts)
   end

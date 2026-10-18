@@ -62,6 +62,7 @@ defmodule Vettore.Collection do
   @max_candidate_count 1_000_000
   @f32_max 3.402_823_466_385_288_6e38
   @multi_vector_error_reasons %{
+    "metric overflow" => :metric_overflow,
     "score overflow" => :score_overflow,
     "dimension mismatch" => :dimension_mismatch,
     "vector contains a non-finite value" => :invalid_multi_vector

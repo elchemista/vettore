@@ -196,6 +196,73 @@ defmodule VettoreAlgorithmsHardeningTest do
   end
 
   describe "multi-vector contracts" do
+    test "pairwise overflow returns a metric error in Chamfer and ColBERT scoring" do
+      large = 3.0e38
+
+      for score <- [&MultiVector.chamfer/3, &MultiVector.colbert_score/3],
+          {metric, document_value} <- [
+            {:inner_product, large},
+            {:negative_inner_product, large},
+            {:l2, -large},
+            {:l2_squared, -large},
+            {:manhattan, -large},
+            {:chebyshev, -large}
+          ] do
+        assert {:error, :metric_overflow} =
+                 score.([[large]], [[document_value]], metric: metric)
+      end
+    end
+
+    test "accumulated overflow remains a distinct score error" do
+      large = 3.0e38
+
+      for score <- [&MultiVector.chamfer/3, &MultiVector.colbert_score/3],
+          metric <- [:inner_product, :negative_inner_product] do
+        assert {:ok, finite_score} = score.([[large]], [[1.0]], metric: metric)
+        assert_in_delta finite_score / large, 1.0, 1.0e-6
+
+        assert {:error, :score_overflow} =
+                 score.([[large], [large]], [[1.0]], metric: metric)
+      end
+    end
+
+    for {error, query_vectors, document_value} <- [
+          {:metric_overflow, [[3.0e38]], 3.0e38},
+          {:score_overflow, [[3.0e38], [3.0e38]], 1.0}
+        ] do
+      test "batched and hybrid MaxSim return #{error} without partial results" do
+        query_vectors = unquote(Macro.escape(query_vectors))
+        expected_error = {:error, unquote(error)}
+        assert {:ok, collection} = Collection.new(dimensions: 1, metric: :inner_product)
+        on_exit(fn -> Vettore.close(collection) end)
+
+        assert :ok = Collection.put(collection, %{id: "valid", vectors: [[0.1]]})
+
+        assert {:ok, [%Result{id: "valid"}]} =
+                 Collection.multi_vector_search(collection, query_vectors)
+
+        assert :ok =
+                 Collection.put(collection, %{
+                   id: "overflow",
+                   vectors: [[unquote(document_value)]]
+                 })
+
+        for search <- [&Collection.multi_vector_search/3, &Vettore.multi_vector_search/3],
+            limit <- [1, 2] do
+          assert ^expected_error = search.(collection, query_vectors, limit: limit)
+        end
+
+        for search <- [&Collection.hybrid_search/3, &Vettore.hybrid_search/3] do
+          assert ^expected_error =
+                   search.(collection, [0.0],
+                     generators: [search: [candidates: 2]],
+                     rerank: {:multi_vector, query_vectors},
+                     limit: 1
+                   )
+        end
+      end
+    end
+
     test "all metrics and aliases produce finite MaxSim scores" do
       query = [[1.0, 0.0], [0.0, 1.0]]
       document = [[1.0, 0.0], [0.0, 1.0]]
@@ -276,6 +343,16 @@ defmodule VettoreAlgorithmsHardeningTest do
 
       assert {:error, :invalid_mmr_args} =
                Distance.mmr_rerank([{"a", 1.0}, {"a", 0.5}], embeddings, :l2, 0.5, 1)
+    end
+
+    test "MMR reports pairwise overflow without returning a partial rerank" do
+      max = 3.402_823_466_385_288_6e38
+      initial = [{"a", 1.0}, {"b", 0.9}, {"c", 0.8}]
+
+      for {metric, other} <- [{:l2, -max}, {:inner_product, max}, {:negative_inner_product, max}] do
+        vectors = [{"a", [max]}, {"b", [other]}, {"c", [0.0]}]
+        assert {:error, :metric_overflow} = Distance.mmr_rerank(initial, vectors, metric, 0.5, 3)
+      end
     end
   end
 

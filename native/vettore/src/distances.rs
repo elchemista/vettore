@@ -114,9 +114,16 @@ pub fn rank_distance(metric: Metric, left: &[f32], right: &[f32]) -> Result<f32,
 
 /// Converts one already-computed raw metric value into ascending rank order.
 pub fn rank_value(metric: Metric, raw: f32) -> f32 {
+    // Final rounding can produce -0.0 even after f64 recovery. Numeric ties
+    // must reach the id tiebreaker rather than total_cmp's signed-zero order.
+    if raw == 0.0 {
+        return 0.0;
+    }
     match metric {
-        Metric::Cosine => 1.0 - raw,
-        Metric::InnerProduct => -raw,
+        // Negation preserves every distinct f32 similarity. Subtracting from
+        // one collapses small similarities into artificial ties. Rank keys are
+        // internal; the public cosine distance remains 1 - similarity.
+        Metric::Cosine | Metric::InnerProduct => -raw,
         _ => raw,
     }
 }
@@ -141,22 +148,52 @@ pub fn validate_finite_vector(vector: &[f32]) -> Result<(), String> {
 
 /// Euclidean distance derived from the SIMD squared L2 kernel.
 pub fn l2(left: &[f32], right: &[f32]) -> f32 {
-    let squared = l2_squared(left, right);
-    if squared.is_finite() {
+    let squared = simd_l2_squared(left, right);
+    if squared.is_finite() && squared > f32::MIN_POSITIVE * left.len() as f32 {
         squared.sqrt()
+    } else if squared == 0.0 && identical_bits(left, right) {
+        // A true duplicate needs no f64 arithmetic. Comparing inputs is
+        // necessary: different tiny coordinates can also square to zero.
+        0.0
     } else {
+        // Take the root BEFORE converting to f32: a representable distance
+        // can have an unrepresentable square. Also recover sums of rounded
+        // subnormal products, even when their total is itself normal.
         f64_l2_squared(left, right).sqrt() as f32
     }
 }
 
 /// Squared L2 distance using portable SIMD for dense f32 chunks.
 pub fn l2_squared(left: &[f32], right: &[f32]) -> f32 {
-    simd_l2_squared(left, right)
+    let squared = simd_l2_squared(left, right);
+    if squared <= f32::MIN_POSITIVE * left.len() as f32 {
+        if squared == 0.0 && identical_bits(left, right) {
+            0.0
+        } else {
+            f64_l2_squared(left, right) as f32
+        }
+    } else {
+        squared
+    }
 }
 
 /// Inner product using portable SIMD for dense f32 chunks.
 pub fn dot(left: &[f32], right: &[f32]) -> f32 {
-    simd_dot(left, right)
+    let product = simd_dot(left, right);
+    // Individual products may round to zero/subnormals before their sum,
+    // even when that sum is representable. Recover either sign, including
+    // zero from cancellation, and round only the final f64 accumulation.
+    if product.abs() <= f32::MIN_POSITIVE * left.len() as f32 {
+        f64_dot(left, right) as f32
+    } else {
+        product
+    }
+}
+
+fn identical_bits(left: &[f32], right: &[f32]) -> bool {
+    // Byte equality uses the optimized slice comparison. Different signed
+    // zeros can miss this shortcut but still recover the correct zero in f64.
+    bytemuck::cast_slice::<f32, u8>(left) == bytemuck::cast_slice::<f32, u8>(right)
 }
 
 /// Cosine similarity for vectors that have not already been normalized.
@@ -278,7 +315,7 @@ fn simd_l2_squared(left: &[f32], right: &[f32]) -> f32 {
 }
 
 /// Accumulates products in 8-lane SIMD chunks.
-fn simd_dot(left: &[f32], right: &[f32]) -> f32 {
+pub(crate) fn simd_dot(left: &[f32], right: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut i = 0usize;
 
@@ -387,7 +424,7 @@ fn jaccard(left: &[f32], right: &[f32]) -> f32 {
     if union == 0 {
         0.0
     } else {
-        1.0 - intersection as f32 / union as f32
+        (union - intersection) as f32 / union as f32
     }
 }
 
@@ -497,7 +534,7 @@ pub fn packed_jaccard(left: &[u64], right: &[u64], dimensions: usize) -> Result<
     if union == 0 {
         Ok(0.0)
     } else {
-        Ok(1.0 - intersection as f32 / union as f32)
+        Ok((union - intersection) as f32 / union as f32)
     }
 }
 
@@ -555,7 +592,7 @@ mod tests {
         assert_eq!(compute(Metric::Hamming, &left, &right), Ok(2.0));
         assert!((compute(Metric::Jaccard, &left, &right).unwrap() - 2.0 / 3.0).abs() < 1e-6);
         assert_eq!(rank_value(Metric::InnerProduct, 2.0), -2.0);
-        assert_eq!(rank_value(Metric::Cosine, 0.25), 0.75);
+        assert_eq!(rank_value(Metric::Cosine, 0.25), -0.25);
         assert_eq!(similarity_value(Metric::NegativeInnerProduct, -3.0), 3.0);
     }
 

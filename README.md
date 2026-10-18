@@ -49,7 +49,7 @@ Elixir systems, with Rust kept as acceleration rather than ownership.
 ```elixir
 def deps do
   [
-    {:vettore, "~> 0.3.5"}
+    {:vettore, "~> 0.3.6"}
   ]
 end
 ```
@@ -78,6 +78,13 @@ Create a collection, insert a few records, and search:
 {:ok, results} =
   Vettore.search(collection, [1.0, 0.0, 0.0], limit: 2)
 ```
+
+Dimensions are configured per collection and are not limited to 384 or 768.
+Lengths such as 787, 1024, 1536, and 3072 work with Flat, HNSW, and GPU search;
+SIMD handles lengths that are not multiples of eight. Every stored vector and
+query must match the collection's dimensions. Available memory and GPU buffer
+limits still apply. The GPU top-k limit of 64 concerns returned results, not
+vector dimensions.
 
 Results are `%Vettore.Result{}` structs:
 
@@ -124,6 +131,11 @@ but changes the `Result.score` scale used by earlier releases. Pass
 `score: :raw` when creating or loading a collection to preserve the previous
 behavior. Existing snapshots persist their score mode and keep their original
 scale.
+
+Similarity scores are rounded display values: for L2, `1 / (1 + distance)` can
+round distinct distances such as `1e-30` and `3e-30` to the same `1.0`. Ranking
+still uses the raw metric. Read `Result.distance` or use `score: :raw` when those
+small differences matter to the caller.
 
 ### Lifecycle ownership
 
@@ -674,6 +686,11 @@ Vettore.Vector.mean_pool_f32(model_matrix, dimensions, token_ids,
 ```
 
 The GPU runtime, device, and shader pipelines are initialized lazily and reused.
+Initialization tries compatible adapters in a deterministic order, preferring
+hardware and native compute backends over GL. If a device or pipeline cannot be
+initialized, the next adapter is tried. The initial setup is serialized; warm
+queries execute concurrently. Device-loss callbacks invalidate the runtime so
+the next query can initialize a replacement and rebuild its resident buffers.
 Calls may submit concurrently. Failed initialization is cached for ten seconds
 before another adapter probe, while device-loss errors invalidate a live runtime
 immediately. Readback waits default to ten seconds and can be set from 100 to
@@ -684,6 +701,44 @@ for stable f32 reductions, while per-row scale metadata and explicit validity
 flags preserve every supported metric and discard only genuinely overflowing
 rows. Inputs with a device-unsafe numeric range return to SIMD under the normal
 fallback policy rather than silently losing small coordinates.
+
+Resident InnerProduct, NegativeInnerProduct, and L2Squared conservatively reject
+nonzero row/query scales below `sqrt(f32::MIN_POSITIVE)` (about `1.08e-19`).
+Device-side subnormal scores can otherwise become zero and corrupt top-k order.
+These inputs use CPU recovery under `gpu_fallback: :cpu`; strict GPU mode returns
+`{:error, :gpu_failed}` (the native reason is `"gpu numeric range unsupported"`).
+Single-pair GPU metrics rescale on
+the host and are tested separately for representable subnormal outputs.
+
+An in-flight native Flat search owns an immutable snapshot and may finish using
+the generation that preceded a concurrent write. That snapshot is never
+republished as the current cache; a subsequent search rebuilds it. Result
+hydration still reads the current ETS records and omits deleted ids. If a native
+writer panics while holding the index lock, later operations return
+`"flat lock poisoned"` or `"hnsw lock poisoned"`: recreate the index from canonical records instead of
+reusing potentially inconsistent internal state.
+
+Recovery is explicit; Vettore does not replace collection handles automatically.
+Pause new operations and drain in-flight calls through your collection-owning
+process, then snapshot the still-live ETS store and load a new collection:
+
+```elixir
+path = "priv/snapshots/index-recovery.ets"
+:ok = Vettore.snapshot(failed_collection, path)
+{:ok, replacement} = Vettore.load_snapshot(path)
+# Publish `replacement` to every caller before resuming operations.
+# After all callers have stopped using the old handle:
+close_result = Vettore.close(failed_collection)
+```
+
+Snapshotting reads canonical ETS records without acquiring the poisoned native
+lock; loading rebuilds a fresh native index and a separate ETS store, preserving
+vectors, values, metadata, and collection settings. Keep the old collection if
+snapshotting or loading fails. On the poisoned handle, `close_result` is
+`{:error, "flat lock poisoned"}` or `{:error, "hnsw lock poisoned"}`, but its ETS store is still closed. Release all
+old handles to let the native resource be reclaimed. Do not close the old
+collection before taking the snapshot, and reconcile any failed writes against
+the restored canonical records before retrying them.
 
 Single-pair metric calls still upload both vectors, so SIMD can remain faster for
 that shape. Flat search is the throughput-oriented GPU path: the matrix upload is
@@ -760,6 +815,12 @@ Vettore.Distance.mmr_rerank(initial, embeddings, :cosine, 0.5, 2)
 # {:ok, [{"a", 0.9}, {"c", 0.1}]}
 ```
 
+MMR returns `{:error, :metric_overflow}` when a pairwise diversity metric exceeds
+the f32 output range. Its pairwise comparisons determine the reranking objective;
+an overflowing comparison therefore fails the call rather than returning a
+partial result. Top-k query scoring separately skips candidates whose query
+metric overflows.
+
 Sign compression:
 
 ```elixir
@@ -813,6 +874,18 @@ Flat with no CPU fallback. Enable that slower check locally with:
 VETTORE_BUILD=1 VETTORE_TEST_EX_FASTEMBED=1 \
   mix test test/ex_fastembed_integration_test.exs
 ```
+
+Both committed and freshly inferred embeddings are checked against independent
+f64 metric references through list and f32-binary inputs. The suite also checks
+cache invalidation after writes, concurrent warm searches, and Flat/HNSW plus
+adaptive retrieval on fresh embeddings. Rust tests cover SIMD tail dimensions,
+tiny distances, adapter fallback, simulated synchronization errors, and device
+destruction/recovery. Pure GPU preparation and selection policy are included in
+the Rust coverage gate; the driver boundary is exercised by integration tests.
+
+When switching an existing checkout from precompiled to locally built NIFs,
+first run `MIX_ENV=test VETTORE_BUILD=1 mix compile --force` so the tests load the
+current native source.
 
 Regenerate the fixture after an intentional model or dependency update with:
 

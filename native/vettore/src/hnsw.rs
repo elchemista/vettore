@@ -281,23 +281,15 @@ impl HnswIndex {
             }
         }
 
-        let incoming_keys: Vec<_> = self
-            .incoming
-            .keys()
-            .filter(|(target, _layer)| *target == internal_id)
-            .copied()
-            .collect();
-
-        for (_target, layer) in incoming_keys {
+        // Edges can only target layers present on the removed node. Look up
+        // those keys directly instead of scanning every node's incoming edges.
+        for (layer, incoming) in incoming_by_layer.iter_mut().enumerate() {
             let sources = self
                 .incoming
                 .remove(&(internal_id, layer))
                 .unwrap_or_default();
-            if layer >= incoming_by_layer.len() {
-                incoming_by_layer.resize_with(layer + 1, HashSet::new);
-            }
             for source in sources {
-                incoming_by_layer[layer].insert(source);
+                incoming.insert(source);
                 self.remove_connection(source, layer, internal_id);
             }
         }
