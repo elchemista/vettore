@@ -107,6 +107,7 @@ New code can stay under the top-level `Vettore` module:
 Vettore.new(opts)
 Vettore.put(collection, embedding)
 Vettore.put_many(collection, embeddings)
+Vettore.upsert(collection, embedding)
 Vettore.get(collection, id)
 Vettore.delete(collection, id)
 Vettore.all(collection)
@@ -190,6 +191,10 @@ snapshots, and usability.
 {:ok, results} =
   Vettore.search(collection, query_vector, limit: 10)
 ```
+
+Pass `filter: %{language: "it"}` to select results whose metadata matches every
+entry exactly. Flat ranks the matching records. HNSW can traverse other records
+while looking for matches.
 
 On CPU, Flat stores all rows in one contiguous native matrix and scans each row
 with portable f32/f64 SIMD kernels, including stable cosine accumulation. With
@@ -448,9 +453,9 @@ Useful details:
 
 - `id` is the preferred unique identifier.
 - If `id` is missing, a non-empty string `value` can be used as the id.
-- IDs must be non-empty valid UTF-8 strings. Duplicate ids are rejected;
-  `put/2` is insert-only, so replace a record with `delete/2` followed by
-  `put/2`.
+- IDs must be non-empty valid UTF-8 strings. `put/2` returns
+  `{:error, :duplicate_id}` for an existing ID. For ETS collections, `upsert/2`
+  inserts or replaces a record atomically.
 - Duplicate vectors are allowed.
 - Vectors are normalized at insertion according to the collection config.
 - If `vectors` is present but `vector` is omitted, Vettore stores an averaged
@@ -485,8 +490,9 @@ Snapshots store the ETS table: records, metadata, normalized vectors, binary
 vectors, multi-vectors, and collection config. Native indexes are rebuilt from
 ETS when loaded. Snapshot writes use a same-directory temporary file followed
 by a rename and include ETS integrity metadata. Loads validate the table type,
-schema, and every stored record before rebuilding the index; legacy public
-tables are restored as protected tables.
+schema, and every stored record before rebuilding the index. The current
+snapshot format includes row revisions and still loads older snapshots.
+Legacy public tables are restored as protected tables.
 
 Snapshot integrity metadata detects accidental corruption; it is not an
 authentication mechanism. Load snapshots only from trusted sources.

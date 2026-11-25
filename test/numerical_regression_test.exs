@@ -68,6 +68,48 @@ defmodule VettoreNumericalRegressionTest do
     end
   end
 
+  test "GPU L2 metrics preserve small differences between large vectors" do
+    if Compute.gpu_detected?() do
+      query = [1.0e25, 0.0]
+      other = [1.0e25, 1.0]
+      strict_options = [gpu: true, gpu_fallback: :error]
+
+      for metric <- [:l2, :l2_squared] do
+        assert {:ok, 1.0} = apply(Distance, metric, [query, other, strict_options])
+        assert {:ok, 1.0} = apply(Vector, metric, [binary(query), binary(other), strict_options])
+
+        {:ok, collection} =
+          Collection.new(
+            dimensions: 2,
+            metric: metric,
+            normalize: :none,
+            index_options: [gpu: true, gpu_fallback: :cpu]
+          )
+
+        on_exit(fn -> Collection.close(collection) end)
+
+        assert :ok =
+                 Collection.put_many(collection, [
+                   %{id: "a-other", vector: other},
+                   %{id: "z-same", vector: query}
+                 ])
+
+        for {search, options} <- [
+              {:search, [limit: 2]},
+              {:funnel_search, [stages: [1], candidates: 2, limit: 2]}
+            ] do
+          assert {:ok, hits} = apply(Collection, search, [collection, query, options])
+          assert Enum.map(hits, &{&1.id, &1.distance}) == [{"z-same", 0.0}, {"a-other", 1.0}]
+
+          strict = %{collection | index_options: strict_options}
+          assert {:error, :gpu_failed} = apply(Collection, search, [strict, query, options])
+        end
+      end
+    else
+      refute System.get_env("VETTORE_REQUIRE_GPU") == "1"
+    end
+  end
+
   test "dimensions above 786 work across Flat, HNSW and resident GPU search" do
     gpu? = Compute.gpu_detected?()
     assert gpu? or System.get_env("VETTORE_REQUIRE_GPU") != "1"

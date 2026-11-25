@@ -15,8 +15,8 @@ defmodule Vettore.Index.Flat do
 
   An in-flight native search may finish against the immutable generation from
   before a concurrent write. Its stale snapshot is never installed as the
-  current cache. Result hydration reads the current ETS records, omitting ids
-  that have been deleted in the meantime.
+  current cache. Hydration omits records whose revisions have changed since the
+  native search.
 
   A native panic while holding the write lock leaves the index unavailable:
   operations return `{:error, "flat lock poisoned"}`. Recovery is explicit.
@@ -44,18 +44,21 @@ defmodule Vettore.Index.Flat do
 
   @spec put(Index.context(), Embedding.t()) :: :ok | {:error, term()}
   @impl Vettore.Index
-  def put(%{index_state: index_state}, %Embedding{} = embedding) do
+  def put(%{index_state: index_state} = context, %Embedding{} = embedding) do
     with :ok <- Identifier.validate(embedding.id) do
-      Index.normalize_write_result(Nifs.flat_insert(index_state, embedding.id, embedding.vector))
+      index_state
+      |> Nifs.flat_insert_versioned(embedding.id, Index.revision(context), embedding.vector)
+      |> Index.normalize_write_result()
     end
   end
 
   @spec put_many(Index.context(), [Embedding.t()]) :: :ok | {:error, term()}
   @impl Vettore.Index
-  def put_many(%{index_state: index_state}, embeddings) do
+  def put_many(%{index_state: index_state} = context, embeddings) do
     with :ok <- Identifier.validate_embeddings(embeddings) do
-      vectors = Enum.map(embeddings, &{&1.id, &1.vector})
-      Index.normalize_write_result(Nifs.flat_insert_many(index_state, vectors))
+      revision = Index.revision(context)
+      vectors = Enum.map(embeddings, &{&1.id, revision, &1.vector})
+      Index.normalize_write_result(Nifs.flat_insert_many_versioned(index_state, vectors))
     end
   end
 
@@ -80,14 +83,18 @@ defmodule Vettore.Index.Flat do
          limit = Keyword.get(opts, :limit, 10),
          :ok <- Index.validate_limit(limit),
          {:ok, query} <- Index.prepare_query(context, query),
-         {:ok, workload} <- search_workload(context.index_options, index_state),
-         {:ok, hits} <- run_search(context.index_options, workload, index_state, query, limit) do
+         {:ok, allowed} <- Index.matching_revisions(context, Keyword.get(opts, :filter, %{})),
+         {:ok, workload} <- search_workload(context, index_state, allowed),
+         {:ok, hits} <-
+           run_search(context.index_options, workload, index_state, query, limit, allowed) do
       {:ok, Index.hydrate_results(context, hits)}
     end
   end
 
-  @spec search_workload(keyword(), reference()) :: {:ok, non_neg_integer()} | {:error, term()}
-  defp search_workload(compute_options, index_state) do
+  defp search_workload(context, _index_state, allowed) when is_map(allowed),
+    do: {:ok, map_size(allowed) * context.dimensions}
+
+  defp search_workload(%{index_options: compute_options}, index_state, nil) do
     with {:ok, selection} <- Compute.selection(compute_options) do
       workload_for_selection(selection, index_state)
     end
@@ -103,14 +110,20 @@ defmodule Vettore.Index.Flat do
 
   defp workload_for_selection(_selection, _index_state), do: {:ok, 0}
 
-  @spec run_search(keyword(), non_neg_integer(), reference(), [float()], pos_integer()) ::
-          {:ok, [{String.t(), float()}]} | {:error, term()}
-  defp run_search(compute_options, workload, index_state, query, limit) do
+  @spec run_search(
+          keyword(),
+          non_neg_integer(),
+          reference(),
+          [float()],
+          pos_integer(),
+          Index.revisions()
+        ) :: {:ok, [Index.hit()]} | {:error, term()}
+  defp run_search(compute_options, workload, index_state, query, limit, allowed) do
     Compute.run(
       compute_options,
       workload,
-      fn -> Nifs.flat_search(index_state, query, limit) end,
-      fn -> Nifs.flat_gpu_search(index_state, query, limit) end
+      fn -> Nifs.flat_search_versioned(index_state, query, limit, allowed) end,
+      fn -> Nifs.flat_gpu_search_versioned(index_state, query, limit, allowed) end
     )
     |> Compute.normalize_search_result()
   end

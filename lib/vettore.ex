@@ -138,8 +138,8 @@ defmodule Vettore do
   @doc """
   Inserts one embedding into a collection.
 
-  IDs are insert-only: an existing id returns `{:error, :duplicate_id}`. To
-  replace a record, delete it first and then insert the new embedding.
+  An existing ID returns `{:error, :duplicate_id}`. Use `upsert/2` to replace a
+  record in an ETS collection.
 
   ## Examples
 
@@ -149,6 +149,15 @@ defmodule Vettore do
   """
   @spec put(Collection.t(), Embedding.t() | map()) :: :ok | {:error, term()}
   def put(%Collection{} = collection, embedding), do: Collection.put(collection, embedding)
+
+  @doc """
+  Atomically inserts or replaces an embedding in an ETS collection.
+
+  A replacement uses the existing ID and stores the new vector, value and
+  metadata together. Custom stores return `{:error, :upsert_not_supported}`.
+  """
+  @spec upsert(Collection.t(), Embedding.t() | map()) :: :ok | {:error, term()}
+  defdelegate upsert(collection, embedding), to: Collection
 
   @doc """
   Inserts many embeddings into a collection.
@@ -209,6 +218,10 @@ defmodule Vettore do
 
   @doc """
   Runs the configured collection search.
+
+  Pass `filter: %{key: value}` to match every supplied metadata entry by exact
+  equality. Flat returns the nearest matching records. HNSW searches
+  approximately and can traverse records excluded from the results.
 
   ## Examples
 

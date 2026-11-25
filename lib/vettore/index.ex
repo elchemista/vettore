@@ -7,8 +7,11 @@ defmodule Vettore.Index do
   """
 
   alias Vettore.{Distance, Embedding, Identifier, Result}
+  alias Vettore.Store.ETS
 
   @type context :: map()
+  @type hit :: {String.t(), non_neg_integer(), float()}
+  @type revisions :: %{String.t() => non_neg_integer()} | nil
 
   @max_nif_usize 4_294_967_295
   @f32_max 3.402_823_466_385_288_6e38
@@ -45,8 +48,20 @@ defmodule Vettore.Index do
   def ensure_open(_context), do: {:error, :closed}
 
   @doc false
-  @spec hydrate_results(context(), [{String.t(), number()}]) :: [Result.t()]
+  @spec hydrate_results(context(), [hit() | {String.t(), number()}]) :: [Result.t()]
   def hydrate_results(context, hits), do: Enum.flat_map(hits, &hydrate_result(context, &1))
+
+  @doc false
+  @spec revision(context()) :: non_neg_integer()
+  def revision(context), do: Map.get(context, :revision) || 0
+
+  @doc false
+  @spec consistent_search(context(), (-> result)) :: result | {:error, :closed}
+        when result: term()
+  def consistent_search(%{store_mod: ETS, store_state: state}, search),
+    do: ETS.consistent_search(state, search)
+
+  def consistent_search(_context, search), do: search.()
 
   @doc false
   @spec normalize_write_result(:ok | {:ok, {}} | {:error, reason}) ::
@@ -65,37 +80,79 @@ defmodule Vettore.Index do
   def validate_limit(_limit), do: {:error, :invalid_limit}
 
   @doc false
-  @spec validate_search_options(term()) :: :ok | {:error, :invalid_search_options}
+  @spec validate_search_options(term()) ::
+          :ok | {:error, :invalid_search_options | :invalid_filter}
   def validate_search_options(opts) when is_list(opts) do
-    if Keyword.keyword?(opts) and Enum.all?(Keyword.keys(opts), &(&1 == :limit)),
-      do: :ok,
+    if Keyword.keyword?(opts) and Enum.all?(Keyword.keys(opts), &(&1 in [:limit, :filter])),
+      do: validate_filter(opts),
       else: {:error, :invalid_search_options}
   end
 
   def validate_search_options(_opts), do: {:error, :invalid_search_options}
 
-  @spec hydrate_result(context(), {String.t(), number()}) :: [Result.t()]
+  @doc false
+  @spec validate_filter(keyword()) :: :ok | {:error, :invalid_filter}
+  def validate_filter(opts) do
+    if is_map(Keyword.get(opts, :filter, %{})), do: :ok, else: {:error, :invalid_filter}
+  end
+
+  @doc false
+  @spec matching_revisions(context(), map()) :: {:ok, revisions()} | {:error, term()}
+  def matching_revisions(_context, filter) when map_size(filter) == 0, do: {:ok, nil}
+
+  def matching_revisions(%{store_mod: ETS, store_state: state}, filter),
+    do: ETS.matching_revisions(state, filter)
+
+  def matching_revisions(%{store_mod: store, store_state: state}, filter) do
+    with {:ok, embeddings} <- store.all(state) do
+      revisions =
+        for %Embedding{id: id, metadata: metadata} <- embeddings,
+            metadata_matches?(metadata, filter),
+            into: %{},
+            do: {id, 0}
+
+      {:ok, revisions}
+    end
+  end
+
+  defp metadata_matches?(metadata, filter) do
+    is_map(metadata) and
+      Enum.all?(filter, fn {key, value} -> Map.fetch(metadata, key) === {:ok, value} end)
+  end
+
+  @spec hydrate_result(context(), hit() | {String.t(), number()}) :: [Result.t()]
+  defp hydrate_result(%{store_mod: ETS, store_state: state} = context, {id, revision, raw}) do
+    case ETS.fetch_revision(state, id, revision) do
+      {:ok, embedding} -> [result(context, id, embedding, raw)]
+      {:error, _reason} -> []
+    end
+  end
+
+  defp hydrate_result(context, {id, 0, raw}), do: hydrate_result(context, {id, raw})
+
   defp hydrate_result(%{store_mod: store_mod} = context, {id, raw}) when is_atom(store_mod) do
     with :ok <- Identifier.validate_utf8(id),
          {:ok, %Embedding{} = embedding} <- store_mod.get(context.store_state, id) do
-      {score, distance} = Distance.result_values(context.metric, raw, context.score)
-
-      [
-        %Result{
-          id: id,
-          value: embedding.value,
-          score: score,
-          distance: distance,
-          metric: context.metric,
-          metadata: embedding.metadata
-        }
-      ]
+      [result(context, id, embedding, raw)]
     else
       {:error, _reason} -> []
     end
   end
 
   defp hydrate_result(_context, _hit), do: []
+
+  defp result(context, id, embedding, raw) do
+    {score, distance} = Distance.result_values(context.metric, raw, context.score)
+
+    %Result{
+      id: id,
+      value: embedding.value,
+      score: score,
+      distance: distance,
+      metric: context.metric,
+      metadata: embedding.metadata
+    }
+  end
 
   @spec validate_vector(term(), term()) ::
           :ok | {:error, :dimension_mismatch | :invalid_vector}

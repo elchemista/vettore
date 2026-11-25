@@ -5,6 +5,7 @@
 //! `muvera`.
 
 use rustler::{Binary, NifResult, ResourceArc};
+use std::collections::HashMap;
 
 use crate::distances::Metric;
 use crate::flat::FlatResource;
@@ -407,6 +408,24 @@ fn flat_insert_many(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
+fn flat_insert_versioned(
+    index: ResourceArc<FlatResource>,
+    id: String,
+    revision: u64,
+    vector: Vec<f32>,
+) -> Result<(), String> {
+    index.insert_versioned(id, revision, vector)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn flat_insert_many_versioned(
+    index: ResourceArc<FlatResource>,
+    vectors: Vec<(String, u64, Vec<f32>)>,
+) -> Result<(), String> {
+    index.insert_many_versioned(vectors)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 /// Removes one vector from the native flat index.
 fn flat_delete(index: ResourceArc<FlatResource>, id: String) -> Result<(), String> {
     index.delete(&id)
@@ -448,6 +467,26 @@ fn flat_gpu_search(
     limit: usize,
 ) -> Result<Vec<(String, f32)>, String> {
     index.search_gpu(&query, limit)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn flat_search_versioned(
+    index: ResourceArc<FlatResource>,
+    query: Vec<f32>,
+    limit: usize,
+    allowed: Option<HashMap<String, u64>>,
+) -> Result<Vec<(String, u64, f32)>, String> {
+    index.search_versioned(&query, limit, allowed.as_ref())
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn flat_gpu_search_versioned(
+    index: ResourceArc<FlatResource>,
+    query: Vec<f32>,
+    limit: usize,
+    allowed: Option<HashMap<String, u64>>,
+) -> Result<Vec<(String, u64, f32)>, String> {
+    index.search_gpu_versioned(&query, limit, allowed.as_ref())
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -543,6 +582,32 @@ fn hnsw_insert_many(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
+fn hnsw_insert_versioned(
+    index: ResourceArc<HnswResource>,
+    id: String,
+    revision: u64,
+    vector: Vec<f32>,
+) -> Result<(), String> {
+    let mut guard = index
+        .0
+        .write()
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.insert_versioned(id, revision, vector)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn hnsw_insert_many_versioned(
+    index: ResourceArc<HnswResource>,
+    vectors: Vec<(String, u64, Vec<f32>)>,
+) -> Result<(), String> {
+    let mut guard = index
+        .0
+        .write()
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.insert_many_versioned(vectors)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
 /// Removes one vector from the native HNSW graph.
 fn hnsw_delete(index: ResourceArc<HnswResource>, id: String) -> Result<(), String> {
     let mut guard = index
@@ -576,6 +641,20 @@ fn hnsw_search(
         .read()
         .map_err(|_| "hnsw lock poisoned".to_string())?;
     guard.search(&query, limit)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn hnsw_search_versioned(
+    index: ResourceArc<HnswResource>,
+    query: Vec<f32>,
+    limit: usize,
+    allowed: Option<HashMap<String, u64>>,
+) -> Result<Vec<(String, u64, f32)>, String> {
+    let guard = index
+        .0
+        .read()
+        .map_err(|_| "hnsw lock poisoned".to_string())?;
+    guard.search_versioned(&query, limit, allowed.as_ref())
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
