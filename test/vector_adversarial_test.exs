@@ -102,6 +102,11 @@ defmodule Vettore.Test.ScriptedStore do
     {:ok, {{:all, [%Embedding{id: "a", vector: [1.0], binary_vector: :bad}]}, @config}}
   end
 
+  def load_snapshot("valid") do
+    embedding = %Embedding{id: "a", vector: [2.0], metadata: %{edition: 1}}
+    {:ok, {{:all, [embedding]}, @config}}
+  end
+
   def configure(_state, _config), do: :ok
   def close(_state), do: :ok
   def alive?(_state), do: true
@@ -346,6 +351,14 @@ defmodule VettoreAdversarialTest do
   end
 
   describe "snapshot and store corruption guards" do
+    test "custom snapshots rebuild the index and omit hits missing from the store" do
+      assert {:ok, collection} = Collection.load_snapshot("valid", store: ScriptedStore)
+      assert {:ok, {}} = Vettore.Nifs.flat_insert(collection.index_state, "missing", [0.0])
+
+      assert {:ok, [%Result{id: "a", distance: 2.0, metadata: %{edition: 1}}]} =
+               Collection.search(collection, [0.0], limit: 2)
+    end
+
     test "custom snapshot stores cannot bypass restored-record validation" do
       for {path, expected} <- [
             {"bad-config", :invalid_snapshot},

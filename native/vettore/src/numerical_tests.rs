@@ -342,6 +342,54 @@ fn gpu_primitives_preserve_tiny_l2_and_final_subnormal_squared_distances() {
 }
 
 #[test]
+fn gpu_l2_preserves_small_differences_between_large_vectors() {
+    if !crate::gpu::detected() {
+        assert_ne!(std::env::var("VETTORE_REQUIRE_GPU").as_deref(), Ok("1"));
+        return;
+    }
+    let query = [1.0e25, 0.0];
+    let other = [1.0e25, 1.0];
+    for metric in [Metric::L2, Metric::L2Squared] {
+        assert_eq!(crate::gpu::metric(&query, &other, metric), Ok(1.0));
+
+        let rows = vec![
+            ("a-other".into(), other.to_vec()),
+            ("z-same".into(), query.to_vec()),
+        ];
+        let index = crate::flat::FlatResource::new(metric);
+        index.insert_many(rows.clone()).unwrap();
+        assert_eq!(index.search(&query, 2).unwrap()[0], ("z-same".into(), 0.0));
+        assert_eq!(
+            index.search_gpu(&query, 2),
+            Err("gpu numeric range unsupported".into())
+        );
+        assert_eq!(
+            crate::gpu::vector_top_k(rows, &query, metric, 2, 2),
+            Err("gpu numeric range unsupported".into())
+        );
+    }
+}
+
+#[test]
+fn resident_gpu_l2_preserves_a_one_ulp_coordinate_difference() {
+    if !crate::gpu::detected() {
+        assert_ne!(std::env::var("VETTORE_REQUIRE_GPU").as_deref(), Ok("1"));
+        return;
+    }
+    let query = [3.7, 1.0];
+    let other = [3.7, 1.0 + f32::EPSILON];
+    for metric in [Metric::L2, Metric::L2Squared] {
+        let rows = vec![
+            ("a-other".into(), other.to_vec()),
+            ("z-same".into(), query.to_vec()),
+        ];
+        let gpu = crate::gpu::vector_top_k(rows, &query, metric, 2, 2).unwrap();
+        let distance = distances::compute(metric, &query, &other).unwrap();
+        assert_eq!(gpu, [("z-same".into(), 0.0), ("a-other".into(), distance)]);
+    }
+}
+
+#[test]
 fn resident_gpu_preserves_small_cosine_ranks_and_sparse_jaccard_differences() {
     if !crate::gpu::detected() {
         assert_ne!(std::env::var("VETTORE_REQUIRE_GPU").as_deref(), Ok("1"));

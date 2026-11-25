@@ -46,18 +46,21 @@ defmodule Vettore.Index.HNSW do
 
   @spec put(Index.context(), Embedding.t()) :: :ok | {:error, term()}
   @impl Vettore.Index
-  def put(%{index_state: index_state}, %Embedding{} = embedding) do
+  def put(%{index_state: index_state} = context, %Embedding{} = embedding) do
     with :ok <- Identifier.validate(embedding.id) do
-      Index.normalize_write_result(Nifs.hnsw_insert(index_state, embedding.id, embedding.vector))
+      index_state
+      |> Nifs.hnsw_insert_versioned(embedding.id, Index.revision(context), embedding.vector)
+      |> Index.normalize_write_result()
     end
   end
 
   @spec put_many(Index.context(), [Embedding.t()]) :: :ok | {:error, term()}
   @impl Vettore.Index
-  def put_many(%{index_state: index_state}, embeddings) do
+  def put_many(%{index_state: index_state} = context, embeddings) do
     with :ok <- Identifier.validate_embeddings(embeddings) do
-      vectors = Enum.map(embeddings, &{&1.id, &1.vector})
-      Index.normalize_write_result(Nifs.hnsw_insert_many(index_state, vectors))
+      revision = Index.revision(context)
+      vectors = Enum.map(embeddings, &{&1.id, revision, &1.vector})
+      Index.normalize_write_result(Nifs.hnsw_insert_many_versioned(index_state, vectors))
     end
   end
 
@@ -82,7 +85,8 @@ defmodule Vettore.Index.HNSW do
          limit = Keyword.get(opts, :limit, 10),
          :ok <- Index.validate_limit(limit),
          {:ok, query} <- Index.prepare_query(context, query),
-         {:ok, hits} <- Nifs.hnsw_search(index_state, query, limit) do
+         {:ok, allowed} <- Index.matching_revisions(context, Keyword.get(opts, :filter, %{})),
+         {:ok, hits} <- Nifs.hnsw_search_versioned(index_state, query, limit, allowed) do
       {:ok, Index.hydrate_results(context, hits)}
     end
   end

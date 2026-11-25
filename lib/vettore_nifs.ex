@@ -13,6 +13,11 @@ defmodule Vettore.Nifs do
     nif_versions: ["2.15", "2.16"],
     version: version
 
+  @typep versioned_vector :: {String.t(), non_neg_integer(), [float()]}
+  @typep write_result :: :ok | {:ok, {}} | {:error, String.t()}
+  @typep versions :: %{String.t() => non_neg_integer()} | nil
+  @typep search_result :: {:ok, [{String.t(), non_neg_integer(), float()}]} | {:error, String.t()}
+
   @doc false
   @spec l2_distance([float()], [float()]) :: {:ok, float()} | {:error, String.t()}
   def l2_distance(_left, _right), do: :erlang.nif_error(:nif_not_loaded)
@@ -245,6 +250,16 @@ defmodule Vettore.Nifs do
   def flat_insert_many(_index, _vectors), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  @spec flat_insert_versioned(reference(), String.t(), non_neg_integer(), [float()]) ::
+          write_result()
+  def flat_insert_versioned(_index, _id, _revision, _vector),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_insert_many_versioned(reference(), [versioned_vector()]) :: write_result()
+  def flat_insert_many_versioned(_index, _vectors), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   @spec flat_delete(reference(), String.t()) :: :ok | {:ok, {}} | {:error, String.t()}
   def flat_delete(_index, _id), do: :erlang.nif_error(:nif_not_loaded)
 
@@ -271,6 +286,18 @@ defmodule Vettore.Nifs do
   @spec flat_gpu_search(reference(), [float()], pos_integer()) ::
           {:ok, [{String.t(), float()}]} | {:error, String.t()}
   def flat_gpu_search(_index, _query, _limit), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_search_versioned(reference(), [float()], pos_integer(), versions()) ::
+          search_result()
+  def flat_search_versioned(_index, _query, _limit, _allowed),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec flat_gpu_search_versioned(reference(), [float()], pos_integer(), versions()) ::
+          search_result()
+  def flat_gpu_search_versioned(_index, _query, _limit, _allowed),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec hnsw_new_l2(pos_integer(), pos_integer(), pos_integer(), pos_integer(), pos_integer()) ::
@@ -306,6 +333,16 @@ defmodule Vettore.Nifs do
   def hnsw_insert_many(_index, _vectors), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  @spec hnsw_insert_versioned(reference(), String.t(), non_neg_integer(), [float()]) ::
+          write_result()
+  def hnsw_insert_versioned(_index, _id, _revision, _vector),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_insert_many_versioned(reference(), [versioned_vector()]) :: write_result()
+  def hnsw_insert_many_versioned(_index, _vectors), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   @spec hnsw_delete(reference(), String.t()) :: :ok | {:ok, {}} | {:error, String.t()}
   def hnsw_delete(_index, _id), do: :erlang.nif_error(:nif_not_loaded)
 
@@ -317,6 +354,12 @@ defmodule Vettore.Nifs do
   @spec hnsw_search(reference(), [float()], pos_integer()) ::
           {:ok, [{String.t(), float()}]} | {:error, String.t()}
   def hnsw_search(_index, _query, _limit), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec hnsw_search_versioned(reference(), [float()], pos_integer(), versions()) ::
+          search_result()
+  def hnsw_search_versioned(_index, _query, _limit, _allowed),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   @spec muvera_encode_query(

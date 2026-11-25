@@ -493,7 +493,14 @@ defmodule VettoreHardeningTest do
                  store: Vettore.Test.DelegatingETSStore
                )
 
-      assert :ok = Collection.put_many(working, [%{id: "kept", vector: [1.0]}])
+      record = %{id: "kept", vector: [1.0], metadata: %{kind: :example}}
+      assert :ok = Collection.put_many(working, [record])
+      assert {:error, :upsert_not_supported} = Vettore.upsert(working, record)
+
+      assert {:ok, [%Result{id: "kept"}]} =
+               Vettore.search(working, [1.0], filter: %{kind: :example})
+
+      assert {:ok, []} = Vettore.search(working, [1.0], filter: %{kind: :other})
       assert :ok = Collection.delete(working, "missing")
       assert :ok = Collection.delete(working, "kept")
       assert {:ok, []} = Collection.all(working)
@@ -663,6 +670,8 @@ defmodule VettoreHardeningTest do
 
       assert {:ok, [%Result{id: "legacy"}]} =
                Collection.quantized_search(loaded, [1.0, 1.0], candidates: 1, limit: 1)
+
+      assert {:ok, [%Result{id: "legacy"}]} = Collection.search(loaded, [1.0, 1.0])
 
       assert :ok = Vettore.close(loaded)
 

@@ -91,20 +91,41 @@ pub(crate) fn prepare_metric<'a>(
     metric: Metric,
 ) -> PreparedMetric<'a> {
     match metric {
-        Metric::L2 | Metric::L2Squared | Metric::Manhattan | Metric::Chebyshev => {
+        Metric::L2 | Metric::L2Squared => {
+            let differences = left
+                .iter()
+                .zip(right)
+                .map(|(&left, &right)| f64::from(left) - f64::from(right));
+            let scale = differences.clone().map(f64::abs).fold(0.0, f64::max);
+            if scale == 0.0 {
+                return borrowed_metric(left, right);
+            }
+
+            // Subtract before scaling so shared large coordinates cannot hide
+            // the small differences that determine the distance.
+            PreparedMetric {
+                left: Cow::Owned(
+                    differences
+                        .map(|difference| (difference / scale) as f32)
+                        .collect(),
+                ),
+                right: Cow::Owned(vec![0.0; left.len()]),
+                result_scale: if metric == Metric::L2Squared {
+                    scale * scale
+                } else {
+                    scale
+                },
+            }
+        }
+        Metric::Manhattan | Metric::Chebyshev => {
             let scale = max_abs(left).max(max_abs(right));
             if scale == 0.0 {
                 borrowed_metric(left, right)
             } else {
-                let result_scale = match metric {
-                    Metric::L2Squared => scale * scale,
-                    _ => scale,
-                };
-
                 PreparedMetric {
                     left: Cow::Owned(scale_vector(left, scale)),
                     right: Cow::Owned(scale_vector(right, scale)),
-                    result_scale,
+                    result_scale: scale,
                 }
             }
         }
@@ -390,10 +411,16 @@ pub(crate) fn resident_scale(values: &[f32], metric: Metric) -> f32 {
     if matches!(metric, Metric::Hamming | Metric::Jaccard) {
         1.0
     } else {
-        values
+        let maximum = values
             .iter()
             .map(|value| value.abs())
-            .fold(0.0f32, f32::max)
+            .fold(0.0f32, f32::max);
+        if matches!(metric, Metric::L2 | Metric::L2Squared) && maximum.is_normal() {
+            // A power-of-two divisor preserves the input's significant bits.
+            f32::from_bits(maximum.to_bits() & 0x7f80_0000)
+        } else {
+            maximum
+        }
     }
 }
 
@@ -419,7 +446,7 @@ pub(crate) fn unsafe_resident_scale(scale: f32, metric: Metric) -> bool {
                 && f64::from(scale).powi(2) < f64::from(f32::MIN_POSITIVE)))
 }
 
-pub(crate) fn unsafe_gpu_dynamic_range(values: &[f32]) -> bool {
+pub(crate) fn unsafe_gpu_dynamic_range(values: &[f32], metric: Metric) -> bool {
     let mut minimum = f32::INFINITY;
     let mut maximum = 0.0f32;
     for value in values {
@@ -433,8 +460,23 @@ pub(crate) fn unsafe_gpu_dynamic_range(values: &[f32]) -> bool {
     if maximum == 0.0 {
         return false;
     }
+    if matches!(metric, Metric::L2 | Metric::L2Squared) {
+        // For nearby row and query scales, allow one bit for their scale
+        // difference and 24 bits for the smallest nonzero f32 subtraction.
+        // Squaring that difference must stay in the normal range on the GPU.
+        let minimum_root = f64::from(f32::MIN_POSITIVE).sqrt();
+        let minimum_ratio = minimum_root * f64::from(1 << (f32::MANTISSA_DIGITS + 1));
+        // The final device rank can also flush a subnormal score.
+        let minimum_scale = if metric == Metric::L2Squared {
+            1.0
+        } else {
+            minimum_root
+        };
+        return f64::from(minimum) < minimum_ratio * f64::from(maximum).max(minimum_scale);
+    }
+
     let normalized_minimum = minimum / maximum;
-    normalized_minimum == 0.0 || !normalized_minimum.is_normal()
+    !normalized_minimum.is_normal()
 }
 
 pub(crate) fn decode_resident_candidates(bytes: &[u8], row_count: usize) -> Vec<(usize, f32)> {
@@ -482,8 +524,14 @@ mod tests {
 
     #[test]
     fn resident_preparation_guards_dynamic_range_and_decodes_final_candidates() {
-        assert!(!unsafe_gpu_dynamic_range(&[0.0, 1.0, -2.0]));
-        assert!(unsafe_gpu_dynamic_range(&[1.0e38, 1.0e-7]));
+        assert!(!unsafe_gpu_dynamic_range(&[0.0, 1.0, -2.0], Metric::L2));
+        assert!(unsafe_gpu_dynamic_range(&[1.0e38, 1.0e-7], Metric::Cosine));
+        for metric in [Metric::L2, Metric::L2Squared] {
+            assert!(unsafe_gpu_dynamic_range(&[1.0e25, 1.0], metric));
+            assert!(!unsafe_gpu_dynamic_range(&[1.0e25, 0.0], metric));
+        }
+        assert!(unsafe_gpu_dynamic_range(&[1.0e-14], Metric::L2Squared));
+        assert!(!unsafe_gpu_dynamic_range(&[1.0e-14], Metric::L2));
         assert!(unsafe_gpu_scale(f32::from_bits(1)));
         assert!(!unsafe_gpu_scale(1.0));
 
@@ -580,9 +628,25 @@ mod tests {
             finish_prepared_metric(Metric::L2Squared, &[[1.0, 0.0, 0.0, 0.0]], &squared).is_err()
         );
 
+        let left = [1.0e25, 0.0];
+        let right = [1.0e25, 1.0];
+        for metric in [Metric::L2, Metric::L2Squared] {
+            let prepared = prepare_metric(&left, &right, metric);
+            assert_eq!(prepared.left.as_ref(), &[0.0, -1.0]);
+            assert_eq!(prepared.right.as_ref(), &[0.0; 2]);
+            assert_eq!(prepared.result_scale, 1.0);
+        }
+
         let zeros = [0.0, 0.0];
         let l2_zero = prepare_metric(&zeros, &zeros, Metric::L2);
         assert!(matches!(l2_zero.left, std::borrow::Cow::Borrowed(_)));
+        for metric in [Metric::Manhattan, Metric::Chebyshev] {
+            let prepared = prepare_metric(&zeros, &zeros, metric);
+            assert_eq!(
+                finish_prepared_metric(metric, &[[0.0; 4]], &prepared),
+                Ok(0.0)
+            );
+        }
         let dot_zero = prepare_metric(&zeros, &dot_right, Metric::InnerProduct);
         assert!(matches!(dot_zero.left, std::borrow::Cow::Borrowed(_)));
         let cosine_zero = prepare_metric(&zeros, &dot_right, Metric::Cosine);

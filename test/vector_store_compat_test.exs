@@ -123,6 +123,31 @@ defmodule VettoreStoreCompatTest do
       assert :ok = ETS.close(state)
     end
 
+    test "indexed batches restore the previous store contents on index failure" do
+      assert {:ok, state} = ETS.new(%{})
+      assert :ok = ETS.put(state, %Embedding{id: "existing"})
+      batch = [%Embedding{id: "a"}, %Embedding{id: "b"}]
+      caller = self()
+
+      assert {:error, :index_failed} =
+               ETS.put_many_indexed(
+                 state,
+                 batch,
+                 fn -> {:error, :index_failed} end,
+                 fn ->
+                   send(caller, :rolled_back)
+                   :ok
+                 end
+               )
+
+      assert_received :rolled_back
+      assert {:ok, [%Embedding{id: "existing"}]} = ETS.all(state)
+      assert :ok = ETS.put_many_indexed(state, batch, fn -> :ok end, fn -> :ok end)
+      assert {:ok, {%Embedding{id: "a"}, revision}} = ETS.get_versioned(state, "a")
+      assert revision > 0
+      assert {:ok, {%Embedding{id: "b"}, ^revision}} = ETS.get_versioned(state, "b")
+    end
+
     test "snapshot creates parent directories and verifies round trips" do
       directory =
         Path.join(

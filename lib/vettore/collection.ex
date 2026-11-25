@@ -20,7 +20,8 @@ defmodule Vettore.Collection do
           index_state: term(),
           index: atom(),
           index_options: keyword(),
-          compressed: boolean()
+          compressed: boolean(),
+          revision: pos_integer() | nil
         }
   @type embedding_input :: Embedding.t() | map()
   @type hybrid_generator ::
@@ -44,16 +45,17 @@ defmodule Vettore.Collection do
     :index_state,
     :index,
     :index_options,
-    :compressed
+    :compressed,
+    :revision
   ]
 
   @metrics ~w(l2 l2_squared cosine inner_product negative_inner_product manhattan chebyshev hamming jaccard)a
   @normalizations ~w(none l2 zscore minmax)a
   @score_modes ~w(raw similarity)a
-  @snapshot_version 1
+  @snapshot_version 2
   @new_option_keys ~w(name dimensions metric normalize store index index_options score compressed)a
   @snapshot_override_keys ~w(name index index_options score store)a
-  @search_option_keys ~w(limit)a
+  @search_option_keys ~w(limit filter)a
   @funnel_option_keys ~w(limit candidates stages dimensions)a
   @quantized_option_keys ~w(limit candidates)a
   @multi_vector_option_keys ~w(limit metric)a
@@ -181,6 +183,24 @@ defmodule Vettore.Collection do
   end
 
   @doc false
+  @spec upsert(t(), embedding_input()) :: :ok | {:error, term()}
+  def upsert(%__MODULE__{store_mod: ETS} = collection, embedding) do
+    with {:ok, embedding} <- prepare_embedding(collection, embedding) do
+      ETS.upsert_indexed(
+        collection.store_state,
+        embedding,
+        ETS.revision(),
+        fn record, revision ->
+          collection.index_mod.put(versioned(collection, revision), record)
+        end,
+        fn id -> collection.index_mod.delete(collection, id) end
+      )
+    end
+  end
+
+  def upsert(%__MODULE__{}, _embedding), do: {:error, :upsert_not_supported}
+
+  @doc false
   @spec put_many(t(), [Embedding.t() | map()]) :: :ok | {:error, term()}
   def put_many(%__MODULE__{} = collection, embeddings) when is_list(embeddings) do
     with {:ok, prepared} <- prepare_embeddings(collection, embeddings) do
@@ -219,8 +239,11 @@ defmodule Vettore.Collection do
   def search(collection, query, opts \\ [])
 
   def search(%__MODULE__{} = collection, query, opts) when is_list(opts) do
-    with :ok <- validate_options(opts, @search_option_keys) do
-      collection.index_mod.search(collection, query, opts)
+    with :ok <- validate_options(opts, @search_option_keys),
+         :ok <- Index.validate_filter(opts) do
+      Index.consistent_search(collection, fn ->
+        collection.index_mod.search(collection, query, opts)
+      end)
     end
   end
 
@@ -241,10 +264,10 @@ defmodule Vettore.Collection do
   @spec do_funnel_search(t(), [number()], keyword()) :: {:ok, [Result.t()]} | {:error, term()}
   defp do_funnel_search(collection, query, opts) do
     limit = Keyword.get(opts, :limit, 10)
-    candidates = candidate_count(opts, limit)
     stages = funnel_stages(collection, opts)
 
     with :ok <- validate_limit(limit),
+         candidates = candidate_count(opts, limit),
          :ok <- validate_candidates(candidates, limit),
          :ok <- validate_funnel_stages(stages, collection.dimensions),
          {:ok, query} <- prepare_query(collection, query),
@@ -271,14 +294,12 @@ defmodule Vettore.Collection do
           {:ok, [Result.t()]} | {:error, term()}
   defp do_quantized_search(collection, query, opts) do
     limit = Keyword.get(opts, :limit, 10)
-    candidates = candidate_count(opts, limit)
 
     with :ok <- validate_limit(limit),
+         candidates = candidate_count(opts, limit),
          :ok <- validate_candidates(candidates, limit),
          {:ok, query} <- prepare_query(collection, query),
-         {:ok, embeddings} <- collection.store_mod.all(collection.store_state),
-         {:ok, stage_embeddings} <-
-           quantized_stage_embeddings(collection, embeddings, query, candidates) do
+         {:ok, stage_embeddings} <- quantized_stage_embeddings(collection, query, candidates) do
       exact_rerank(collection, query, stage_embeddings, limit)
     end
   end
@@ -344,6 +365,11 @@ defmodule Vettore.Collection do
 
   @doc false
   @spec close(t()) :: :ok | {:error, term()}
+  def close(%__MODULE__{store_mod: ETS, store_state: store_state} = collection) do
+    store_result = ETS.close(store_state)
+    close_result(close_index(collection), store_result)
+  end
+
   def close(%__MODULE__{} = collection) do
     index_result = close_index(collection)
     store_result = close_store(collection.store_mod, collection.store_state)
@@ -419,10 +445,22 @@ defmodule Vettore.Collection do
   defp rebuild_index(%__MODULE__{} = collection) do
     with {:ok, embeddings} <- collection.store_mod.all(collection.store_state),
          :ok <- validate_snapshot_embeddings(collection, embeddings),
-         :ok <- collection.index_mod.put_many(collection, Enum.sort_by(embeddings, & &1.id)) do
+         {:ok, context} <- snapshot_index_context(collection),
+         :ok <- collection.index_mod.put_many(context, Enum.sort_by(embeddings, & &1.id)) do
       {:ok, collection}
     end
   end
+
+  defp snapshot_index_context(%__MODULE__{store_mod: ETS} = collection) do
+    revision = ETS.revision()
+
+    with :ok <- ETS.revise_snapshot(collection.store_state, revision),
+         do: {:ok, versioned(collection, revision)}
+  end
+
+  defp snapshot_index_context(collection), do: {:ok, collection}
+
+  defp versioned(%__MODULE__{} = collection, revision), do: %{collection | revision: revision}
 
   @spec configure_store(t()) :: :ok | {:error, term()}
   defp configure_store(%__MODULE__{} = collection) do
@@ -460,11 +498,14 @@ defmodule Vettore.Collection do
 
   @spec put_prepared(t(), Embedding.t()) :: :ok | {:error, term()}
   defp put_prepared(%__MODULE__{store_mod: ETS} = collection, embedding) do
+    revision = ETS.revision()
+
     ETS.put_indexed(
       collection.store_state,
       embedding,
-      fn -> collection.index_mod.put(collection, embedding) end,
-      fn -> collection.index_mod.delete(collection, embedding.id) end
+      fn -> collection.index_mod.put(versioned(collection, revision), embedding) end,
+      fn -> collection.index_mod.delete(collection, embedding.id) end,
+      revision
     )
   end
 
@@ -483,11 +524,14 @@ defmodule Vettore.Collection do
 
   @spec put_many_prepared(t(), [Embedding.t()]) :: :ok | {:error, term()}
   defp put_many_prepared(%__MODULE__{store_mod: ETS} = collection, embeddings) do
+    revision = ETS.revision()
+
     ETS.put_many_indexed(
       collection.store_state,
       embeddings,
-      fn -> collection.index_mod.put_many(collection, embeddings) end,
-      fn -> Enum.each(embeddings, &collection.index_mod.delete(collection, &1.id)) end
+      fn -> collection.index_mod.put_many(versioned(collection, revision), embeddings) end,
+      fn -> Enum.each(embeddings, &collection.index_mod.delete(collection, &1.id)) end,
+      revision
     )
   end
 
@@ -610,11 +654,13 @@ defmodule Vettore.Collection do
   @spec hybrid_store_snapshot(t(), [hybrid_generator()]) ::
           {:ok, [Embedding.t()] | nil} | {:error, term()}
   defp hybrid_store_snapshot(collection, generators) do
+    snapshot_generators =
+      if projected_quantized?(collection), do: [:funnel], else: [:funnel, :quantized]
+
     needs_snapshot? =
       Enum.any?(generators, fn
-        name when name in [:funnel, :quantized] -> true
-        {name, _opts} when name in [:funnel, :quantized] -> true
-        _generator -> false
+        {name, _opts} -> name in snapshot_generators
+        name -> name in snapshot_generators
       end)
 
     if needs_snapshot?,
@@ -664,13 +710,15 @@ defmodule Vettore.Collection do
     end
   end
 
-  @spec quantized_candidates(t(), [float()], keyword(), pos_integer(), [Embedding.t()]) ::
+  @spec quantized_candidates(t(), [float()], keyword(), pos_integer(), [Embedding.t()] | nil) ::
           {:ok, [Embedding.t()]} | {:error, term()}
   defp quantized_candidates(collection, query, opts, limit, embeddings) do
     candidates = candidate_count(opts, limit)
 
     with :ok <- validate_generator_candidates(candidates) do
-      quantized_stage_embeddings(collection, embeddings, query, candidates)
+      if embeddings == nil,
+        do: quantized_stage_embeddings(collection, query, candidates),
+        else: quantized_stage_embeddings(collection, embeddings, query, candidates)
     end
   end
 
@@ -680,7 +728,7 @@ defmodule Vettore.Collection do
     candidate_limit = candidate_count(opts, limit)
 
     with :ok <- validate_generator_candidates(candidate_limit),
-         {:ok, results} <- collection.index_mod.search(collection, query, limit: candidate_limit) do
+         {:ok, results} <- search(collection, query, limit: candidate_limit) do
       fetch_result_embeddings(collection, results)
     end
   end
@@ -790,6 +838,22 @@ defmodule Vettore.Collection do
     end
   end
 
+  @spec projected_quantized?(t()) :: boolean()
+  defp projected_quantized?(collection),
+    do: collection.store_mod == ETS and collection.metric not in [:hamming, :jaccard]
+
+  @spec quantized_stage_embeddings(t(), [float()], pos_integer()) ::
+          {:ok, [Embedding.t()]} | {:error, term()}
+  defp quantized_stage_embeddings(collection, query, candidates) do
+    if projected_quantized?(collection) do
+      projected_quantized_candidates(collection, query, candidates)
+    else
+      with {:ok, embeddings} <- collection.store_mod.all(collection.store_state) do
+        quantized_stage_embeddings(collection, embeddings, query, candidates)
+      end
+    end
+  end
+
   @spec quantized_stage_embeddings(t(), [Embedding.t()], [float()], pos_integer()) ::
           {:ok, [Embedding.t()]} | {:error, term()}
   defp quantized_stage_embeddings(
@@ -809,6 +873,49 @@ defmodule Vettore.Collection do
     with {:ok, query_bits} <- compress_vector(query) do
       binary_candidate_embeddings(embeddings, query_bits, collection.dimensions, candidates)
     end
+  end
+
+  defp projected_quantized_candidates(collection, query, candidates) do
+    %{store_state: state, dimensions: dimensions} = collection
+
+    with {:ok, query_bits} <- compress_vector(query),
+         {:ok, rows} <- ETS.binary_rows(state),
+         {:ok, vectors} <- projected_binary_vectors(rows, state, dimensions),
+         {:ok, hits} <- Nifs.binary_top_k(vectors, query_bits, dimensions, candidates) do
+      revisions = Map.new(rows, fn {id, revision, _words} -> {id, revision} end)
+
+      collect_projected(hits, fn {id, _distance} ->
+        ETS.fetch_revision(state, id, Map.fetch!(revisions, id))
+      end)
+    end
+  end
+
+  defp projected_binary_vectors(rows, state, dimensions) do
+    collect_projected(rows, fn {id, revision, words} ->
+      with {:ok, words} <- projected_binary_vector(state, id, revision, words, dimensions) do
+        {:ok, {id, words}}
+      end
+    end)
+  end
+
+  defp projected_binary_vector(_state, _id, _revision, words, dimensions) when is_list(words) do
+    with :ok <- validate_binary_words(words, dimensions), do: {:ok, words}
+  end
+
+  defp projected_binary_vector(state, id, revision, _words, dimensions) do
+    with {:ok, embedding} <- ETS.fetch_revision(state, id, revision) do
+      binary_vector(embedding, dimensions)
+    end
+  end
+
+  defp collect_projected(entries, fun) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
+      case fun.(entry) do
+        {:ok, item} -> {:cont, {:ok, [item | acc]}}
+        {:error, :not_found} -> {:cont, {:ok, acc}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
   @spec binary_candidate_embeddings(
@@ -1312,7 +1419,7 @@ defmodule Vettore.Collection do
   @spec validate_snapshot_version(map()) :: :ok | {:error, :unsupported_snapshot_version}
   defp validate_snapshot_version(config) do
     case Map.get(config, :snapshot_version, 0) do
-      version when version in [0, @snapshot_version] -> :ok
+      version when version in [0, 1, @snapshot_version] -> :ok
       _version -> {:error, :unsupported_snapshot_version}
     end
   end

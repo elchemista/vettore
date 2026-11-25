@@ -117,9 +117,16 @@ impl PartialOrd for WorstFirst {
 #[derive(Clone)]
 struct Node {
     external_id: String,
+    revision: u64,
     vector: Vec<f32>,
     connections: Vec<Vec<usize>>,
     layer: usize,
+}
+
+impl Node {
+    fn eligible(&self, allowed: Option<&HashMap<String, u64>>) -> bool {
+        allowed.is_none_or(|allowed| allowed.get(&self.external_id) == Some(&self.revision))
+    }
 }
 
 pub struct HnswIndex {
@@ -152,6 +159,15 @@ impl HnswIndex {
 
     /// Inserts or replaces one external id in the graph.
     pub fn insert(&mut self, external_id: String, vector: Vec<f32>) -> Result<(), String> {
+        self.insert_versioned(external_id, 0, vector)
+    }
+
+    pub fn insert_versioned(
+        &mut self,
+        external_id: String,
+        revision: u64,
+        vector: Vec<f32>,
+    ) -> Result<(), String> {
         validate_vector(&vector, self.dimension)?;
 
         if self.external_to_internal.contains_key(&external_id) {
@@ -167,6 +183,7 @@ impl HnswIndex {
                 internal_id,
                 Node {
                     external_id: external_id.clone(),
+                    revision,
                     vector,
                     connections: vec![Vec::new(); node_level + 1],
                     layer: node_level,
@@ -190,7 +207,7 @@ impl HnswIndex {
 
         for layer in (0..=usize::min(node_level, top_layer)).rev() {
             let mut candidates =
-                self.search_layer(entry, &vector, layer, self.params.ef_construction)?;
+                self.search_layer(entry, &vector, layer, self.params.ef_construction, None)?;
             candidates = self.select_neighbors(
                 candidates,
                 if layer == 0 {
@@ -213,6 +230,7 @@ impl HnswIndex {
             internal_id,
             Node {
                 external_id: external_id.clone(),
+                revision,
                 vector,
                 connections: vec![Vec::new(); node_level + 1],
                 layer: node_level,
@@ -252,14 +270,26 @@ impl HnswIndex {
     /// Validates a whole batch before mutating the graph, then inserts it while
     /// holding a single resource lock at the NIF boundary.
     pub fn insert_many(&mut self, vectors: Vec<(String, Vec<f32>)>) -> Result<(), String> {
+        self.insert_many_versioned(
+            vectors
+                .into_iter()
+                .map(|(id, vector)| (id, 0, vector))
+                .collect(),
+        )
+    }
+
+    pub fn insert_many_versioned(
+        &mut self,
+        vectors: Vec<(String, u64, Vec<f32>)>,
+    ) -> Result<(), String> {
         let expected = self
             .dimension
-            .or_else(|| vectors.first().map(|(_, vector)| vector.len()));
-        for (_, vector) in &vectors {
+            .or_else(|| vectors.first().map(|(_, _, vector)| vector.len()));
+        for (_, _, vector) in &vectors {
             validate_vector(vector, expected)?;
         }
-        for (id, vector) in vectors {
-            self.insert(id, vector)?;
+        for (id, revision, vector) in vectors {
+            self.insert_versioned(id, revision, vector)?;
         }
         Ok(())
     }
@@ -373,10 +403,27 @@ impl HnswIndex {
 
     /// Searches the graph and returns external ids with raw metric values.
     pub fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>, String> {
+        Ok(self
+            .search_versioned(query, limit, None)?
+            .into_iter()
+            .map(|(id, _, raw)| (id, raw))
+            .collect())
+    }
+
+    pub fn search_versioned(
+        &self,
+        query: &[f32],
+        limit: usize,
+        allowed: Option<&HashMap<String, u64>>,
+    ) -> Result<Vec<(String, u64, f32)>, String> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         validate_vector(query, self.dimension)?;
+
+        if allowed.is_some_and(HashMap::is_empty) {
+            return Ok(Vec::new());
+        }
 
         let Some(mut entry) = self.entry else {
             return Ok(Vec::new());
@@ -387,8 +434,9 @@ impl HnswIndex {
             entry = self.greedy_closest(entry, query, layer)?.0;
         }
 
-        let mut best =
-            self.search_layer(entry, query, 0, usize::max(self.params.ef_search, limit))?;
+        let ef = self.params.ef_search.max(limit);
+        let ef = allowed.map_or(ef, |allowed| ef.min(allowed.len()));
+        let mut best = self.search_layer(entry, query, 0, ef, allowed)?;
         best.sort_by(|a, b| {
             let left_id = self
                 .nodes
@@ -411,7 +459,7 @@ impl HnswIndex {
                 continue;
             };
             match crate::distances::compute(self.metric, query, &node.vector) {
-                Ok(raw) => hits.push((node.external_id.clone(), raw)),
+                Ok(raw) => hits.push((node.external_id.clone(), node.revision, raw)),
                 Err(reason) if crate::distances::is_metric_overflow(&reason) => continue,
                 Err(reason) => return Err(reason),
             }
@@ -465,18 +513,21 @@ impl HnswIndex {
         query: &[f32],
         layer: usize,
         ef: usize,
+        allowed: Option<&HashMap<String, u64>>,
     ) -> Result<Vec<ScoredNode>, String> {
-        if !self.nodes.contains_key(&entry) {
+        let Some(entry_node) = self.nodes.get(&entry) else {
             return Ok(Vec::new());
-        }
+        };
 
         let mut visited = HashSet::new();
         let mut candidates = BinaryHeap::new();
         let mut results = BinaryHeap::new();
-        let dist = self.rank_distance(&node(&self.nodes, entry)?.vector, query)?;
+        let dist = self.rank_distance(&entry_node.vector, query)?;
 
         candidates.push(ClosestFirst(ScoredNode { id: entry, dist }));
-        results.push(WorstFirst(ScoredNode { id: entry, dist }));
+        if entry_node.eligible(allowed) {
+            results.push(WorstFirst(ScoredNode { id: entry, dist }));
+        }
         visited.insert(entry);
 
         while let Some(current) = candidates.pop() {
@@ -511,10 +562,13 @@ impl HnswIndex {
                         id: *neighbor_id,
                         dist,
                     };
+                    // Excluded nodes can still lead to eligible neighbors.
                     candidates.push(ClosestFirst(candidate.clone()));
-                    results.push(WorstFirst(candidate));
-                    if results.len() > ef {
-                        results.pop();
+                    if neighbor.eligible(allowed) {
+                        results.push(WorstFirst(candidate));
+                        if results.len() > ef {
+                            results.pop();
+                        }
                     }
                 }
             }
@@ -854,6 +908,58 @@ mod tests {
     }
 
     #[test]
+    fn filtered_search_traverses_excluded_nodes_and_rejects_stale_revisions() {
+        let mut index = HnswIndex::new(
+            Metric::L2,
+            HnswParams {
+                ef_search: 1,
+                ..params()
+            },
+        )
+        .unwrap();
+        index
+            .insert_many_versioned(vec![
+                ("entry".into(), 1, vec![0.0]),
+                ("bridge".into(), 2, vec![1.0]),
+                ("match".into(), 3, vec![2.0]),
+            ])
+            .unwrap();
+
+        let entry = index.external_to_internal["entry"];
+        let bridge = index.external_to_internal["bridge"];
+        let target = index.external_to_internal["match"];
+        index.entry = Some(entry);
+        index.replace_connections(entry, 0, vec![bridge]);
+        index.replace_connections(bridge, 0, vec![target]);
+
+        let allowed = HashMap::from([("entry".into(), 0), ("match".into(), 3)]);
+        assert_eq!(
+            index.search_versioned(&[0.0], 1, Some(&allowed)),
+            Ok(vec![("match".into(), 3, 2.0)])
+        );
+        assert_eq!(
+            index.search_versioned(&[0.0], 1, Some(&HashMap::new())),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn replacing_an_id_keeps_metric_and_revision_together() {
+        let mut index = HnswIndex::new(Metric::L2, params()).unwrap();
+        index.insert_versioned("same".into(), 1, vec![2.0]).unwrap();
+        assert!(index.insert_versioned("same".into(), 2, vec![]).is_err());
+        assert_eq!(
+            index.search_versioned(&[2.0], 1, None),
+            Ok(vec![("same".into(), 1, 0.0)])
+        );
+        index.insert_versioned("same".into(), 2, vec![3.0]).unwrap();
+        assert_eq!(
+            index.search_versioned(&[2.0], 1, None),
+            Ok(vec![("same".into(), 2, 1.0)])
+        );
+    }
+
+    #[test]
     fn batch_validation_is_atomic_and_replace_delete_work() {
         let mut index = HnswIndex::new(Metric::InnerProduct, params()).unwrap();
         index.insert("a".into(), vec![1.0, 0.0]).unwrap();
@@ -897,19 +1003,72 @@ mod tests {
         let empty = HnswIndex::new(Metric::L2, params()).unwrap();
         assert_eq!(empty.search(&[1.0], 10), Ok(vec![]));
         assert!(empty.search(&[], 10).is_err());
-        assert!(empty.search_layer(999, &[1.0], 0, 10).unwrap().is_empty());
+        assert!(empty
+            .search_layer(999, &[1.0], 0, 10, None)
+            .unwrap()
+            .is_empty());
 
         let mut index = HnswIndex::new(Metric::L2, params()).unwrap();
         index.insert("a".into(), vec![1.0]).unwrap();
         let entry = index.entry.unwrap();
         assert_eq!(index.prune(999, 0), Ok(()));
         assert_eq!(index.prune(entry, 999), Ok(()));
+        assert_eq!(index.greedy_closest(entry, &[1.0], 999), Ok((entry, 0.0)));
+        assert_eq!(
+            index
+                .search_layer(entry, &[1.0], 999, 10, None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        index.external_to_internal.insert("dangling".into(), 999);
+        index.delete("dangling");
+        assert!(!index.external_to_internal.contains_key("dangling"));
 
         index.nodes.get_mut(&entry).unwrap().connections[0].push(999);
         assert_eq!(index.greedy_closest(entry, &[1.0], 0).unwrap().0, entry);
-        assert_eq!(index.search_layer(entry, &[1.0], 0, 10).unwrap().len(), 1);
+        assert_eq!(
+            index
+                .search_layer(entry, &[1.0], 0, 10, None)
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(index.prune(entry, 0), Ok(()));
         assert!(!index.nodes[&entry].connections[0].contains(&999));
+
+        index.nodes.get_mut(&entry).unwrap().vector.push(2.0);
+        assert_eq!(index.search(&[1.0], 1), Err("dimension mismatch".into()));
+    }
+
+    #[test]
+    fn neighbor_selection_skips_missing_candidates_and_anchors() {
+        let mut index = HnswIndex::new(Metric::L2, params()).unwrap();
+        index.insert("present".into(), vec![1.0]).unwrap();
+        let present = index.entry.unwrap();
+        let missing = ScoredNode {
+            id: usize::MAX,
+            dist: 0.0,
+        };
+        let existing = ScoredNode {
+            id: present,
+            dist: 1.0,
+        };
+
+        let selected = index
+            .select_neighbors(vec![missing.clone(), existing.clone()], 2)
+            .unwrap();
+        assert_eq!(
+            selected.iter().map(|node| node.id).collect::<Vec<_>>(),
+            [present]
+        );
+
+        // A dangling required anchor cannot provide a distance for diversity.
+        let selected = index
+            .select_neighbors_retaining(vec![missing.clone(), existing], 2, Some(missing.id))
+            .unwrap();
+        assert!(selected.iter().any(|node| node.id == present));
     }
 
     #[test]

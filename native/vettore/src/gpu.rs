@@ -854,7 +854,7 @@ pub(crate) fn resident_matrix(
     if !matches!(metric, Metric::Hamming | Metric::Jaccard)
         && vectors
             .chunks_exact(dimensions)
-            .any(unsafe_gpu_dynamic_range)
+            .any(|row| unsafe_gpu_dynamic_range(row, metric))
     {
         return Err("gpu numeric range unsupported".to_string());
     }
@@ -940,7 +940,9 @@ pub(crate) fn vector_top_k(
 
 pub(crate) fn validate_resident_query(query: &[f32], metric: Metric) -> Result<(), String> {
     distances::validate_finite_vector(query)?;
-    if !matches!(metric, Metric::Hamming | Metric::Jaccard) && unsafe_gpu_dynamic_range(query) {
+    if !matches!(metric, Metric::Hamming | Metric::Jaccard)
+        && unsafe_gpu_dynamic_range(query, metric)
+    {
         return Err("gpu numeric range unsupported".to_string());
     }
 

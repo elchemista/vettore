@@ -340,6 +340,21 @@ defmodule VettoreGpuComputeTest do
       end
     end
 
+    test "wide GPU pooling reports a tagged dispatch error or returns the full row" do
+      dimensions = 65_536
+      matrix = :binary.copy(<<1.0::float-little-32>>, dimensions)
+
+      if Compute.gpu_detected?() do
+        case Vector.mean_pool_f32(matrix, dimensions, [0], gpu: true, gpu_fallback: :error) do
+          {:error, :gpu_failed} -> :ok
+          result -> assert {:ok, ^matrix} = result
+        end
+      end
+
+      assert {:ok, ^matrix} =
+               Vector.mean_pool_f32(matrix, dimensions, [0], gpu: true, gpu_fallback: :cpu)
+    end
+
     test "GPU scaling preserves tiny vectors, large cosine inputs, and stable z-score" do
       if Compute.gpu_detected?() do
         opts = [gpu: true, gpu_fallback: :error]

@@ -14,7 +14,7 @@ use crate::distances::Metric;
 
 pub struct FlatIndex {
     metric: Metric,
-    ids: Vec<String>,
+    rows: Vec<(String, u64)>,
     vectors: Vec<f32>,
     positions: HashMap<String, usize>,
     dimension: Option<usize>,
@@ -24,6 +24,7 @@ pub struct FlatIndex {
 #[derive(Debug)]
 struct FlatHit<'a> {
     id: &'a str,
+    revision: u64,
     raw: f32,
     rank: f32,
 }
@@ -55,7 +56,7 @@ impl FlatIndex {
     pub fn new(metric: Metric) -> Self {
         Self {
             metric,
-            ids: Vec::new(),
+            rows: Vec::new(),
             vectors: Vec::new(),
             positions: HashMap::new(),
             dimension: None,
@@ -64,23 +65,46 @@ impl FlatIndex {
     }
 
     /// Inserts or replaces one vector by external id.
+    #[cfg(test)]
     pub fn insert(&mut self, id: String, vector: Vec<f32>) -> Result<(), String> {
+        self.insert_versioned(id, 0, vector)
+    }
+
+    pub fn insert_versioned(
+        &mut self,
+        id: String,
+        revision: u64,
+        vector: Vec<f32>,
+    ) -> Result<(), String> {
         self.validate_vector(&vector)?;
         if self.dimension.is_none() {
             self.dimension = Some(vector.len());
         }
-        self.insert_validated(id, vector);
+        self.insert_validated(id, revision, vector);
         self.bump_generation();
         Ok(())
     }
 
     /// Inserts or replaces a batch of vectors.
+    #[cfg(test)]
     pub fn insert_many(&mut self, vectors: Vec<(String, Vec<f32>)>) -> Result<(), String> {
+        self.insert_many_versioned(
+            vectors
+                .into_iter()
+                .map(|(id, vector)| (id, 0, vector))
+                .collect(),
+        )
+    }
+
+    pub fn insert_many_versioned(
+        &mut self,
+        vectors: Vec<(String, u64, Vec<f32>)>,
+    ) -> Result<(), String> {
         let expected = self
             .dimension
-            .or_else(|| vectors.first().map(|(_, vector)| vector.len()));
+            .or_else(|| vectors.first().map(|(_, _, vector)| vector.len()));
 
-        for (_, vector) in &vectors {
+        for (_, _, vector) in &vectors {
             validate_vector(vector, expected)?;
         }
 
@@ -88,8 +112,8 @@ impl FlatIndex {
         if self.dimension.is_none() {
             self.dimension = expected;
         }
-        for (id, vector) in vectors {
-            self.insert_validated(id, vector);
+        for (id, revision, vector) in vectors {
+            self.insert_validated(id, revision, vector);
         }
         if changed {
             self.bump_generation();
@@ -105,17 +129,18 @@ impl FlatIndex {
         let dimension = self
             .dimension
             .expect("non-empty flat index has a dimension");
-        let last = self.ids.len() - 1;
+        let last = self.rows.len() - 1;
 
-        self.ids.swap_remove(position);
+        self.rows.swap_remove(position);
         if position != last {
             let source = last * dimension..(last + 1) * dimension;
             self.vectors.copy_within(source, position * dimension);
-            self.positions.insert(self.ids[position].clone(), position);
+            self.positions
+                .insert(self.rows[position].0.clone(), position);
         }
         self.vectors.truncate(last * dimension);
 
-        if self.ids.is_empty() {
+        if self.rows.is_empty() {
             self.dimension = None;
         }
         self.bump_generation();
@@ -123,18 +148,30 @@ impl FlatIndex {
 
     /// Releases all mirrored vectors while keeping the resource reusable.
     pub fn clear(&mut self) {
-        if self.ids.is_empty() {
-            return;
+        if !self.rows.is_empty() {
+            self.bump_generation();
         }
-        self.ids.clear();
-        self.vectors.clear();
-        self.positions.clear();
+        self.rows = Vec::new();
+        self.vectors = Vec::new();
+        self.positions = HashMap::new();
         self.dimension = None;
-        self.bump_generation();
     }
 
     /// Searches every stored vector and returns ids with raw metric values.
     pub fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>, String> {
+        Ok(self
+            .search_versioned(query, limit, None)?
+            .into_iter()
+            .map(|(id, _, raw)| (id, raw))
+            .collect())
+    }
+
+    pub fn search_versioned(
+        &self,
+        query: &[f32],
+        limit: usize,
+        allowed: Option<&HashMap<String, u64>>,
+    ) -> Result<Vec<(String, u64, f32)>, String> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -142,15 +179,23 @@ impl FlatIndex {
         validate_vector(query, self.dimension)?;
 
         let dimension = self.dimension.unwrap_or(query.len());
-        let mut hits = BinaryHeap::with_capacity(usize::min(limit, self.ids.len()));
+        let count = allowed.map_or(self.rows.len(), |allowed| {
+            allowed.len().min(self.rows.len())
+        });
+        let mut hits = BinaryHeap::with_capacity(limit.min(count));
         for (row, vector) in self.vectors.chunks_exact(dimension).enumerate() {
+            let (id, revision) = &self.rows[row];
+            if allowed.is_some_and(|allowed| allowed.get(id) != Some(revision)) {
+                continue;
+            }
             let raw = match crate::distances::compute(self.metric, query, vector) {
                 Ok(raw) => raw,
                 Err(reason) if crate::distances::is_metric_overflow(&reason) => continue,
                 Err(reason) => return Err(reason),
             };
             let hit = FlatHit {
-                id: &self.ids[row],
+                id,
+                revision: *revision,
                 raw,
                 rank: crate::distances::rank_value(self.metric, raw),
             };
@@ -168,7 +213,7 @@ impl FlatIndex {
 
         Ok(hits
             .into_iter()
-            .map(|hit| (hit.id.to_owned(), hit.raw))
+            .map(|hit| (hit.id.to_owned(), hit.revision, hit.raw))
             .collect())
     }
 
@@ -176,19 +221,20 @@ impl FlatIndex {
         validate_vector(vector, self.dimension)
     }
 
-    fn insert_validated(&mut self, id: String, vector: Vec<f32>) {
+    fn insert_validated(&mut self, id: String, revision: u64, vector: Vec<f32>) {
         let dimension = self
             .dimension
             .expect("validated flat vector has a dimension");
         if let Some(&position) = self.positions.get(&id) {
             let start = position * dimension;
             self.vectors[start..start + dimension].copy_from_slice(&vector);
+            self.rows[position].1 = revision;
             return;
         }
 
-        let position = self.ids.len();
+        let position = self.rows.len();
         self.positions.insert(id.clone(), position);
-        self.ids.push(id);
+        self.rows.push((id, revision));
         self.vectors.extend(vector);
     }
 
@@ -197,7 +243,7 @@ impl FlatIndex {
     }
 
     pub fn workload(&self) -> (usize, usize) {
-        (self.ids.len(), self.dimension.unwrap_or(0))
+        (self.rows.len(), self.dimension.unwrap_or(0))
     }
 
     fn gpu_snapshot(&self) -> FlatSnapshot {
@@ -206,7 +252,7 @@ impl FlatIndex {
             generation: self.generation,
             metric: self.metric,
             dimension,
-            ids: self.ids.clone(),
+            rows: self.rows.clone(),
             vectors: self.vectors.clone(),
         }
     }
@@ -216,16 +262,16 @@ struct FlatSnapshot {
     generation: u64,
     metric: Metric,
     dimension: usize,
-    ids: Vec<String>,
+    rows: Vec<(String, u64)>,
     vectors: Vec<f32>,
 }
 
 impl FlatSnapshot {
     fn sort_by_id(mut self) -> Self {
-        let rows = self.ids.len();
+        let rows = self.rows.len();
         let mut desired_old_at_position = (0..rows).collect::<Vec<_>>();
         desired_old_at_position
-            .sort_unstable_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
+            .sort_unstable_by(|left, right| self.rows[*left].0.cmp(&self.rows[*right].0));
 
         let mut old_at_position = (0..rows).collect::<Vec<_>>();
         let mut position_of_old = (0..rows).collect::<Vec<_>>();
@@ -237,7 +283,7 @@ impl FlatSnapshot {
             }
 
             let displaced_old = old_at_position[new_position];
-            self.ids.swap(new_position, current_position);
+            self.rows.swap(new_position, current_position);
             swap_matrix_rows(
                 &mut self.vectors,
                 self.dimension,
@@ -270,7 +316,7 @@ fn swap_matrix_rows(matrix: &mut [f32], dimension: usize, left: usize, right: us
 
 struct FlatGpuCache {
     generation: u64,
-    ids: Vec<String>,
+    rows: Vec<(String, u64)>,
     matrix: crate::gpu::ResidentMatrix,
 }
 
@@ -298,16 +344,37 @@ impl FlatResource {
     }
 
     pub fn insert(&self, id: String, vector: Vec<f32>) -> Result<(), String> {
+        self.insert_versioned(id, 0, vector)
+    }
+
+    pub fn insert_versioned(
+        &self,
+        id: String,
+        revision: u64,
+        vector: Vec<f32>,
+    ) -> Result<(), String> {
         let mut index = self.write_index()?;
-        index.insert(id, vector)?;
+        index.insert_versioned(id, revision, vector)?;
         self.clear_gpu_cache();
         Ok(())
     }
 
     pub fn insert_many(&self, vectors: Vec<(String, Vec<f32>)>) -> Result<(), String> {
+        self.insert_many_versioned(
+            vectors
+                .into_iter()
+                .map(|(id, vector)| (id, 0, vector))
+                .collect(),
+        )
+    }
+
+    pub fn insert_many_versioned(
+        &self,
+        vectors: Vec<(String, u64, Vec<f32>)>,
+    ) -> Result<(), String> {
         let changed = !vectors.is_empty();
         let mut index = self.write_index()?;
-        index.insert_many(vectors)?;
+        index.insert_many_versioned(vectors)?;
         if changed {
             self.clear_gpu_cache();
         }
@@ -354,9 +421,35 @@ impl FlatResource {
         self.read_index()?.search(query, limit)
     }
 
+    pub fn search_versioned(
+        &self,
+        query: &[f32],
+        limit: usize,
+        allowed: Option<&HashMap<String, u64>>,
+    ) -> Result<Vec<(String, u64, f32)>, String> {
+        self.read_index()?.search_versioned(query, limit, allowed)
+    }
+
     pub fn search_gpu(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>, String> {
+        Ok(self
+            .search_gpu_versioned(query, limit, None)?
+            .into_iter()
+            .map(|(id, _, raw)| (id, raw))
+            .collect())
+    }
+
+    pub fn search_gpu_versioned(
+        &self,
+        query: &[f32],
+        limit: usize,
+        allowed: Option<&HashMap<String, u64>>,
+    ) -> Result<Vec<(String, u64, f32)>, String> {
         if limit == 0 {
             return Ok(Vec::new());
+        }
+
+        if let Some(allowed) = allowed {
+            return self.search_gpu_subset(query, limit, allowed);
         }
 
         let Some(generation) = self.validate_gpu_search(query, limit)? else {
@@ -373,17 +466,56 @@ impl FlatResource {
         let hits = cache.matrix.search(query, limit)?;
         Ok(hits
             .into_iter()
-            .map(|(row, raw)| (cache.ids[row].clone(), raw))
+            .map(|(row, raw)| {
+                let (id, revision) = &cache.rows[row];
+                (id.clone(), *revision, raw)
+            })
             .collect())
+    }
+
+    fn search_gpu_subset(
+        &self,
+        query: &[f32],
+        limit: usize,
+        allowed: &HashMap<String, u64>,
+    ) -> Result<Vec<(String, u64, f32)>, String> {
+        let index = self.read_index()?;
+        index.validate_vector(query)?;
+        let dimensions = query.len();
+        let vectors = allowed
+            .iter()
+            .filter_map(|(id, revision)| {
+                let row = *index.positions.get(id)?;
+                (index.rows[row].1 == *revision).then(|| {
+                    let start = row * dimensions;
+                    (
+                        id.clone(),
+                        index.vectors[start..start + dimensions].to_vec(),
+                    )
+                })
+            })
+            .collect();
+        let metric = index.metric;
+        drop(index);
+
+        Ok(
+            crate::gpu::vector_top_k(vectors, query, metric, dimensions, limit)?
+                .into_iter()
+                .map(|(id, raw)| {
+                    let revision = allowed[&id];
+                    (id, revision, raw)
+                })
+                .collect(),
+        )
     }
 
     fn validate_gpu_search(&self, query: &[f32], limit: usize) -> Result<Option<u64>, String> {
         let index = self.read_index()?;
         validate_vector(query, index.dimension)?;
-        if index.ids.is_empty() {
+        if index.rows.is_empty() {
             return Ok(None);
         }
-        if usize::min(limit, index.ids.len()) > crate::gpu::MAX_RESIDENT_TOP_K as usize {
+        if usize::min(limit, index.rows.len()) > crate::gpu::MAX_RESIDENT_TOP_K as usize {
             return Err(format!(
                 "gpu flat top-k supports at most {} results",
                 crate::gpu::MAX_RESIDENT_TOP_K
@@ -441,10 +573,10 @@ impl FlatResource {
         let snapshot = {
             let index = self.read_index()?;
             validate_vector(query, index.dimension)?;
-            if index.ids.is_empty() {
+            if index.rows.is_empty() {
                 return Ok(None);
             }
-            if usize::min(limit, index.ids.len()) > crate::gpu::MAX_RESIDENT_TOP_K as usize {
+            if usize::min(limit, index.rows.len()) > crate::gpu::MAX_RESIDENT_TOP_K as usize {
                 return Err(format!(
                     "gpu flat top-k supports at most {} results",
                     crate::gpu::MAX_RESIDENT_TOP_K
@@ -456,7 +588,7 @@ impl FlatResource {
         let snapshot = snapshot.sort_by_id();
         let result = crate::gpu::resident_matrix(
             snapshot.vectors,
-            snapshot.ids.len(),
+            snapshot.rows.len(),
             snapshot.dimension,
             snapshot.metric,
         );
@@ -465,7 +597,7 @@ impl FlatResource {
             Ok(matrix) => {
                 let built = Arc::new(FlatGpuCache {
                     generation: snapshot.generation,
-                    ids: snapshot.ids,
+                    rows: snapshot.rows,
                     matrix,
                 });
                 self.gpu_builds.fetch_add(1, AtomicOrdering::Relaxed);
@@ -551,7 +683,7 @@ mod tests {
         resource.insert("a".into(), vec![1.0]).unwrap();
         let panic = std::panic::catch_unwind(|| {
             let mut index = resource.index.write().unwrap();
-            index.ids.clear(); // Simulate an interrupted multi-field mutation.
+            index.rows.clear(); // Simulate an interrupted multi-field mutation.
             panic!("interrupted writer");
         });
         assert!(panic.is_err());
@@ -591,22 +723,56 @@ mod tests {
             return;
         }
         let resource = FlatResource::new(Metric::L2);
-        resource.insert("old".into(), vec![1.0]).unwrap();
+        resource
+            .insert_versioned("old".into(), 1, vec![1.0])
+            .unwrap();
         let snapshot = resource.build_gpu_cache(&[0.0], 1).unwrap().unwrap();
-        resource.delete("old").unwrap();
-        resource.insert("new".into(), vec![2.0]).unwrap();
+        resource
+            .insert_versioned("old".into(), 2, vec![2.0])
+            .unwrap();
         // In-flight searches own one immutable generation, even after a writer.
-        assert_eq!(snapshot.ids, ["old"]);
+        assert_eq!(snapshot.rows, [("old".into(), 1)]);
         assert_eq!(snapshot.matrix.search(&[0.0], 1).unwrap(), [(0, 1.0)]);
         resource
             .publish_gpu_state(snapshot.generation, FlatGpuCacheState::Ready(snapshot))
             .unwrap();
         assert_eq!(resource.gpu_cache_info(), Ok((1, false)));
         assert_eq!(
-            resource.search_gpu(&[0.0], 1),
-            Ok(vec![("new".into(), 2.0)])
+            resource.search_gpu_versioned(&[0.0], 1, None),
+            Ok(vec![("old".into(), 2, 2.0)])
         );
         assert_eq!(resource.gpu_cache_info(), Ok((2, true)));
+    }
+
+    #[test]
+    fn filtered_flat_ranks_only_admitted_revisions() {
+        let resource = FlatResource::new(Metric::L2);
+        resource
+            .insert_many_versioned(vec![
+                ("one".into(), 1, vec![0.0]),
+                ("two".into(), 2, vec![1.0]),
+                ("three".into(), 3, vec![2.0]),
+            ])
+            .unwrap();
+        let allowed = HashMap::from([
+            ("one".into(), 0),
+            ("two".into(), 2),
+            ("three".into(), 3),
+            ("missing".into(), 1),
+        ]);
+        let expected = Ok(vec![("two".into(), 2, 1.0)]);
+        assert_eq!(
+            resource.search_versioned(&[0.0], 1, Some(&allowed)),
+            expected
+        );
+        if !crate::gpu::detected() {
+            assert_ne!(std::env::var("VETTORE_REQUIRE_GPU").as_deref(), Ok("1"));
+            return;
+        }
+        assert_eq!(
+            resource.search_gpu_versioned(&[0.0], 1, Some(&allowed)),
+            expected
+        );
     }
 
     fn all_metrics() -> [Metric; 9] {
@@ -652,7 +818,7 @@ mod tests {
                 ("invalid".into(), vec![1.0]),
             ])
             .is_err());
-        assert_eq!(index.ids.len(), 1);
+        assert_eq!(index.rows.len(), 1);
         assert!(!index.positions.contains_key("valid"));
         assert!(index.insert("nan".into(), vec![f32::NAN, 0.0]).is_err());
     }
@@ -727,9 +893,23 @@ mod tests {
         assert_eq!(index.dimension, Some(2));
         assert_eq!(index.search(&[1.0, 2.0], usize::MAX).unwrap().len(), 1);
         index.clear();
-        assert!(index.vectors.is_empty());
-        assert!(index.ids.is_empty());
+        assert_eq!(index.vectors.capacity(), 0);
+        assert_eq!(index.rows.capacity(), 0);
+        assert_eq!(index.positions.capacity(), 0);
         assert_eq!(index.dimension, None);
+    }
+
+    #[test]
+    fn clear_releases_capacities_after_the_last_record_was_deleted() {
+        let mut index = FlatIndex::new(Metric::L2);
+        index.insert("one".into(), vec![1.0]).unwrap();
+        index.delete("one");
+        assert!(index.vectors.capacity() > 0);
+
+        index.clear();
+        assert_eq!(index.vectors.capacity(), 0);
+        assert_eq!(index.rows.capacity(), 0);
+        assert_eq!(index.positions.capacity(), 0);
     }
 
     #[test]
@@ -741,7 +921,7 @@ mod tests {
                 ("same".into(), vec![1.0e20]),
             ])
             .unwrap();
-        assert_eq!(index.ids.len(), 1);
+        assert_eq!(index.rows.len(), 1);
         assert_eq!(index.search(&[0.0], 1).unwrap()[0].0, "same");
         assert!(index.search(&[0.0], 1).unwrap()[0].1.is_finite());
     }
@@ -762,16 +942,19 @@ mod tests {
     fn heap_hit_equality_and_partial_order_include_the_external_id() {
         let first = FlatHit {
             id: "a",
+            revision: 1,
             raw: 1.0,
             rank: 1.0,
         };
         let equal = FlatHit {
             id: "a",
+            revision: 2,
             raw: 99.0,
             rank: 1.0,
         };
         let other_id = FlatHit {
             id: "b",
+            revision: 1,
             raw: 1.0,
             rank: 1.0,
         };
@@ -797,12 +980,12 @@ mod tests {
         index.delete("c");
         assert_eq!(index.workload(), (2, 2));
         assert_eq!(index.vectors.len(), 4);
-        for (position, id) in index.ids.iter().enumerate() {
+        for (position, (id, _)) in index.rows.iter().enumerate() {
             assert_eq!(index.positions[id], position);
         }
 
         let snapshot = index.gpu_snapshot().sort_by_id();
-        assert_eq!(snapshot.ids, ["a", "b"]);
+        assert_eq!(snapshot.rows, [("a".into(), 0), ("b".into(), 0)]);
         assert_eq!(snapshot.vectors, [1.5, 15.0, 2.0, 20.0]);
         assert_eq!(snapshot.generation, index.generation);
 
@@ -845,6 +1028,33 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             FlatGpuCacheState::Empty
         ));
+    }
+
+    #[test]
+    fn interrupted_cache_build_does_not_poison_the_flat_resource() {
+        let resource = FlatResource::new(Metric::L2);
+        let interrupted = std::panic::catch_unwind(|| {
+            let _build = resource.gpu_build.lock().unwrap();
+            let _cache = resource.gpu_cache.lock().unwrap();
+            panic!("interrupted GPU cache build");
+        });
+        assert!(interrupted.is_err());
+
+        assert!(resource.build_gpu_cache(&[0.0], 1).unwrap().is_none());
+        let unsafe_row = vec![1.0e25, 1.0];
+        resource.insert("row".into(), unsafe_row.clone()).unwrap();
+        let error = "gpu numeric range unsupported".to_string();
+        assert_eq!(resource.search_gpu(&[0.0, 0.0], 1), Err(error.clone()));
+        assert_eq!(resource.build_gpu_cache(&[0.0, 0.0], 1).err(), Some(error));
+        assert_eq!(resource.gpu_cache_info(), Ok((0, false)));
+        assert_eq!(
+            resource.search(&unsafe_row, 1),
+            Ok(vec![("row".into(), 0.0)])
+        );
+
+        resource.clear().unwrap();
+        assert_eq!(resource.search_gpu(&[0.0, 0.0], 1), Ok(vec![]));
+        assert_eq!(resource.gpu_cache_info(), Ok((0, false)));
     }
 
     #[test]
