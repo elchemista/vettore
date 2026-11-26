@@ -152,7 +152,7 @@ Merge the release branch only after these checks pass.
 mix hex.publish
 ```
 
-In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3.6"}` without
+In a fresh temporary Mix project, depend on `{:vettore, "~> 0.3.7"}` without
 Rust installed. Create flat and HNSW collections, insert records with metadata,
 search them, snapshot/reload them, and call `Vettore.close/1`. Finally, mark the
 changelog entry with the release date if it was not already finalized in the

@@ -5,6 +5,27 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.3.7]
+
+### Added
+
+- Add atomic `Vettore.upsert/2` for ETS collections.
+- Accept exact-match metadata filters in Flat and HNSW search.
+
+### Fixed
+
+- Keep scores and metadata tied to the same record revision, including after
+  concurrent writes. Rebuild revisions when loading existing snapshots.
+- Preserve GPU L2 and L2Squared distances across extreme coordinate ranges and
+  apply the configured CPU fallback when device ranking could lose precision.
+- Validate adaptive search limits before calculating the candidate count.
+- Release Flat index allocations on close, including after the last deletion.
+
+### Performance
+
+- Read only IDs, revisions, and packed sign bits during quantized candidate
+  selection. Retrieve full ETS records for reranking the selected candidates.
+
 ## [0.3.6] - 2026-10-18
 
 ### Fixed
